@@ -1,0 +1,33 @@
+# ============================================================
+# RelayMesh - Production Docker Compose Stack
+# ============================================================
+services:
+  relaymesh:
+    image: teacat99/relaymesh:latest
+    container_name: relaymesh
+    restart: unless-stopped
+    ports:
+      # 如配合 Nginx/1Panel 等反向代理，可绑定到 127.0.0.1:18775；如直接暴露可使用 18775:18775
+      - "18775:18775"
+    environment:
+      - RELAYMESH_HOST=0.0.0.0
+      - RELAYMESH_PORT=18775
+      - RELAYMESH_HOST_NAME=relaymesh-hub
+      - RELAYMESH_DB_PATH=/app/data/relaymesh.db
+      - RELAYMESH_PROJECT_ID=default
+      # 生产环境安全认证（如需密码保护，请取消注释并设置强密码）
+      # - RELAYMESH_WEB_USERNAME=admin
+      # - RELAYMESH_WEB_PASSWORD=YourStrongWebPassword2026!
+      # - RELAYMESH_JWT_SECRET=YourRandomJWTSecretKeyAtLeast32CharsLong!
+      # - RELAYMESH_MCP_TOKEN=rmk_prod_secret_token_8888
+      - RELAYMESH_ALLOW_NON_LOOPBACK=true
+      - RELAYMESH_WAIT_AFTER_MINUTES=5
+      - RELAYMESH_MAX_NO_FEEDBACK_CHECKS=24
+      - GIN_MODE=release
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18775/mcp"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

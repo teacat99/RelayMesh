@@ -1,0 +1,26 @@
+# OS / Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Go build outputs
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Data & SQLite Runtime
+data/
+*.db
+*.db-shm
+*.db-wal
+certs/
+
+# Frontend dependencies & caches
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.local

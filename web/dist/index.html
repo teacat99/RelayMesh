@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>RelayMesh · Agent Communication & Feedback Relay</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600&display=swap" rel="stylesheet">
+    <script>
+      (function() {
+        try {
+          var mode = localStorage.getItem('relaymesh.theme') || localStorage.getItem('portpass.theme') || 'auto';
+          var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var isDark = mode === 'dark' || (mode === 'auto' && prefersDark);
+          if (isDark) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-CaKqXpZf.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-vue-CjpsLhVW.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-misc-C3dvP_DW.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-ui-DZMlCDzL.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-FdlAoVd6.css">
+  </head>
+  <body class="bg-background text-foreground antialiased min-h-screen">
+    <div id="app"></div>
+  </body>
+</html>

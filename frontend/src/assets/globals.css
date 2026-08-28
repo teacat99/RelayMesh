@@ -1,0 +1,263 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+/*
+ * RelayMesh - Claude Monochrome Theme
+ * Clean, calm typography, generous whitespace, crisp monochrome accents.
+ */
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-status-active: #3b8259;
+  --color-status-pending: #d97706;
+  --color-status-expired: #78716c;
+  --color-status-revoked: #dc2626;
+  --color-status-failed: #dc2626;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 8px;
+  --radius-2xl: 8px;
+
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+  --shadow-float: 0 12px 32px rgba(0, 0, 0, 0.08), 0 4px 8px rgba(0, 0, 0, 0.04);
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #3f3f46;
+  --card: #ffffff;
+  --card-foreground: #3f3f46;
+  --popover: #ffffff;
+  --popover-foreground: #3f3f46;
+  --primary: #27272a;
+  --primary-foreground: #ffffff;
+  --secondary: #f4f4f5;
+  --secondary-foreground: #27272a;
+  --muted: #f4f4f6;
+  --muted-foreground: #71717a;
+  --accent: #e4e4e7;
+  --accent-foreground: #18181b;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: #e4e4e7;
+  --input: #e4e4e7;
+  --ring: #71717a;
+}
+
+.dark {
+  --background: #111113;
+  --foreground: #d4d4d8;
+  --card: #18181b;
+  --card-foreground: #d4d4d8;
+  --popover: #18181b;
+  --popover-foreground: #d4d4d8;
+  --primary: #e4e4e7;
+  --primary-foreground: #18181b;
+  --secondary: #27272a;
+  --secondary-foreground: #d4d4d8;
+  --muted: #1f1f23;
+  --muted-foreground: #8b8b94;
+  --accent: #27272a;
+  --accent-foreground: #e4e4e7;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #27272a;
+  --input: #27272a;
+  --ring: #a1a1aa;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html, body, #app {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+      'Helvetica Neue', Arial, 'PingFang SC', 'Hiragino Sans GB',
+      'Microsoft YaHei', sans-serif;
+    font-feature-settings: 'tnum' 1, 'cv11' 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body,
+  body *:not(.no-theme-transition) {
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease,
+      color 0.15s ease;
+  }
+  code, kbd, samp, pre {
+    font-family: 'Cascadia Mono', 'Cascadia Code', 'Noto Sans Mono', 'Noto Sans Mono CJK SC', 'Sarasa Mono SC', 'NSimSun', Consolas, 'Courier New', monospace;
+    font-feature-settings: 'tnum' 1, 'zero' 1;
+    font-variant-east-asian: full-width;
+  }
+}
+
+/* Custom scrollbars - Claude minimalistic style */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
+
+/* Toast Sonner 动态自适应定位：紧贴输入框与悬浮按键上方，严格与反馈窗口悬浮操作栏左对齐 */
+[data-sonner-toaster] {
+  bottom: calc(var(--input-dock-height, 140px) + var(--input-dock-floating-offset, 48px) + 8px) !important;
+  left: calc(var(--sidebar-current-width, 0px) + 0.75rem) !important;
+  right: auto !important;
+  z-index: 60 !important;
+  pointer-events: none;
+  width: auto !important;
+  max-width: calc(100vw - var(--sidebar-current-width, 0px) - 2rem) !important;
+}
+
+@media (min-width: 640px) {
+  [data-sonner-toaster] {
+    left: calc(var(--sidebar-current-width, 0px) + 1.5rem) !important;
+  }
+}
+
+[data-sonner-toaster] > * {
+  pointer-events: auto;
+}
+
+/* 强制单个 Toast 自适应宽度、单行排列与最小宽度 (容纳约8个汉字字符) */
+[data-sonner-toaster] [data-sonner-toast] {
+  width: auto !important;
+  min-width: 108px !important;
+  max-width: calc(100vw - var(--sidebar-current-width, 0px) - 3rem) !important;
+  white-space: nowrap !important;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  padding: 0.35rem 1.75rem 0.35rem 0.65rem !important;
+  box-sizing: border-box !important;
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-content] {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 0.35rem !important;
+  white-space: nowrap !important;
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-title] {
+  white-space: nowrap !important;
+  font-size: 11px !important;
+  line-height: 1.2 !important;
+  display: inline-block !important;
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-description] {
+  white-space: nowrap !important;
+  font-size: 10px !important;
+  line-height: 1.2 !important;
+  display: inline-block !important;
+}
+
+/* 关闭按钮紧贴右侧居中 */
+[data-sonner-toaster] [data-sonner-toast] [data-close-button] {
+  position: absolute !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+  right: 0.35rem !important;
+  left: auto !important;
+  width: 14px !important;
+  height: 14px !important;
+  border-radius: 2px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: transparent !important;
+  border: 1px solid var(--border) !important;
+  color: var(--muted-foreground) !important;
+  cursor: pointer !important;
+  transition: all 0.15s ease !important;
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-close-button]:hover {
+  color: var(--foreground) !important;
+  background: var(--muted) !important;
+}
+
+/* Sidebar PC Smooth Slide Collapse & Expand Animation */
+.sidebar-container {
+  transition: margin-left 300ms cubic-bezier(0.16, 1, 0.3, 1),
+              transform 300ms cubic-bezier(0.16, 1, 0.3, 1),
+              opacity 300ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 300ms cubic-bezier(0.16, 1, 0.3, 1) !important;
+  will-change: margin-left, transform, opacity;
+}
+
+@media (min-width: 768px) {
+  .sidebar-container {
+    width: 16rem !important;
+    margin-left: 0 !important;
+  }
+  .sidebar-container.is-collapsed {
+    margin-left: -16rem !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    border-color: transparent !important;
+  }
+}
+
+@media (min-width: 1024px) {
+  .sidebar-container {
+    width: 20rem !important;
+    margin-left: 0 !important;
+  }
+  .sidebar-container.is-collapsed {
+    margin-left: -20rem !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    border-color: transparent !important;
+  }
+}
+
+

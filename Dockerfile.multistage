@@ -1,0 +1,49 @@
+# ------------------------------------------------------------
+# Multi-stage build for CI/CD environments
+# ------------------------------------------------------------
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app/frontend
+
+COPY frontend/package*.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+FROM golang:1.25-alpine AS backend-builder
+WORKDIR /app
+
+RUN apk add --no-cache git ca-certificates tzdata
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+COPY --from=frontend-builder /app/web/dist /app/web/dist
+
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/relaymesh ./cmd/relaymesh
+
+FROM alpine:3.21 AS runner
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S relaymesh && adduser -S relaymesh -G relaymesh \
+    && mkdir -p /app/data && chown -R relaymesh:relaymesh /app
+
+COPY --from=backend-builder /app/relaymesh /app/relaymesh
+
+USER relaymesh
+
+ENV RELAYMESH_HOST=0.0.0.0 \
+    RELAYMESH_PORT=18775 \
+    RELAYMESH_HTTPS_PORT=18776 \
+    RELAYMESH_DB_PATH=/app/data/relaymesh.db \
+    RELAYMESH_TLS_CERT=/app/data/certs/cert.pem \
+    RELAYMESH_TLS_KEY=/app/data/certs/key.pem \
+    GIN_MODE=release
+
+EXPOSE 18775 18776
+
+VOLUME ["/app/data"]
+
+ENTRYPOINT ["/app/relaymesh"]
