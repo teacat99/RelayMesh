@@ -30,6 +30,11 @@ func (s *Server) handleReportProgress(ctx context.Context, raw json.RawMessage) 
 
 	projectID := s.cfg.ProjectID
 
+	// 更新执行端活跃心跳
+	if args.TaskID != "" {
+		_ = s.store.UpdateTaskHeartbeat(ctx, projectID, args.TaskID, "executor", "mcp-executor")
+	}
+
 	switch args.Action {
 	case "sync":
 		result, err := s.store.Sync(ctx, model.SyncInput{

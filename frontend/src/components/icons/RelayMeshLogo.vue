@@ -1,0 +1,24 @@
+<script setup lang="ts">
+defineProps<{
+  class?: string
+}>()
+</script>
+
+<template>
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    :class="$props.class"
+  >
+    <path d="M8 4L6 4C5 4 4 5 4 6L4 10C4 11 3 12 2 12C3 12 4 13 4 14L4 18C4 19 5 20 6 20L8 20"/>
+    <path d="M16 4L18 4C19 4 20 5 20 6L20 10C20 11 21 12 22 12C21 12 20 13 20 14L20 18C20 19 19 20 18 20L16 20"/>
+    <path d="M8 12C9.2 8.5 10.5 8.5 12 12C13.5 15.5 14.8 15.5 16 12" stroke-width="2"/>
+    <circle cx="8" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+    <circle cx="16" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+  </svg>
+</template>

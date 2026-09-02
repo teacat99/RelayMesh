@@ -10,6 +10,7 @@ import { useSettingsStore } from '../stores/settings'
 import Button from './ui/button/Button.vue'
 import Badge from './ui/badge/Badge.vue'
 import ThemeAutoIcon from './ThemeAutoIcon.vue'
+import RelayMeshLogo from './icons/RelayMeshLogo.vue'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -28,7 +29,6 @@ import {
   Volume2,
   VolumeX,
   Radio,
-  Cpu,
   Settings,
   Search,
   Clock,
@@ -285,9 +285,9 @@ const allItems = computed<UnifiedItem[]>(() => {
     items.push({
       id: t.task_id,
       type: 'task',
-      title: t.task_id,
+      title: t.title || t.task_id,
       subtitle: `Rev ${t.revision} · Seq ${t.report_sequence}`,
-      summary: `自动化任务工单 (Rev ${t.revision})`,
+      summary: t.title ? `托管自驾工单: ${t.title}` : `托管自驾工单 (Rev ${t.revision})`,
       status: t.state,
       created_at: (t as any).created_at || t.updated_at || new Date().toISOString(),
       updated_at: t.updated_at,
@@ -550,7 +550,7 @@ onUnmounted(() => {
       <div class="h-14 px-3.5 border-b border-border/60 flex items-center justify-between shrink-0">
         <div class="flex items-center gap-2 min-w-0">
           <div class="w-6 h-6 rounded-xs bg-primary text-primary-foreground flex items-center justify-center shadow-2xs shrink-0">
-            <Cpu class="w-3.5 h-3.5" />
+            <RelayMeshLogo class="w-3.5 h-3.5" />
           </div>
           <div class="flex flex-col min-w-0">
             <div class="flex items-center gap-1.5 min-w-0">
@@ -618,7 +618,7 @@ onUnmounted(() => {
               { id: 'all', label: '全部' },
               { id: 'pending', label: '待处理' },
               { id: 'feedback', label: '工作流' },
-              { id: 'task', label: '自动化工单' },
+              { id: 'task', label: '托管自驾' },
               { id: 'completed', label: '已完成' }
             ]"
             :key="ft.id"
@@ -636,7 +636,7 @@ onUnmounted(() => {
 
       <!-- 3. Scrollable Unified Sessions & Tasks List (支持动态分批加载，待确认会话在其专属卡片右侧提供精准取消) -->
       <div
-        class="flex-1 overflow-y-auto p-2 space-y-1"
+        class="flex-1 overflow-y-auto p-2 space-y-1 no-scrollbar scrollbar-none"
         @scroll="handleListScroll"
       >
         <div

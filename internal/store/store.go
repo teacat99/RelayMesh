@@ -56,6 +56,11 @@ func New(dbPath string) (*Store, error) {
 		&model.SystemSetting{},
 		&model.QueuedFeedback{},
 		&model.WorkflowDraft{},
+		&model.UserNorm{},
+		&model.MCPCredential{},
+		&model.WorkflowPhaseState{},
+		&model.WorkflowCheckpoint{},
+		&model.WorkflowNote{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to automigrate database tables: %w", err)
 	}

@@ -2,7 +2,6 @@
 import {
   Info,
   ShieldCheck,
-  Cpu,
   Layers,
   RadioTower,
   Globe,
@@ -16,6 +15,7 @@ import {
 } from 'lucide-vue-next'
 import Badge from '../ui/badge/Badge.vue'
 import Button from '../ui/button/Button.vue'
+import RelayMeshLogo from '../icons/RelayMeshLogo.vue'
 </script>
 
 <template>
@@ -41,7 +41,7 @@ import Button from '../ui/button/Button.vue'
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-2.5">
           <div class="p-2 rounded-xs bg-primary text-primary-foreground shadow-2xs shrink-0 flex items-center justify-center">
-            <Cpu class="w-4 h-4" />
+            <RelayMeshLogo class="w-4 h-4" />
           </div>
           <div>
             <div class="text-sm font-bold text-foreground tracking-tight flex items-center gap-1.5">

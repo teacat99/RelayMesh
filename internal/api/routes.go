@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -120,6 +121,10 @@ func (h *APIHandler) SubmitFeedback(c *gin.Context) {
 	h.mcpServer.NotifySessionCompleted(session)
 	h.broker.Broadcast("session_completed", session)
 
+	if session.WorkflowID != "" {
+		h.autoResetToHumanPreferred(c.Request.Context(), session.WorkflowID)
+	}
+
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 
@@ -164,6 +169,9 @@ func (h *APIHandler) AppendWorkflowFeedback(c *gin.Context) {
 		}
 		h.mcpServer.NotifySessionCompleted(sess)
 		h.broker.Broadcast("session_completed", sess)
+		if workflowID != "" {
+			h.autoResetToHumanPreferred(c.Request.Context(), workflowID)
+		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "type": "session", "session": sess})
 		return
 	}
@@ -585,6 +593,68 @@ func (h *APIHandler) ListTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, page)
 }
 
+type CreateTaskRequest struct {
+	TaskID     string           `json:"task_id,omitempty"`
+	Title      string           `json:"title,omitempty"`
+	Mode       string           `json:"mode,omitempty"`
+	Stages     model.TaskStages `json:"stages,omitempty"`
+	Segments   []model.Segment  `json:"segments,omitempty"`
+	WaitPolicy *model.WaitPolicy `json:"wait_policy,omitempty"`
+}
+
+func (h *APIHandler) CreateTask(c *gin.Context) {
+	var req CreateTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	policy := model.WaitPolicy{
+		AfterMinutes:       2,
+		MaxNoFeedbackChecks: 24,
+		WaitInstruction:    "暂无新反馈；请等待 {minutes} 分钟后再次调用。",
+	}
+	if req.WaitPolicy != nil {
+		if req.WaitPolicy.AfterMinutes > 0 {
+			policy.AfterMinutes = req.WaitPolicy.AfterMinutes
+		}
+		if req.WaitPolicy.MaxNoFeedbackChecks > 0 {
+			policy.MaxNoFeedbackChecks = req.WaitPolicy.MaxNoFeedbackChecks
+		}
+		if req.WaitPolicy.WaitInstruction != "" {
+			policy.WaitInstruction = req.WaitPolicy.WaitInstruction
+		}
+	}
+
+	// 默认提供至少一个基础分段
+	segments := req.Segments
+	if len(segments) == 0 {
+		segments = []model.Segment{
+			{
+				Name:    "01_任务规划与目标",
+				Content: "请指挥端在此分段定义任务目标、架构规范与执行约束。",
+			},
+		}
+	}
+
+	task, err := h.store.CreateTask(c.Request.Context(), model.CreateTaskInput{
+		ProjectID:  h.cfg.ProjectID,
+		TaskID:     req.TaskID,
+		Title:      req.Title,
+		Mode:       req.Mode,
+		Stages:     req.Stages,
+		Segments:   segments,
+		WaitPolicy: policy,
+	})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	h.broker.Broadcast("task_update", gin.H{"task_id": task.ID})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "task": task})
+}
+
 func (h *APIHandler) GetTask(c *gin.Context) {
 	id := c.Param("id")
 	task, err := h.store.GetTask(c.Request.Context(), h.cfg.ProjectID, id)
@@ -593,6 +663,36 @@ func (h *APIHandler) GetTask(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"task": task})
+}
+
+type UpdateTaskStagesRequest struct {
+	ExpectedRevision int64            `json:"expected_revision,omitempty"`
+	CurrentStageID   string           `json:"current_stage_id,omitempty"`
+	Stages           model.TaskStages `json:"stages"`
+}
+
+func (h *APIHandler) UpdateTaskStages(c *gin.Context) {
+	id := c.Param("id")
+	var req UpdateTaskStagesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	result, err := h.store.UpdateStages(c.Request.Context(), model.UpdateStagesInput{
+		ProjectID:        h.cfg.ProjectID,
+		TaskID:           id,
+		ExpectedRevision: req.ExpectedRevision,
+		CurrentStageID:   req.CurrentStageID,
+		Stages:           req.Stages,
+	})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	h.broker.Broadcast("task_update", gin.H{"task_id": id})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "result": result})
 }
 
 func (h *APIHandler) ReadReports(c *gin.Context) {
@@ -608,9 +708,23 @@ func (h *APIHandler) ReadReports(c *gin.Context) {
 	c.JSON(http.StatusOK, reports)
 }
 
+func (h *APIHandler) ReadTaskFeedbacks(c *gin.Context) {
+	id := c.Param("id")
+	afterSeq, _ := strconv.ParseInt(c.DefaultQuery("after_sequence", "0"), 10, 64)
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+
+	feedbacks, err := h.store.ReadFeedbacks(c.Request.Context(), h.cfg.ProjectID, id, afterSeq, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"feedbacks": feedbacks})
+}
+
 type SendTaskFeedbackRequest struct {
 	Body             string                `json:"body"`
 	ExpectedRevision int64                 `json:"expected_revision"`
+	Source           string                `json:"source,omitempty"`
 	References       []model.PathReference `json:"references"`
 }
 
@@ -622,10 +736,16 @@ func (h *APIHandler) SendTaskFeedback(c *gin.Context) {
 		return
 	}
 
+	source := req.Source
+	if source == "" {
+		source = "human"
+	}
+
 	fb, err := h.store.SendFeedback(c.Request.Context(), model.SendFeedbackInput{
 		ProjectID:        h.cfg.ProjectID,
 		TaskID:           id,
 		ExpectedRevision: req.ExpectedRevision,
+		Source:           source,
 		Body:             req.Body,
 		References:       req.References,
 	})
@@ -684,4 +804,297 @@ func (h *APIHandler) UpdateSettings(c *gin.Context) {
 
 	h.broker.Broadcast("settings_updated", payload)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "settings": payload})
+}
+
+// ─── User Norms (Skills) ───
+
+func (h *APIHandler) ListNorms(c *gin.Context) {
+	norms, err := h.store.ListUserNorms(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"norms": norms})
+}
+
+func (h *APIHandler) GetNorm(c *gin.Context) {
+	name := c.Param("name")
+	norm, err := h.store.GetUserNorm(c.Request.Context(), name)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"norm": norm})
+}
+
+func (h *APIHandler) CreateNorm(c *gin.Context) {
+	var req model.UserNorm
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	if err := h.store.CreateUserNorm(c.Request.Context(), &req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	h.broker.Broadcast("norms_updated", gin.H{"name": req.Name, "action": "create"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "norm": req})
+}
+
+func (h *APIHandler) UpdateNorm(c *gin.Context) {
+	name := c.Param("name")
+	var body map[string]any
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	norm, err := h.store.UpdateUserNorm(c.Request.Context(), name, body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	h.broker.Broadcast("norms_updated", gin.H{"name": norm.Name, "action": "update"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "norm": norm})
+}
+
+func (h *APIHandler) DeleteNorm(c *gin.Context) {
+	name := c.Param("name")
+	if err := h.store.DeleteUserNorm(c.Request.Context(), name); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	h.broker.Broadcast("norms_updated", gin.H{"name": name, "action": "delete"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// ─── MCP Credentials ───
+
+func (h *APIHandler) ListCredentials(c *gin.Context) {
+	creds, err := h.store.ListCredentials(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// Mask tokens for list response
+	type maskedCred struct {
+		ID          uint              `json:"id"`
+		Name        string            `json:"name"`
+		Token       string            `json:"token"`
+		HostName    string            `json:"host_name"`
+		IsActive    bool              `json:"is_active"`
+		Permissions model.Permissions `json:"permissions"`
+		Note        string            `json:"note"`
+		CreatedAt   string            `json:"created_at"`
+		UpdatedAt   string            `json:"updated_at"`
+	}
+	var result []maskedCred
+	for _, cr := range creds {
+		result = append(result, maskedCred{
+			ID:          cr.ID,
+			Name:        cr.Name,
+			Token:       store.MaskToken(cr.Token),
+			HostName:    cr.HostName,
+			IsActive:    cr.IsActive,
+			Permissions: cr.Permissions,
+			Note:        cr.Note,
+			CreatedAt:   cr.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:   cr.UpdatedAt.Format(time.RFC3339),
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"credentials": result})
+}
+
+func (h *APIHandler) GetCredential(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credential id"})
+		return
+	}
+	cred, err := h.store.GetCredential(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	cred.Token = store.MaskToken(cred.Token)
+	c.JSON(http.StatusOK, gin.H{"credential": cred})
+}
+
+func (h *APIHandler) CreateCredential(c *gin.Context) {
+	var req model.MCPCredential
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	if err := h.store.CreateCredential(c.Request.Context(), &req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	fullToken := req.Token
+	h.broker.Broadcast("credentials_updated", gin.H{"id": req.ID, "action": "create"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "credential": req, "token": fullToken})
+}
+
+func (h *APIHandler) UpdateCredential(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credential id"})
+		return
+	}
+
+	var body map[string]any
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	delete(body, "id")
+	delete(body, "token")
+	delete(body, "created_at")
+
+	// permissions 需特殊处理：从 map 转为 Permissions struct
+	if permsRaw, ok := body["permissions"]; ok {
+		permsBytes, err := json.Marshal(permsRaw)
+		if err == nil {
+			var perms model.Permissions
+			if json.Unmarshal(permsBytes, &perms) == nil {
+				body["permissions"] = perms
+			}
+		}
+	}
+
+	cred, err := h.store.UpdateCredential(c.Request.Context(), uint(id), body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	cred.Token = store.MaskToken(cred.Token)
+
+	h.broker.Broadcast("credentials_updated", gin.H{"id": cred.ID, "action": "update"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "credential": cred})
+}
+
+func (h *APIHandler) DeleteCredential(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credential id"})
+		return
+	}
+
+	if err := h.store.DeleteCredential(c.Request.Context(), uint(id)); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	h.broker.Broadcast("credentials_updated", gin.H{"id": id, "action": "delete"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (h *APIHandler) RegenerateCredentialToken(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credential id"})
+		return
+	}
+
+	cred, fullToken, err := h.store.RegenerateCredentialToken(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	cred.Token = store.MaskToken(cred.Token)
+
+	h.broker.Broadcast("credentials_updated", gin.H{"id": cred.ID, "action": "regenerate"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "credential": cred, "token": fullToken})
+}
+
+func (h *APIHandler) GetWorkflowPhase(c *gin.Context) {
+	workflowID := c.Param("workflow_id")
+	if workflowID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workflow_id is required"})
+		return
+	}
+	currentPhase, phases, err := h.store.GetWorkflowPhaseWithDefaults(c.Request.Context(), workflowID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defaults := model.DefaultPhaseTemplate()
+	defaultPrompts := make(map[string]string, len(defaults))
+	for _, d := range defaults {
+		if d.Prompt != "" {
+			defaultPrompts[d.ID] = d.Prompt
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"workflow_id":      workflowID,
+		"current_phase_id": currentPhase,
+		"phases":           phases,
+		"default_prompts":  defaultPrompts,
+	})
+}
+
+func (h *APIHandler) SetWorkflowPhase(c *gin.Context) {
+	workflowID := c.Param("workflow_id")
+	if workflowID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workflow_id is required"})
+		return
+	}
+	var body struct {
+		PhaseID string            `json:"phase_id"`
+		Source  string            `json:"source,omitempty"`
+		Phases  []model.PhaseItem `json:"phases,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if body.Phases != nil {
+		if err := h.store.SetWorkflowPhaseConfig(c.Request.Context(), workflowID, body.Phases); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	isHumanClick := body.Source == "human"
+	if body.PhaseID != "" {
+		if err := h.store.SetWorkflowPhase(c.Request.Context(), workflowID, body.PhaseID, isHumanClick); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	h.broker.Broadcast("phase_changed", gin.H{"workflow_id": workflowID, "phase": body.PhaseID})
+
+	currentPhase, phases, _ := h.store.GetWorkflowPhaseWithDefaults(c.Request.Context(), workflowID)
+	c.JSON(http.StatusOK, gin.H{
+		"workflow_id":      workflowID,
+		"current_phase_id": currentPhase,
+		"phases":           phases,
+	})
+}
+
+// autoResetToHumanPreferred resets current_phase_id to the human's preferred phase after feedback submission.
+func (h *APIHandler) autoResetToHumanPreferred(ctx context.Context, workflowID string) {
+	preferred, err := h.store.GetHumanPreferredPhase(ctx, workflowID)
+	if err != nil || preferred == "" {
+		return
+	}
+	currentPhase, _, err := h.store.GetWorkflowPhaseWithDefaults(ctx, workflowID)
+	if err != nil || currentPhase == preferred {
+		return
+	}
+	if e := h.store.SetWorkflowPhase(ctx, workflowID, preferred, false); e == nil {
+		h.broker.Broadcast("phase_changed", gin.H{"workflow_id": workflowID, "phase": preferred})
+	}
 }

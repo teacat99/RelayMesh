@@ -144,6 +144,20 @@
   background: var(--muted-foreground);
 }
 
+/* Scrollbar hiding utilities - Full browser support */
+.no-scrollbar,
+.scrollbar-none {
+  -ms-overflow-style: none !important;
+  scrollbar-width: none !important;
+}
+
+.no-scrollbar::-webkit-scrollbar,
+.scrollbar-none::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
 /* Toast Sonner 动态自适应定位：紧贴输入框与悬浮按键上方，严格与反馈窗口悬浮操作栏左对齐 */
 [data-sonner-toaster] {
   bottom: calc(var(--input-dock-height, 140px) + var(--input-dock-floating-offset, 48px) + 8px) !important;
@@ -165,7 +179,7 @@
   pointer-events: auto;
 }
 
-/* 强制单个 Toast 自适应宽度、单行排列与最小宽度 (容纳约8个汉字字符) */
+/* Toast 单行自适应布局：左侧内容 + 右侧关闭按钮，高度对齐快捷回复按钮 */
 [data-sonner-toaster] [data-sonner-toast] {
   width: auto !important;
   min-width: 108px !important;
@@ -173,9 +187,12 @@
   white-space: nowrap !important;
   display: flex !important;
   flex-direction: row !important;
-  align-items: center !important;
-  padding: 0.35rem 1.75rem 0.35rem 0.65rem !important;
+  align-items: stretch !important;
+  padding: 0 !important;
   box-sizing: border-box !important;
+  height: 26px !important;
+  min-height: 26px !important;
+  overflow: hidden !important;
 }
 
 [data-sonner-toaster] [data-sonner-toast] [data-content] {
@@ -184,45 +201,57 @@
   align-items: center !important;
   gap: 0.35rem !important;
   white-space: nowrap !important;
+  flex: 1 !important;
+  min-width: 0 !important;
 }
 
 [data-sonner-toaster] [data-sonner-toast] [data-title] {
   white-space: nowrap !important;
   font-size: 11px !important;
-  line-height: 1.2 !important;
+  line-height: 1 !important;
   display: inline-block !important;
 }
 
 [data-sonner-toaster] [data-sonner-toast] [data-description] {
   white-space: nowrap !important;
   font-size: 10px !important;
-  line-height: 1.2 !important;
+  line-height: 1 !important;
   display: inline-block !important;
 }
 
-/* 关闭按钮紧贴右侧居中 */
+/* 关闭按钮：强制排列到最右侧，行内分隔线 + 居中 X */
 [data-sonner-toaster] [data-sonner-toast] [data-close-button] {
-  position: absolute !important;
-  top: 50% !important;
-  transform: translateY(-50%) !important;
-  right: 0.35rem !important;
+  position: static !important;
+  transform: none !important;
+  right: auto !important;
   left: auto !important;
-  width: 14px !important;
-  height: 14px !important;
-  border-radius: 2px !important;
+  top: auto !important;
+  order: 9999 !important;
+  width: 24px !important;
+  height: 100% !important;
+  border-radius: 0 !important;
+  border-top-right-radius: calc(var(--radius) - 2px) !important;
+  border-bottom-right-radius: calc(var(--radius) - 2px) !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
   background: transparent !important;
-  border: 1px solid var(--border) !important;
-  color: var(--muted-foreground) !important;
+  border: none !important;
+  border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent) !important;
+  color: color-mix(in srgb, var(--muted-foreground) 60%, transparent) !important;
   cursor: pointer !important;
   transition: all 0.15s ease !important;
+  flex-shrink: 0 !important;
 }
 
 [data-sonner-toaster] [data-sonner-toast] [data-close-button]:hover {
   color: var(--foreground) !important;
   background: var(--muted) !important;
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-close-button] svg {
+  width: 16px !important;
+  height: 16px !important;
 }
 
 /* Sidebar PC Smooth Slide Collapse & Expand Animation */

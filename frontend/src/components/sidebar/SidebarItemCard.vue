@@ -4,6 +4,7 @@ import Badge from '../ui/badge/Badge.vue'
 import {
   Workflow,
   Bot,
+  Sparkles,
   Pin,
   Clock,
   CheckCircle2,
@@ -203,7 +204,7 @@ function formatItemProjectDirectory(item: UnifiedItem): string {
       <div class="flex items-center gap-1.5 min-w-0">
         <Pin v-if="isPinned" class="w-3 h-3 text-primary shrink-0 -rotate-45 fill-primary/30" />
         <Workflow v-else-if="item.type === 'feedback'" class="w-3.5 h-3.5 shrink-0" :class="isActive ? 'text-primary' : 'text-foreground'" />
-        <Bot v-else class="w-3.5 h-3.5 shrink-0" :class="isActive ? 'text-primary' : 'text-foreground'" />
+        <Sparkles v-else class="w-3.5 h-3.5 text-primary shrink-0" />
         <span class="text-xs truncate font-mono" :class="isActive ? 'font-bold text-foreground' : 'font-medium text-foreground/85 group-hover:text-foreground'">
           {{ item.title }}
         </span>

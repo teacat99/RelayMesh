@@ -32,6 +32,7 @@ import {
   MessageSquareQuote
 } from 'lucide-vue-next'
 import QuickPresetEditDialog from './QuickPresetEditDialog.vue'
+import PhaseSlider from './PhaseSlider.vue'
 import type { QuickPresetItem } from '../../stores/settings'
 import type { SessionImage } from '../../api/types'
 import { draftsApi } from '../../api/client'
@@ -39,9 +40,17 @@ import { VoiceRecorderStreamer } from '../../utils/voiceStream'
 import { usePreviewStore } from '../../stores/preview'
 import { toast } from 'vue-sonner'
 
-const props = defineProps<{
-  isScrolledUp: boolean
-}>()
+const props = withDefaults(defineProps<{
+  isScrolledUp?: boolean
+  isSubmitting?: boolean
+  placeholder?: string
+  buttonText?: string
+}>(), {
+  isScrolledUp: false,
+  isSubmitting: false,
+  placeholder: '',
+  buttonText: ''
+})
 
 const emit = defineEmits<{
   (e: 'submit', data: { text: string; presets: string[]; images: SessionImage[] }): void
@@ -80,6 +89,11 @@ async function handleSessionPresenceChange(presence: 'online' | 'away' | 'autopi
   if (!activeSession.value) return
   await sessionStore.updateUserPresence(activeSession.value.session_id, presence)
 }
+
+const phaseSliderRef = ref<InstanceType<typeof PhaseSlider> | null>(null)
+const currentWorkflowId = computed(() => {
+  return activeSession.value?.workflow_id || sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id || ''
+})
 
 // Feedback input panel resizing state with LocalStorage persistence
 const DOCK_HEIGHT_STORAGE_KEY = 'relaymesh_input_dock_height'
@@ -240,7 +254,7 @@ async function loadDrafts(forceWorkflowId?: string) {
       if (data && Array.isArray(data.drafts) && data.drafts.length > 0) {
         multiDrafts.value = {
           activeIndex: typeof data.activeIndex === 'number' && data.activeIndex < data.drafts.length ? data.activeIndex : 0,
-          drafts: data.drafts.slice(0, 5)
+          drafts: data.drafts
         }
       }
     } else {
@@ -279,18 +293,17 @@ async function loadDrafts(forceWorkflowId?: string) {
     images.value = current.images || []
   } catch (_) {}
 
-  // 2. 异步从后端数据库拉取最新草稿数据（跨设备/换浏览器/新会话原生恢复）
-  try {
-    const res = await draftsApi.get(wId)
-    if (res && res.draft && res.draft.drafts_json) {
-      const serverData = JSON.parse(res.draft.drafts_json)
-      if (serverData && Array.isArray(serverData.drafts) && serverData.drafts.length > 0) {
-        const localCurrent = multiDrafts.value.drafts[multiDrafts.value.activeIndex]
-        const localEmpty = !localCurrent || (!localCurrent.text && (!localCurrent.presets || localCurrent.presets.length === 0) && (!localCurrent.images || localCurrent.images.length === 0))
-        if (localEmpty) {
+  // 2. 异步从后端数据库拉取最新草稿数据（仅当本地无任何记录时才启用，防止覆盖已清空的草稿）
+  const hasLocalEntry = (() => { try { return localStorage.getItem(wKey) !== null } catch { return false } })()
+  if (!hasLocalEntry) {
+    try {
+      const res = await draftsApi.get(wId)
+      if (res && res.draft && res.draft.drafts_json) {
+        const serverData = JSON.parse(res.draft.drafts_json)
+        if (serverData && Array.isArray(serverData.drafts) && serverData.drafts.length > 0) {
           multiDrafts.value = {
             activeIndex: typeof serverData.activeIndex === 'number' && serverData.activeIndex < serverData.drafts.length ? serverData.activeIndex : 0,
-            drafts: serverData.drafts.slice(0, 5)
+            drafts: serverData.drafts
           }
           const cur = multiDrafts.value.drafts[multiDrafts.value.activeIndex] || multiDrafts.value.drafts[0]
           responseText.value = cur.text || ''
@@ -301,9 +314,9 @@ async function loadDrafts(forceWorkflowId?: string) {
           } catch (_) {}
         }
       }
+    } catch (err) {
+      console.warn('Failed to fetch draft from server db:', err)
     }
-  } catch (err) {
-    console.warn('Failed to fetch draft from server db:', err)
   }
 }
 
@@ -331,10 +344,6 @@ function switchDraft(targetIndex: number) {
 }
 
 function createNewDraft() {
-  if (multiDrafts.value.drafts.length >= 5) {
-    toast.info('最多支持暂存 5 个草稿箱')
-    return
-  }
   const curIdx = multiDrafts.value.activeIndex
   if (multiDrafts.value.drafts[curIdx]) {
     multiDrafts.value.drafts[curIdx].text = responseText.value
@@ -353,7 +362,7 @@ function createNewDraft() {
   })
 
   switchDraft(multiDrafts.value.drafts.length - 1)
-  toast.success(`已新建草稿 (第 ${multiDrafts.value.activeIndex + 1}/5 个)`)
+  toast.success(`已新建草稿 (第 ${multiDrafts.value.activeIndex + 1}/${multiDrafts.value.drafts.length} 个)`)
 }
 
 function deleteCurrentDraft() {
@@ -443,8 +452,8 @@ function loadSpecificContent(data: { text: string; presets?: string[]; images?: 
     // 1. 先安全保存当前输入区的草稿
     saveDrafts()
 
-    // 2. 若草稿数量未达上限 (5)，自动新建一个草稿卡槽放置被撤回的内容
-    if (multiDrafts.value.drafts.length < 5) {
+    // 2. 自动新建一个草稿卡槽放置被撤回的内容
+    {
       const newDraftItem: DraftSlot = {
         id: Date.now().toString(),
         text: data.text || '',
@@ -682,7 +691,7 @@ function handleSubmit() {
 
   emit('submit', {
     text: mainText,
-    presets: selectedPresets.value,
+    presets: [],
     images: images.value
   })
 }
@@ -885,11 +894,16 @@ onUnmounted(() => {
     document.documentElement.style.setProperty('--input-dock-floating-offset', `${floatingOffset}px`)
   }, { immediate: true })
 
+  function clearDraft() {
+    resetForm()
+  }
+
   defineExpose({
-  resetForm,
-  loadSpecificContent,
-  images
-})
+    resetForm,
+    clearDraft,
+    loadSpecificContent,
+    images
+  })
 </script>
 
 <template>
@@ -978,8 +992,8 @@ onUnmounted(() => {
       <!-- Row 2: Floating Actions, Presence & Presets -->
       <div class="flex flex-wrap items-center justify-between gap-1.5 w-full">
         <!-- Left Side: Presence & Upload & Presets & Tag Settings -->
-        <div class="flex flex-wrap items-center gap-1.5 max-w-full">
-        <!-- 0. 用户在线状态切换下拉按钮 (悬浮按钮第 1 位) -->
+        <div class="flex flex-wrap items-center gap-1.5 max-w-full min-w-0">
+        <!-- 0. 用户在线状态切换下拉按钮 -->
         <DropdownMenu v-if="activeSession">
           <DropdownMenuTrigger as-child>
             <button
@@ -1029,45 +1043,8 @@ onUnmounted(() => {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <!-- 1. Upload Screenshot Button -->
-        <button
-          type="button"
-          class="text-[11px] sm:text-xs px-2 sm:px-2.5 py-1 rounded-sm border transition-all shadow-2xs flex items-center gap-1 sm:gap-1.5 cursor-pointer shrink-0"
-          :class="images.length > 0
-            ? 'bg-primary text-primary-foreground border-primary font-medium'
-            : 'bg-card/95 hover:bg-muted border-border/80 text-foreground backdrop-blur-xs'"
-          @click="triggerImageUpload"
-          title="上传屏幕截图附件（亦支持直接 Ctrl + V 粘贴）"
-        >
-          <ImagePlus class="w-3.5 h-3.5" />
-          <span>{{ images.length > 0 ? `${images.length} 张截图` : '上传截图' }}</span>
-        </button>
-        <input
-          ref="fileInputRef"
-          type="file"
-          multiple
-          accept="image/*"
-          class="hidden"
-          @change="handleFileSelect"
-        />
-
-        <!-- 2. Voice Input Toggle Button -->
-        <button
-          type="button"
-          class="text-[11px] sm:text-xs px-2 sm:px-2.5 py-1 rounded-sm border transition-all shadow-2xs flex items-center gap-1 sm:gap-1.5 cursor-pointer shrink-0 select-none"
-          :class="isRecordingVoice
-            ? 'bg-destructive text-destructive-foreground border-destructive font-medium animate-pulse'
-            : isTranscribingVoice
-              ? 'bg-primary/20 text-primary border-primary font-medium animate-pulse'
-              : 'bg-card/95 hover:bg-muted border-border/80 text-foreground backdrop-blur-xs'"
-          :title="isRecordingVoice ? '点击停止录音并流式转录' : isTranscribingVoice ? '正在流式转写中...' : '开启语音输入识别（支持小米 MIMO 流式转录）'"
-          @click="toggleVoiceRecognition"
-        >
-          <Mic v-if="!isRecordingVoice && !isTranscribingVoice" class="w-3.5 h-3.5" />
-          <RotateCcw v-else-if="isTranscribingVoice" class="w-3.5 h-3.5 animate-spin" />
-          <MicOff v-else class="w-3.5 h-3.5 animate-bounce" />
-          <span>{{ isRecordingVoice ? '停止录音' : isTranscribingVoice ? 'MIMO转写中' : '语音输入' }}</span>
-        </button>
+        <!-- Phase Slider (在线状态之后) -->
+        <PhaseSlider v-if="currentWorkflowId" ref="phaseSliderRef" :workflow-id="currentWorkflowId" />
 
         <!-- 3..N Quick Preset Pills (支持点击填充、勾选追加在文字之后、右键编辑弹窗) -->
         <div
@@ -1172,11 +1149,11 @@ onUnmounted(() => {
     </div>
 
     <!-- Bottom Action Row -->
-    <div class="flex items-center justify-between pt-1.5 border-t border-border/40 text-[10px] sm:text-[11px] text-muted-foreground shrink-0">
+    <div class="flex items-center justify-between pt-1.5 border-t border-border/40 text-xs text-muted-foreground shrink-0">
       <div class="flex items-center gap-2">
-        <!-- 多草稿箱轮播切换控件 (最多5个草稿，Ctrl+←/→ 平移动画切换) -->
-        <div class="flex items-center gap-1 bg-card/90 border border-border/80 px-1.5 py-0.5 rounded-sm shadow-2xs font-mono text-[10px] select-none">
-          <FileText class="w-3 h-3 text-muted-foreground shrink-0" />
+        <!-- 多草稿箱轮播切换控件 -->
+        <div class="h-7 flex items-center gap-1.5 bg-card/90 border border-border/80 px-2 rounded-sm shadow-2xs font-mono text-xs select-none">
+          <FileText class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
           <span class="text-muted-foreground font-medium">草稿</span>
           <span class="font-bold text-foreground">{{ multiDrafts.activeIndex + 1 }}</span>
           <span class="text-muted-foreground">/</span>
@@ -1184,41 +1161,40 @@ onUnmounted(() => {
 
           <button
             type="button"
-            class="hover:bg-muted p-0.5 rounded cursor-pointer transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            class="hover:bg-muted p-1 rounded-sm cursor-pointer transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
             :disabled="multiDrafts.drafts.length <= 1"
             title="上一个草稿 (Ctrl + ←)"
             @click="switchDraft((multiDrafts.activeIndex - 1 + multiDrafts.drafts.length) % multiDrafts.drafts.length)"
           >
-            <ChevronLeft class="w-3 h-3 text-foreground" />
+            <ChevronLeft class="w-3.5 h-3.5 text-foreground" />
           </button>
 
           <button
             type="button"
-            class="hover:bg-muted p-0.5 rounded cursor-pointer transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            class="hover:bg-muted p-1 rounded-sm cursor-pointer transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
             :disabled="multiDrafts.drafts.length <= 1"
             title="下一个草稿 (Ctrl + →)"
             @click="switchDraft((multiDrafts.activeIndex + 1) % multiDrafts.drafts.length)"
           >
-            <ChevronRight class="w-3 h-3 text-foreground" />
+            <ChevronRight class="w-3.5 h-3.5 text-foreground" />
           </button>
 
           <button
-            v-if="multiDrafts.drafts.length < 5"
             type="button"
-            class="hover:bg-primary/20 hover:text-primary p-0.5 rounded cursor-pointer transition-colors"
-            title="新建草稿 (最多5个)"
+            class="hover:bg-primary/20 hover:text-primary p-1 rounded-sm cursor-pointer transition-colors"
+            title="新建草稿"
             @click="createNewDraft"
           >
-            <Plus class="w-3 h-3 text-foreground" />
+            <Plus class="w-3.5 h-3.5 text-foreground" />
           </button>
 
           <button
             type="button"
-            class="hover:bg-destructive/20 hover:text-destructive p-0.5 rounded cursor-pointer transition-colors ml-0.5"
+            class="hover:bg-destructive/20 hover:text-destructive p-1 rounded-sm cursor-pointer transition-colors"
             :title="multiDrafts.drafts.length > 1 ? '删除当前草稿' : '清空当前草稿'"
             @click="deleteCurrentDraft"
           >
-            <Trash2 class="w-3 h-3 text-muted-foreground hover:text-destructive" />
+            <Trash2 class="w-3.5 h-3.5 text-muted-foreground hover:text-destructive" />
           </button>
         </div>
 
@@ -1232,6 +1208,28 @@ onUnmounted(() => {
       </div>
 
       <div class="flex items-center gap-2">
+        <!-- 上传截图 -->
+        <button
+          type="button"
+          class="h-7 px-2.5 rounded-sm border transition-all text-xs font-mono flex items-center gap-1.5 cursor-pointer select-none"
+          :class="images.length > 0
+            ? 'border-primary text-primary bg-primary/10 font-medium shadow-2xs'
+            : 'border-border/70 bg-card/80 hover:bg-muted text-muted-foreground hover:text-foreground'"
+          @click="triggerImageUpload"
+          title="上传屏幕截图附件（亦支持直接 Ctrl + V 粘贴）"
+        >
+          <ImagePlus class="w-3.5 h-3.5" />
+          <span>{{ images.length > 0 ? `${images.length} 张截图` : '上传截图' }}</span>
+        </button>
+        <input
+          ref="fileInputRef"
+          type="file"
+          multiple
+          accept="image/*"
+          class="hidden"
+          @change="handleFileSelect"
+        />
+
         <!-- 语音识别快捷按钮 -->
         <button
           type="button"

@@ -12,13 +12,17 @@ import (
 type configureArguments struct {
 	Action                string                `json:"action"`
 	TaskID                string                `json:"task_id,omitempty"`
+	Title                 string                `json:"title,omitempty"`
+	Mode                  string                `json:"mode,omitempty"`
+	CurrentStageID        string                `json:"current_stage_id,omitempty"`
+	Stages                model.TaskStages      `json:"stages,omitempty"`
 	Segments              []model.Segment       `json:"segments,omitempty"`
 	WaitPolicy            *model.WaitPolicy     `json:"wait_policy,omitempty"`
 	ExpectedRevision      int64                 `json:"expected_revision,omitempty"`
-	Mode                  string                `json:"mode,omitempty"`
 	Segment               string                `json:"segment,omitempty"`
 	OldText               string                `json:"old_text,omitempty"`
 	NewText               string                `json:"new_text,omitempty"`
+	Source                string                `json:"source,omitempty"`
 	Body                  string                `json:"body,omitempty"`
 	References            []model.PathReference `json:"references,omitempty"`
 	IdempotencyKey        string                `json:"idempotency_key,omitempty"`
@@ -37,6 +41,11 @@ func (s *Server) handleConfigureTask(ctx context.Context, raw json.RawMessage) (
 
 	projectID := s.cfg.ProjectID
 
+	// 更新指挥端活跃心跳
+	if args.TaskID != "" {
+		_ = s.store.UpdateTaskHeartbeat(ctx, projectID, args.TaskID, "commander", "mcp-commander")
+	}
+
 	switch args.Action {
 	case "create":
 		policy := s.defaultWaitPolicy()
@@ -46,12 +55,15 @@ func (s *Server) handleConfigureTask(ctx context.Context, raw json.RawMessage) (
 		task, err := s.store.CreateTask(ctx, model.CreateTaskInput{
 			ProjectID:      projectID,
 			TaskID:         args.TaskID,
+			Title:          args.Title,
+			Mode:           args.Mode,
+			Stages:         args.Stages,
 			Segments:       args.Segments,
 			WaitPolicy:     policy,
 			IdempotencyKey: args.IdempotencyKey,
 		})
 		s.notifyTaskUpdate(args.TaskID)
-		return withInstruction(task, "任务通信已创建；可继续更新分段内容或等待执行端同步。"), err
+		return withInstruction(task, "托管任务通信已创建；指挥端可继续更新阶段大盘/分段工单，或等待执行端同步。"), err
 
 	case "update":
 		result, err := s.store.UpdateTask(ctx, model.UpdateTaskInput{
@@ -65,7 +77,19 @@ func (s *Server) handleConfigureTask(ctx context.Context, raw json.RawMessage) (
 			IdempotencyKey:   args.IdempotencyKey,
 		})
 		s.notifyTaskUpdate(args.TaskID)
-		return withInstruction(result, "任务内容已更新；执行端下次同步会收到新的 revision。"), err
+		return withInstruction(result, "任务分段已更新；执行端下次同步会收到新的 revision。"), err
+
+	case "update_stages":
+		result, err := s.store.UpdateStages(ctx, model.UpdateStagesInput{
+			ProjectID:        projectID,
+			TaskID:           args.TaskID,
+			ExpectedRevision: args.ExpectedRevision,
+			CurrentStageID:   args.CurrentStageID,
+			Stages:           args.Stages,
+			IdempotencyKey:   args.IdempotencyKey,
+		})
+		s.notifyTaskUpdate(args.TaskID)
+		return withInstruction(result, "阶段大盘进度已更新；前端展示台与执行端已同步最新阶段。"), err
 
 	case "set_wait_policy":
 		if args.WaitPolicy == nil {
@@ -83,10 +107,15 @@ func (s *Server) handleConfigureTask(ctx context.Context, raw json.RawMessage) (
 		return withInstruction(result, "等待提示策略已更新；它只影响后续通信提示，不管理真实进程。"), err
 
 	case "send_feedback":
+		src := args.Source
+		if src == "" {
+			src = "commander"
+		}
 		feedback, err := s.store.SendFeedback(ctx, model.SendFeedbackInput{
 			ProjectID:        projectID,
 			TaskID:           args.TaskID,
 			ExpectedRevision: args.ExpectedRevision,
+			Source:           src,
 			Body:             args.Body,
 			References:       args.References,
 			IdempotencyKey:   args.IdempotencyKey,

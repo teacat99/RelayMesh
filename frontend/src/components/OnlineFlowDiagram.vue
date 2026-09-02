@@ -17,11 +17,14 @@ import {
   Activity,
   Workflow,
   Split,
-  CircleDot
+  CircleDot,
+  ChevronDown,
+  ChevronRight
 } from 'lucide-vue-next'
 
 const settingsStore = useSettingsStore()
 
+const isOpen = ref(false)
 const activeMode = ref<'online' | 'away' | 'autopilot'>('online')
 
 const promptWaitMinutes = computed(() => settingsStore.settings.promptWaitMinutes || 2)
@@ -34,26 +37,27 @@ const totalHours = computed(() => {
 </script>
 
 <template>
-  <div class="space-y-4 p-4 rounded-xs border border-border/80 bg-card/40 font-mono text-xs">
-    <!-- Top Monochromatic Header -->
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/70 pb-3">
-      <div class="space-y-0.5">
-        <div class="flex items-center gap-2">
-          <CircleDot class="w-3.5 h-3.5 text-foreground shrink-0" />
-          <span class="font-bold text-xs sm:text-sm text-foreground tracking-tight flex items-center gap-1.5">
-            <span>状态流转与生命周期矩阵</span>
-            <span class="text-[10px] text-muted-foreground font-normal">/ Lifecycle Matrix</span>
-          </span>
-        </div>
-        <div class="text-[10px] text-muted-foreground flex items-center gap-2 font-sans">
-          <span>SSE 实时事件 + MCP v1.0</span>
-          <span>·</span>
-          <span>模式: <strong class="text-foreground font-mono uppercase">{{ activeMode }}</strong></span>
-        </div>
+  <div class="rounded-xs border border-border/80 bg-card/40 font-mono text-xs">
+    <!-- Header (collapsible toggle) -->
+    <button
+      type="button"
+      class="w-full flex items-center gap-2 p-4 pb-3 text-left cursor-pointer hover:bg-muted/30 transition-colors select-none"
+      @click="isOpen = !isOpen"
+    >
+      <component :is="isOpen ? ChevronDown : ChevronRight" class="w-3.5 h-3.5 text-muted-foreground shrink-0 transition-transform" />
+      <CircleDot class="w-3.5 h-3.5 text-foreground shrink-0" />
+      <div class="flex-1 min-w-0">
+        <span class="font-bold text-xs sm:text-sm text-foreground tracking-tight">状态流转与生命周期矩阵</span>
+        <span class="text-[10px] text-muted-foreground font-normal ml-1.5">/ Lifecycle Matrix</span>
+        <p class="text-[10px] text-muted-foreground font-sans mt-0.5">
+          SSE 实时事件 + MCP v1.0 · 模式: <strong class="text-foreground font-mono uppercase">{{ activeMode }}</strong>
+        </p>
       </div>
+    </button>
 
-      <!-- 三态模式切换线框胶囊 (全黑白灰高对比) -->
-      <div class="flex items-center gap-1 bg-background p-0.5 rounded-xs border border-border/80">
+    <div v-show="isOpen" class="space-y-4 px-4 pb-4 border-t border-border/70 pt-3">
+      <!-- 三态模式切换线框胶囊 -->
+      <div class="flex items-center gap-1 bg-background p-0.5 rounded-xs border border-border/80 w-fit">
         <button
           type="button"
           class="px-2.5 py-1 rounded-2xs text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 border"
@@ -87,7 +91,6 @@ const totalHours = computed(() => {
           <span>托管模式</span>
         </button>
       </div>
-    </div>
 
     <!-- ==================== 1. 在线模式 (Online / M-A) 纯线框矩阵 ==================== -->
     <div v-if="activeMode === 'online'" class="space-y-3.5 pt-0.5">
@@ -309,6 +312,7 @@ const totalHours = computed(() => {
           </p>
         </div>
       </div>
+    </div>
     </div>
   </div>
 </template>

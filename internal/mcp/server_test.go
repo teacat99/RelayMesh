@@ -238,6 +238,33 @@ func TestMCPServer_FeedbackSessionFlow(t *testing.T) {
 		t.Fatalf("expected early cached response with unified header, got: %s", cachedResultStr)
 	}
 
+	// 3.1 模拟重复提取已消费会话：再次调用 continue_feedback_session 应该返回 Conflict 报错，杜绝重复反馈信息
+	repeatReq := `{
+		"jsonrpc": "2.0",
+		"id": 222,
+		"method": "tools/call",
+		"params": {
+			"name": "continue_feedback_session",
+			"arguments": {
+				"session_id": "test-early-cached-sess"
+			}
+		}
+	}`
+	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(repeatReq))
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	resultMap = resp.Result.(map[string]any)
+	if isErr, _ := resultMap["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true for repeat continue_feedback_session on consumed session, got: %+v", resultMap)
+	}
+	contentList = resultMap["content"].([]any)
+	firstItem = contentList[0].(map[string]any)
+	errText := firstItem["text"].(string)
+	if !strings.Contains(errText, "already been completed and consumed by AI") {
+		t.Fatalf("expected conflict error message, got: %s", errText)
+	}
+
 	// 4. 模拟“用户主动取消会话”场景
 	cancelSession, _ := srv.store.CreateFeedbackSession(context.Background(), store.CreateSessionInput{
 		SessionID:      "test-cancelled-sess",

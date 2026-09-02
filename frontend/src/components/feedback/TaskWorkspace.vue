@@ -1,24 +1,33 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed, nextTick } from 'vue'
 import { useTaskStore } from '../../stores/task'
-import MarkdownRenderer from '../MarkdownRenderer.vue'
-import Button from '../ui/button/Button.vue'
+import { useSettingsStore } from '../../stores/settings'
+import AutopilotDashboard from './AutopilotDashboard.vue'
+import FeedbackMessageList from './FeedbackMessageList.vue'
+import FeedbackInputDock from './FeedbackInputDock.vue'
+import type { FeedbackSession, SessionImage } from '../../api/types'
 import Badge from '../ui/badge/Badge.vue'
-import Card from '../ui/card/Card.vue'
-import CardHeader from '../ui/card/CardHeader.vue'
-import CardTitle from '../ui/card/CardTitle.vue'
-import CardContent from '../ui/card/CardContent.vue'
 import {
-  Bot,
-  CheckCircle2,
-  RefreshCw,
-  Info,
-  FileCode,
-  TrendingUp,
-  Send,
+  Sparkles,
+  LayoutDashboard,
+  MessageSquareCode,
   Menu,
-  PanelLeftOpen
+  PanelLeftOpen,
+  FolderGit2,
+  Workflow,
+  Copy,
+  Clock,
+  Check,
+  CheckCircle2,
+  RefreshCw
 } from 'lucide-vue-next'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem
+} from '../ui/dropdown-menu'
+import { toast } from 'vue-sonner'
 
 const props = defineProps<{
   activeItemId: string | null
@@ -31,41 +40,148 @@ const emit = defineEmits<{
 }>()
 
 const taskStore = useTaskStore()
-const activeSegmentTab = ref<string>('')
-const taskFeedbackBody = ref('')
+const settingsStore = useSettingsStore()
+const activeTab = ref<'dashboard' | 'conversation'>('dashboard')
+const isChatScrolledUp = ref(false)
 
-watch(() => taskStore.currentTask?.segments, (segments) => {
-  if (segments && segments.length > 0 && !activeSegmentTab.value) {
-    activeSegmentTab.value = segments[0].name
+const messageListRef = ref<InstanceType<typeof FeedbackMessageList> | null>(null)
+const inputDockRef = ref<InstanceType<typeof FeedbackInputDock> | null>(null)
+
+async function copyText(text: string, label: string) {
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    toast.success(`已复制 ${label}`, {
+      description: text,
+      duration: 1800
+    })
+  } catch (_) {
+    const input = document.createElement('textarea')
+    input.value = text
+    document.body.appendChild(input)
+    input.select()
+    document.execCommand('copy')
+    document.body.removeChild(input)
+    toast.success(`已复制 ${label}`, {
+      description: text,
+      duration: 1800
+    })
   }
-}, { immediate: true })
+}
+
+// Map task segments, reports, and feedbacks to synthetic FeedbackSession objects
+const syntheticConversationRounds = computed<FeedbackSession[]>(() => {
+  const t = taskStore.currentTask
+  if (!t) return []
+
+  const list: FeedbackSession[] = []
+
+  // 1. Initial Commander Task Planning round
+  const segmentsBody = (t.segments && t.segments.length > 0)
+    ? t.segments.map(s => `### 📌 ${s.name}\n\n${s.content}`).join('\n\n---\n\n')
+    : '暂无规划分段'
+
+  const stagesSummary = (t.stages && t.stages.length > 0)
+    ? `\n\n#### 🎯 规划执行阶段\n` + t.stages.map((st, i) => `${i + 1}. **${st.name}** (${st.status})${st.summary ? ' - ' + st.summary : ''}`).join('\n')
+    : ''
+
+  list.push({
+    session_id: `${t.task_id}-init`,
+    workflow_id: t.task_id,
+    title: t.title || `工单规划 (Rev ${t.revision})`,
+    summary: `【指挥端 Commander】初始化任务规划与执行阶段`,
+    status: 'completed',
+    user_presence: 'autopilot',
+    response_text: `🎖️ 【指挥端规划基准与目标拆解】\n\n${segmentsBody}${stagesSummary}`,
+    user_messages: ['指挥端规划'],
+    consumed_by_ai: true,
+    created_at: t.created_at || t.updated_at || new Date().toISOString(),
+    updated_at: t.updated_at || new Date().toISOString()
+  })
+
+  // 2. Map reports from Executor
+  for (const rep of taskStore.reports) {
+    let kindLabel = '阶段进展'
+    switch (rep.kind) {
+      case 'stage': kindLabel = '阶段里程碑产物'; break
+      case 'evidence': kindLabel = '验证与测试证据'; break
+      case 'question': kindLabel = '外部阻塞提问'; break
+      case 'completion': kindLabel = '完工汇报'; break
+      default: kindLabel = '执行进展'; break
+    }
+
+    const refText = (rep.references && rep.references.length > 0)
+      ? '\n\n**📄 关联代码与文件：**\n' + rep.references.map(r => `- \`${r.path}${r.line ? ':' + r.line : ''}\`${r.description ? ' (' + r.description + ')' : ''}`).join('\n')
+      : ''
+
+    list.push({
+      session_id: `${t.task_id}-rep-${rep.sequence}`,
+      workflow_id: t.task_id,
+      title: `执行上报 #${rep.sequence} · ${kindLabel}`,
+      summary: `⚙️ 【执行端 Executor】Seq #${rep.sequence} (${kindLabel})`,
+      status: 'completed',
+      user_presence: 'autopilot',
+      response_text: `${rep.body}${refText}`,
+      user_messages: [kindLabel, `Seq #${rep.sequence}`],
+      consumed_by_ai: rep.sequence <= t.acknowledged_report_sequence,
+      created_at: rep.created_at,
+      updated_at: rep.created_at
+    })
+  }
+
+  // 3. Map feedbacks from Human / Commander
+  for (const fb of taskStore.feedbacks) {
+    const isHuman = fb.source === 'human'
+    const authorTag = isHuman ? '👤 【人工最高指令】' : '🎖️ 【指挥端调度反馈】'
+
+    list.push({
+      session_id: `${t.task_id}-fb-${fb.sequence}`,
+      workflow_id: t.task_id,
+      title: `${isHuman ? '人工指令' : '指挥端指令'} #${fb.sequence}`,
+      summary: `${authorTag} (Rev ${fb.task_revision})`,
+      status: 'completed',
+      user_presence: isHuman ? 'online' : 'autopilot',
+      response_text: fb.body,
+      user_messages: [isHuman ? '人工输入' : '指挥端同步', `Fb #${fb.sequence}`],
+      consumed_by_ai: true,
+      created_at: fb.created_at,
+      updated_at: fb.created_at
+    })
+  }
+
+  return list.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+})
+
+async function handleDockSubmit(data: { text: string; presets: string[]; images: any[] }) {
+  if (!taskStore.currentTask) return
+  let finalMsg = data.text.trim()
+  if (finalMsg === '' && data.presets.length > 0) {
+    finalMsg = data.presets.join('；')
+  }
+  if (!finalMsg) return
+
+  try {
+    await taskStore.sendFeedback(taskStore.currentTask.task_id, finalMsg, 'human')
+    toast.success('人工最高指令已定向投递至【指挥端】')
+    inputDockRef.value?.resetForm(taskStore.currentTask.task_id)
+    nextTick(() => {
+      messageListRef.value?.scrollToBottom()
+    })
+  } catch (err: any) {
+    toast.error('发送失败: ' + (err.message || err))
+  }
+}
 
 async function handleAckTask(seq: number) {
   if (!taskStore.currentTask) return
   await taskStore.ackReports(taskStore.currentTask.task_id, seq)
-}
-
-async function handleSendTaskFeedback() {
-  if (!taskStore.currentTask || !taskFeedbackBody.value.trim()) return
-  await taskStore.sendFeedback(taskStore.currentTask.task_id, taskFeedbackBody.value)
-  taskFeedbackBody.value = ''
-}
-
-function getReportKindBadge(kind: string) {
-  switch (kind) {
-    case 'progress': return { label: '进展', variant: 'secondary' }
-    case 'stage': return { label: '阶段产物', variant: 'default' }
-    case 'evidence': return { label: '证据', variant: 'outline' }
-    case 'question': return { label: '外部问题', variant: 'destructive' }
-    case 'completion': return { label: '完工汇报', variant: 'default' }
-    default: return { label: kind, variant: 'outline' }
-  }
+  toast.success(`已确认至 Seq #${seq}`)
 }
 </script>
 
 <template>
   <div class="h-full flex flex-col bg-background overflow-hidden relative">
-    <!-- Top Workspace Header (高度 h-14 与左侧侧边栏保持严格一致) -->
+    <!-- Top Workspace Header (与普通会话 Header 保持严格一致的布局与高度) -->
     <header class="h-14 px-3 sm:px-6 border-b border-border/60 flex items-center justify-between gap-2 sm:gap-3 bg-background/80 backdrop-blur-xs shrink-0 z-20">
       <div class="flex items-center gap-2 min-w-0">
         <!-- PC Collapsed Sidebar Expand Button -->
@@ -91,171 +207,117 @@ function getReportKindBadge(kind: string) {
 
         <div class="space-y-0.5 min-w-0">
           <div class="flex items-center gap-2 min-w-0">
-            <Bot class="w-4 h-4 text-foreground shrink-0 hidden sm:inline-block" />
+            <Sparkles class="w-3.5 h-3.5 text-foreground shrink-0 hidden sm:inline-block" />
             <h2 class="text-xs sm:text-sm font-semibold text-foreground tracking-tight font-mono truncate max-w-[140px] sm:max-w-xs md:max-w-md">
-              {{ taskStore.currentTask?.task_id || props.activeItemId || '自动化任务工单' }}
+              {{ taskStore.currentTask?.title || taskStore.currentTask?.task_id || props.activeItemId || '托管自驾工单' }}
             </h2>
             <Badge
               v-if="taskStore.currentTask"
               :variant="taskStore.currentTask.state === 'active' ? 'default' : 'outline'"
-              class="text-[10px] sm:text-xs font-normal rounded-xs shrink-0"
+              class="text-[10px] sm:text-xs font-normal rounded-xs shrink-0 font-mono"
             >
               {{ taskStore.currentTask.state }}
             </Badge>
           </div>
-          <div v-if="taskStore.currentTask" class="flex flex-wrap items-center gap-2 sm:gap-3 text-muted-foreground font-mono text-[10px] sm:text-[11px]">
-            <span>Rev: {{ taskStore.currentTask.revision }}</span>
-            <span>·</span>
-            <span>Seq: {{ taskStore.currentTask.report_sequence }}</span>
-            <span class="hidden sm:inline">·</span>
-            <span class="hidden sm:inline">ACK: {{ taskStore.currentTask.acknowledged_report_sequence }}</span>
+
+          <div class="flex items-center gap-1.5 sm:gap-2 text-[10px] sm:text-xs text-muted-foreground min-w-0">
+            <!-- Task ID (点击复制) -->
+            <button
+              v-if="taskStore.currentTask?.task_id"
+              type="button"
+              class="inline-flex items-center gap-1 font-mono text-[10px] sm:text-[11px] bg-muted/80 hover:bg-accent hover:text-accent-foreground px-1.5 py-0.5 rounded cursor-pointer transition-colors shrink-0 group"
+              :title="`点击复制工单 ID: ${taskStore.currentTask.task_id}`"
+              @click="copyText(taskStore.currentTask.task_id, '工单 ID')"
+            >
+              <Copy class="w-2.5 h-2.5 text-muted-foreground group-hover:text-primary transition-colors" />
+              <span>{{ taskStore.currentTask.task_id }}</span>
+            </button>
+
+            <span class="font-mono text-[10px] sm:text-[11px] text-muted-foreground">
+              Rev {{ taskStore.currentTask?.revision || 1 }} · Seq {{ taskStore.currentTask?.report_sequence || 0 }} (ACK {{ taskStore.currentTask?.acknowledged_report_sequence || 0 }})
+            </span>
           </div>
         </div>
       </div>
 
+      <!-- Right Controls: Tab Switcher & Action buttons -->
       <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
-        <Button
+        <!-- Dual Tab Switcher Pill (进度大盘 / 详细会话) -->
+        <div class="inline-flex p-0.5 rounded-md bg-muted/60 border border-border/80 text-xs font-mono">
+          <button
+            type="button"
+            class="px-2.5 py-1 rounded-sm text-[11px] font-medium transition-all flex items-center gap-1.5 cursor-pointer"
+            :class="activeTab === 'dashboard'
+              ? 'bg-background text-foreground shadow-xs font-semibold'
+              : 'text-muted-foreground hover:text-foreground'"
+            @click="activeTab = 'dashboard'"
+          >
+            <LayoutDashboard class="w-3.5 h-3.5" />
+            <span>进度大盘</span>
+          </button>
+          <button
+            type="button"
+            class="px-2.5 py-1 rounded-sm text-[11px] font-medium transition-all flex items-center gap-1.5 cursor-pointer"
+            :class="activeTab === 'conversation'
+              ? 'bg-background text-foreground shadow-xs font-semibold'
+              : 'text-muted-foreground hover:text-foreground'"
+            @click="activeTab = 'conversation'"
+          >
+            <MessageSquareCode class="w-3.5 h-3.5" />
+            <span>详细会话</span>
+          </button>
+        </div>
+
+        <button
           v-if="taskStore.currentTask && taskStore.currentTask.unread_report_count > 0"
-          variant="default"
-          size="sm"
-          class="h-6 sm:h-7 px-2 text-[10px] sm:text-xs rounded-sm gap-1"
+          type="button"
+          class="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-sm bg-primary text-primary-foreground text-[10px] sm:text-xs font-mono shadow-xs hover:opacity-90 cursor-pointer"
           @click="handleAckTask(taskStore.currentTask.report_sequence)"
         >
           <CheckCircle2 class="w-3.5 h-3.5" />
           <span>ACK Seq {{ taskStore.currentTask.report_sequence }}</span>
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          class="h-6 sm:h-7 px-2 text-[10px] sm:text-xs rounded-sm"
+        </button>
+
+        <button
+          type="button"
+          class="inline-flex items-center gap-1 px-2 py-1 rounded-sm border border-border bg-muted/40 hover:bg-muted/70 text-[10px] sm:text-xs font-mono cursor-pointer"
           @click="props.activeItemId && taskStore.fetchTaskDetail(props.activeItemId)"
           :disabled="taskStore.loading"
         >
-          <RefreshCw class="w-3.5 h-3.5 sm:mr-1" :class="{ 'animate-spin': taskStore.loading }" />
+          <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': taskStore.loading }" />
           <span class="hidden sm:inline">刷新</span>
-        </Button>
+        </button>
       </div>
     </header>
 
-    <!-- Main Task Scroll Area -->
-    <div class="flex-1 overflow-y-auto px-6 py-6 space-y-6 max-w-5xl mx-auto w-full pb-8">
-      <!-- Guide banner -->
-      <div class="bg-card border border-border/80 rounded-md p-4 shadow-2xs space-y-3">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2 text-xs font-semibold text-foreground">
-            <Info class="w-3.5 h-3.5 text-foreground" />
-            <span>TWH Lite 协议自动化流转机制（外部 Master 与 Worker 协作）</span>
-          </div>
-        </div>
-        <p class="text-xs text-muted-foreground leading-relaxed">
-          外部主控通过 <code class="text-foreground font-mono bg-muted px-1 py-0.5 rounded-sm">configure_task</code> 分段下发工作规范，Worker Agent 通过 <code class="text-foreground font-mono bg-muted px-1 py-0.5 rounded-sm">report_progress</code> 流式上报阶段产物与证据，主控实时对账并下发指导指令。
-        </p>
+    <!-- Main Content Body -->
+    <div class="flex-1 flex flex-col min-h-0 relative overflow-hidden">
+      <!-- TAB 1: PROGRESS DASHBOARD VIEW -->
+      <div v-show="activeTab === 'dashboard'" class="flex-1 overflow-y-auto px-3 sm:px-6 py-4 sm:py-6 no-scrollbar">
+        <AutopilotDashboard />
       </div>
 
-      <!-- Segments Card (Master Input) -->
-      <Card class="border-border shadow-2xs rounded-md">
-        <CardHeader class="pb-3 border-b border-border/50 bg-muted/20">
-          <div class="flex items-center justify-between">
-            <CardTitle class="text-sm font-semibold flex items-center gap-2">
-              <FileCode class="w-4 h-4 text-foreground" />
-              【主控下发】分段工单与规范 (Segments)
-            </CardTitle>
-            <div v-if="taskStore.currentTask?.segments" class="flex gap-1.5">
-              <button
-                v-for="seg in taskStore.currentTask.segments"
-                :key="seg.name"
-                type="button"
-                class="text-xs px-2.5 py-1 rounded-sm border transition-all"
-                :class="activeSegmentTab === seg.name
-                  ? 'bg-foreground text-background border-foreground font-medium'
-                  : 'bg-muted/40 hover:bg-muted border-border text-muted-foreground'"
-                @click="activeSegmentTab = seg.name"
-              >
-                {{ seg.name }}
-              </button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent class="pt-4 max-h-[260px] overflow-y-auto">
-          <div v-if="!taskStore.currentTask?.segments || taskStore.currentTask.segments.length === 0" class="text-xs text-muted-foreground py-4 text-center">
-            暂无工单分段。
-          </div>
-          <div v-for="seg in taskStore.currentTask?.segments" :key="seg.name">
-            <MarkdownRenderer v-if="activeSegmentTab === seg.name" :content="seg.content" />
-          </div>
-        </CardContent>
-      </Card>
-
-      <!-- Reports Timeline (Worker Output) -->
-      <Card class="border-border shadow-2xs rounded-md">
-        <CardHeader class="pb-3 border-b border-border/50 flex flex-row items-center justify-between">
-          <div class="space-y-0.5">
-            <CardTitle class="text-sm font-semibold flex items-center gap-2">
-              <TrendingUp class="w-4 h-4 text-foreground" />
-              【执行端上报】阶段报告与证据流 (Reports)
-            </CardTitle>
-            <div v-if="taskStore.currentTask" class="text-[11px] text-muted-foreground font-mono">
-              当前游标：Seq {{ taskStore.currentTask.report_sequence }} / ACK 游标：Seq {{ taskStore.currentTask.acknowledged_report_sequence }}
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent class="pt-4 space-y-3 max-h-[380px] overflow-y-auto">
-          <div v-if="taskStore.reports.length === 0" class="text-center py-6 text-xs text-muted-foreground">
-            暂无阶段报告提交。
-          </div>
-          <div
-            v-for="rep in taskStore.reports"
-            :key="rep.sequence"
-            class="p-3 rounded-md border border-border bg-muted/20 space-y-2"
-          >
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-2">
-                <span class="text-xs font-mono font-bold text-muted-foreground">#{{ rep.sequence }}</span>
-                <Badge :variant="getReportKindBadge(rep.kind).variant as any" class="text-xs rounded-xs">
-                  {{ getReportKindBadge(rep.kind).label }}
-                </Badge>
-              </div>
-              <span class="text-[11px] text-muted-foreground font-mono">
-                {{ new Date(rep.created_at).toLocaleTimeString() }}
-              </span>
-            </div>
-            <MarkdownRenderer :content="rep.body" />
-            <div v-if="rep.references && rep.references.length > 0" class="pt-2 border-t border-border/40 text-xs text-muted-foreground">
-              <span class="font-medium text-foreground">验证路径引用：</span>
-              <span v-for="(ref, idx) in rep.references" :key="idx" class="font-mono ml-1 text-foreground">
-                {{ ref.path }}{{ ref.line ? `:${ref.line}` : '' }}
-              </span>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-
-    <!-- Full-Width Bottom-Flush Master Guidance Input for Task (Seamless) -->
-    <div class="w-full border-t border-border/70 bg-background/95 backdrop-blur-xs px-6 py-3.5 shrink-0 z-30">
-      <div class="space-y-2">
-        <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
-          <Send class="w-3.5 h-3.5 text-muted-foreground" />
-          <span>下发指导指令与纠偏反馈给 Worker Agent</span>
-        </div>
-        <textarea
-          v-model="taskFeedbackBody"
-          rows="2"
-          class="w-full bg-transparent p-1 text-sm focus:outline-none placeholder:text-muted-foreground resize-none leading-relaxed text-foreground"
-          placeholder="在此输入向下游执行端 Agent 下发的指导指令..."
-        ></textarea>
-        <div class="flex justify-end pt-1.5 border-t border-border/40">
-          <Button
-            size="sm"
-            class="h-7 px-3.5 text-xs rounded-sm bg-primary text-primary-foreground hover:opacity-90 font-medium"
-            @click="handleSendTaskFeedback"
-            :disabled="!taskFeedbackBody.trim()"
-          >
-            <Send class="w-3 h-3 mr-1" />
-            <span>发送指导指令</span>
-          </Button>
-        </div>
+      <!-- TAB 2: DETAILED CONVERSATION VIEW (复用普通会话标准消息流) -->
+      <div v-show="activeTab === 'conversation'" class="flex-1 flex flex-col min-h-0 relative">
+        <FeedbackMessageList
+          ref="messageListRef"
+          :conversation-rounds="syntheticConversationRounds"
+          :has-draft-images="false"
+          @scroll-state-change="(scrolled) => isChatScrolledUp = scrolled"
+        />
       </div>
     </div>
+
+    <!-- Bottom Submission Dock (常驻输入区，向指挥端定向发送人工最高指令) -->
+    <FeedbackInputDock
+      ref="inputDockRef"
+      :is-scrolled-up="isChatScrolledUp"
+      :is-submitting="taskStore.loading"
+      :placeholder="'向指挥端投递人工最高指令 · 自动提升最高优先级 (Ctrl+Enter 发送)...'"
+      :button-text="'发送最高指令'"
+      @submit="handleDockSubmit"
+      @scroll-to-bottom="messageListRef?.scrollToBottom()"
+    />
   </div>
 </template>
+

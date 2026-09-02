@@ -100,6 +100,25 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		v1.GET("/settings", handler.GetSettings)
 		v1.PUT("/settings", handler.UpdateSettings)
 
+		// User Norms (Skills)
+		v1.GET("/norms", handler.ListNorms)
+		v1.GET("/norms/:name", handler.GetNorm)
+		v1.POST("/norms", handler.CreateNorm)
+		v1.PUT("/norms/:name", handler.UpdateNorm)
+		v1.DELETE("/norms/:name", handler.DeleteNorm)
+
+		// MCP Credentials
+		v1.GET("/credentials", handler.ListCredentials)
+		v1.GET("/credentials/:id", handler.GetCredential)
+		v1.POST("/credentials", handler.CreateCredential)
+		v1.PUT("/credentials/:id", handler.UpdateCredential)
+		v1.DELETE("/credentials/:id", handler.DeleteCredential)
+		v1.POST("/credentials/:id/regenerate", handler.RegenerateCredentialToken)
+
+		// Workflow Phases
+		v1.GET("/workflows/:workflow_id/phase", handler.GetWorkflowPhase)
+		v1.PUT("/workflows/:workflow_id/phase", handler.SetWorkflowPhase)
+
 		// Security & Rate Limiting & Credentials
 		v1.GET("/auth/blocked_ips", auth.GetBlockedIPs)
 		v1.POST("/auth/unblock_ip", auth.UnblockIP)
@@ -109,8 +128,11 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 
 		// Tasks & Orchestration
 		v1.GET("/tasks", handler.ListTasks)
+		v1.POST("/tasks", handler.CreateTask)
 		v1.GET("/tasks/:id", handler.GetTask)
+		v1.PUT("/tasks/:id/stages", handler.UpdateTaskStages)
 		v1.GET("/tasks/:id/reports", handler.ReadReports)
+		v1.GET("/tasks/:id/feedbacks", handler.ReadTaskFeedbacks)
 		v1.POST("/tasks/:id/feedbacks", handler.SendTaskFeedback)
 		v1.POST("/tasks/:id/ack", handler.AckReports)
 	}

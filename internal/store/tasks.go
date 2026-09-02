@@ -24,10 +24,18 @@ func (s *Store) CreateTask(ctx context.Context, input model.CreateTaskInput) (*m
 		taskID = "task-" + uuid.New().String()[:8]
 	}
 
+	mode := input.Mode
+	if mode == "" {
+		mode = "managed_autopilot"
+	}
+
 	task := &model.Task{
 		ID:                           taskID,
 		ProjectID:                    input.ProjectID,
+		Title:                        input.Title,
+		Mode:                         mode,
 		State:                        "active",
+		Stages:                       input.Stages,
 		Revision:                     1,
 		ReportSequence:               0,
 		FeedbackSequence:             0,
@@ -245,10 +253,16 @@ func (s *Store) SendFeedback(ctx context.Context, input model.SendFeedbackInput)
 			return err
 		}
 
+		source := input.Source
+		if source == "" {
+			source = "human"
+		}
+
 		feedback = model.Feedback{
 			TaskID:         input.TaskID,
 			Sequence:       nextSeq,
 			TaskRevision:   task.Revision,
+			Source:         source,
 			Body:           input.Body,
 			References:     input.References,
 			IdempotencyKey: input.IdempotencyKey,
@@ -262,6 +276,72 @@ func (s *Store) SendFeedback(ctx context.Context, input model.SendFeedbackInput)
 		return nil, err
 	}
 	return &feedback, nil
+}
+
+func (s *Store) UpdateStages(ctx context.Context, input model.UpdateStagesInput) (*model.MutationResult, error) {
+	if input.TaskID == "" {
+		return nil, NewInvalidInputError("task_id is required")
+	}
+
+	var result model.MutationResult
+
+	err := s.WithTx(ctx, func(tx *gorm.DB) error {
+		var task model.Task
+		if err := tx.Where("id = ? AND project_id = ?", input.TaskID, input.ProjectID).First(&task).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return NewNotFoundError(fmt.Sprintf("task %q not found", input.TaskID))
+			}
+			return err
+		}
+
+		if task.State == "closed" {
+			return NewTaskClosedError(fmt.Sprintf("task %q is closed", input.TaskID))
+		}
+
+		if input.ExpectedRevision > 0 && task.Revision != input.ExpectedRevision {
+			return NewConflictError(fmt.Sprintf("revision conflict for task %q: expected %d, got %d", input.TaskID, input.ExpectedRevision, task.Revision), task.Revision)
+		}
+
+		task.Stages = input.Stages
+		if input.CurrentStageID != "" {
+			task.CurrentStageID = input.CurrentStageID
+		}
+		task.Revision++
+		task.UpdatedAt = time.Now()
+
+		if err := tx.Save(&task).Error; err != nil {
+			return err
+		}
+
+		result = model.MutationResult{
+			TaskID:   input.TaskID,
+			Revision: task.Revision,
+			State:    task.State,
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (s *Store) UpdateTaskHeartbeat(ctx context.Context, projectID, taskID, role, sessionID string) error {
+	now := time.Now()
+	updates := map[string]interface{}{
+		"updated_at": now,
+	}
+	if role == "commander" {
+		updates["commander_session_id"] = sessionID
+		updates["commander_heartbeat_at"] = now
+	} else if role == "executor" {
+		updates["executor_session_id"] = sessionID
+		updates["executor_heartbeat_at"] = now
+	}
+	return s.db.WithContext(ctx).Model(&model.Task{}).
+		Where("id = ? AND project_id = ?", taskID, projectID).
+		Updates(updates).Error
 }
 
 func (s *Store) AddReport(ctx context.Context, input model.AddReportInput) (*model.ReportResult, error) {
@@ -509,7 +589,13 @@ func (s *Store) ListTasks(ctx context.Context, projectID, state, cursor string, 
 		summaries[i] = model.TaskSummary{
 			ID:                         t.ID,
 			ProjectID:                  t.ProjectID,
+			Title:                      t.Title,
+			Mode:                       t.Mode,
 			State:                      t.State,
+			CurrentStageID:             t.CurrentStageID,
+			Stages:                     t.Stages,
+			CommanderSessionID:         t.CommanderSessionID,
+			ExecutorSessionID:          t.ExecutorSessionID,
 			Revision:                   t.Revision,
 			ReportSequence:             t.ReportSequence,
 			FeedbackSequence:           t.FeedbackSequence,
@@ -598,6 +684,24 @@ func (s *Store) AckReports(ctx context.Context, projectID, taskID string, throug
 		return nil, err
 	}
 	return &summary, nil
+}
+
+func (s *Store) ReadFeedbacks(ctx context.Context, projectID, taskID string, afterSequence int64, limit int) ([]model.Feedback, error) {
+	if limit <= 0 || limit > model.MaxPageSize {
+		limit = 100
+	}
+
+	var feedbacks []model.Feedback
+	err := s.db.WithContext(ctx).
+		Where("task_id = ? AND sequence > ?", taskID, afterSequence).
+		Order("sequence ASC").
+		Limit(limit).
+		Find(&feedbacks).Error
+
+	if err != nil {
+		return nil, err
+	}
+	return feedbacks, nil
 }
 
 func (s *Store) CloseTask(ctx context.Context, projectID, taskID string, expectedRevision int64, idempotencyKey string) (*model.MutationResult, error) {

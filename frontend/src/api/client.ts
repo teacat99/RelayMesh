@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { FeedbackSession, TaskSummary, TaskDetail, Report, Feedback, SessionImage, WorkflowDraft } from './types'
+import type { FeedbackSession, TaskSummary, TaskDetail, Report, Feedback, SessionImage, WorkflowDraft, TaskStage, Segment, WaitPolicy } from './types'
 
 export const api = axios.create({
   baseURL: '/api/v1',
@@ -153,8 +153,18 @@ export const tasksApi = {
     return res.data
   },
 
+  async create(data: { task_id?: string; title?: string; mode?: string; stages?: TaskStage[]; segments?: Segment[]; wait_policy?: WaitPolicy }): Promise<{ status: string; task: TaskDetail }> {
+    const res = await api.post('/tasks', data)
+    return res.data
+  },
+
   async get(id: string): Promise<{ task: TaskDetail }> {
     const res = await api.get(`/tasks/${encodeURIComponent(id)}`)
+    return res.data
+  },
+
+  async updateStages(id: string, data: { expected_revision?: number; current_stage_id?: string; stages: TaskStage[] }): Promise<{ status: string; result: any }> {
+    const res = await api.put(`/tasks/${encodeURIComponent(id)}/stages`, data)
     return res.data
   },
 
@@ -163,7 +173,12 @@ export const tasksApi = {
     return res.data
   },
 
-  async sendFeedback(id: string, data: { body: string; expected_revision?: number; references?: Array<{ path: string; line?: number; description?: string }> }): Promise<{ status: string; feedback: Feedback }> {
+  async getFeedbacks(id: string, params?: { after_sequence?: number; limit?: number }): Promise<{ feedbacks: Feedback[] }> {
+    const res = await api.get(`/tasks/${encodeURIComponent(id)}/feedbacks`, { params })
+    return res.data
+  },
+
+  async sendFeedback(id: string, data: { body: string; source?: 'human' | 'commander'; expected_revision?: number; references?: Array<{ path: string; line?: number; description?: string }> }): Promise<{ status: string; feedback: Feedback }> {
     const res = await api.post(`/tasks/${encodeURIComponent(id)}/feedbacks`, data)
     return res.data
   },
@@ -186,6 +201,99 @@ export const settingsApi = {
   }
 }
 
+export interface UserNorm {
+  name: string
+  summary: string
+  content: string
+  is_active: boolean
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+export const normsApi = {
+  async list(): Promise<{ norms: UserNorm[] }> {
+    const res = await api.get('/norms')
+    return res.data
+  },
+
+  async get(name: string): Promise<{ norm: UserNorm }> {
+    const res = await api.get(`/norms/${encodeURIComponent(name)}`)
+    return res.data
+  },
+
+  async create(norm: { name: string; summary: string; content: string; is_active?: boolean }): Promise<{ status: string; norm: UserNorm }> {
+    const res = await api.post('/norms', norm)
+    return res.data
+  },
+
+  async update(name: string, updates: Partial<Pick<UserNorm, 'summary' | 'content' | 'is_active'>>): Promise<{ status: string; norm: UserNorm }> {
+    const res = await api.put(`/norms/${encodeURIComponent(name)}`, updates)
+    return res.data
+  },
+
+  async remove(name: string): Promise<{ status: string }> {
+    const res = await api.delete(`/norms/${encodeURIComponent(name)}`)
+    return res.data
+  }
+}
+
+export interface MCPPermissions {
+  feedback: boolean
+  sessions: boolean
+  system_info: boolean
+  skills: boolean
+  configure: boolean
+  execute: boolean
+}
+
+export interface MCPCredential {
+  id: number
+  name: string
+  token: string
+  host_name: string
+  is_active: boolean
+  permissions: MCPPermissions
+  note: string
+  created_at: string
+  updated_at: string
+}
+
+export const credentialsApi = {
+  async list(): Promise<{ credentials: MCPCredential[] }> {
+    const res = await api.get('/credentials')
+    return res.data
+  },
+
+  async get(id: number): Promise<{ credential: MCPCredential }> {
+    const res = await api.get(`/credentials/${id}`)
+    return res.data
+  },
+
+  async create(data: { name: string; host_name?: string; is_active?: boolean; permissions?: Partial<MCPPermissions>; note?: string }): Promise<{ status: string; credential: MCPCredential; token: string }> {
+    const res = await api.post('/credentials', {
+      ...data,
+      permissions: { feedback: true, sessions: true, system_info: true, skills: true, configure: true, execute: true, ...(data.permissions || {}) }
+    })
+    return res.data
+  },
+
+  async update(id: number, updates: Partial<Pick<MCPCredential, 'name' | 'host_name' | 'is_active' | 'permissions' | 'note'>>): Promise<{ status: string; credential: MCPCredential }> {
+    const res = await api.put(`/credentials/${id}`, updates)
+    return res.data
+  },
+
+  async remove(id: number): Promise<{ status: string }> {
+    const res = await api.delete(`/credentials/${id}`)
+    return res.data
+  },
+
+  async regenerateToken(id: number): Promise<{ status: string; credential: MCPCredential; token: string }> {
+    const res = await api.post(`/credentials/${id}/regenerate`)
+    return res.data
+  }
+}
+
 export const draftsApi = {
   async get(workflowId: string): Promise<{ draft: WorkflowDraft | null }> {
     const res = await api.get(`/workflows/${encodeURIComponent(workflowId)}/drafts`)
@@ -202,6 +310,32 @@ export const draftsApi = {
 
   async delete(workflowId: string): Promise<{ status: string }> {
     const res = await api.delete(`/workflows/${encodeURIComponent(workflowId)}/drafts`)
+    return res.data
+  }
+}
+
+export interface PhaseItem {
+  id: string
+  label: string
+  description?: string
+  prompt?: string
+}
+
+export interface WorkflowPhaseState {
+  workflow_id: string
+  current_phase_id: string
+  phases: PhaseItem[]
+  default_prompts?: Record<string, string>
+}
+
+export const phasesApi = {
+  async get(workflowId: string): Promise<WorkflowPhaseState> {
+    const res = await api.get(`/workflows/${encodeURIComponent(workflowId)}/phase`)
+    return res.data
+  },
+
+  async set(workflowId: string, payload: { phase_id?: string; source?: 'human' | 'ai'; phases?: PhaseItem[] }): Promise<WorkflowPhaseState> {
+    const res = await api.put(`/workflows/${encodeURIComponent(workflowId)}/phase`, payload)
     return res.data
   }
 }

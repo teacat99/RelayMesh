@@ -177,6 +177,25 @@ type toolCallResult struct {
 	IsError bool             `json:"isError"`
 }
 
+type CredentialContext struct {
+	CredentialID   uint
+	CredentialName string
+	HostName       string
+	Permissions    model.Permissions
+	Source         string // "db_credential", "env_token", "open_access"
+}
+
+type credCtxKeyType struct{}
+
+var credCtxKey = credCtxKeyType{}
+
+func CredentialFromContext(ctx context.Context) *CredentialContext {
+	if v, ok := ctx.Value(credCtxKey).(*CredentialContext); ok {
+		return v
+	}
+	return nil
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		// Server Info / Health
@@ -218,27 +237,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	role := "all"
-	// 角色权限判定与认证校验
-	if s.cfg.ConfigureToken != "" && tokenString == s.cfg.ConfigureToken {
-		role = "configure"
-	} else if s.cfg.ExecutionToken != "" && tokenString == s.cfg.ExecutionToken {
-		role = "execute"
-	} else if s.cfg.MCPToken != "" {
-		if tokenString == s.cfg.MCPToken {
-			role = "all"
-		} else {
-			// 配置了全局 MCP Token 但未提供有效 Token -> 拒绝访问
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(jsonRPCResponse{
-				JSONRPC: "2.0",
-				ID:      nil,
-				Error:   &rpcError{Code: -32000, Message: "Unauthorized: invalid or missing MCP token"},
-			})
-			return
-		}
+	credCtx, err := s.resolveCredential(r.Context(), tokenString)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      nil,
+			Error:   &rpcError{Code: -32000, Message: err.Error()},
+		})
+		return
 	}
+
+	ctx := context.WithValue(r.Context(), credCtxKey, credCtx)
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -257,12 +268,77 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res := s.handleRPC(r.Context(), role, req)
+	res := s.handleRPC(ctx, credCtx, req)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
 }
 
-func (s *Server) handleRPC(ctx context.Context, role string, req jsonRPCRequest) jsonRPCResponse {
+func (s *Server) resolveCredential(ctx context.Context, tokenString string) (*CredentialContext, error) {
+	// P1: 查 DB MCPCredential
+	if tokenString != "" {
+		dbCred, err := s.store.FindCredentialByToken(ctx, tokenString)
+		if err != nil {
+			return nil, fmt.Errorf("internal error checking credentials: %w", err)
+		}
+		if dbCred != nil {
+			if !dbCred.IsActive {
+				return nil, fmt.Errorf("Unauthorized: credential %q is disabled", dbCred.Name)
+			}
+			return &CredentialContext{
+				CredentialID:   dbCred.ID,
+				CredentialName: dbCred.Name,
+				HostName:       dbCred.HostName,
+				Permissions:    dbCred.Permissions,
+				Source:         "db_credential",
+			}, nil
+		}
+	}
+
+	// P2: 匹配环境变量 Token
+	if s.cfg.ConfigureToken != "" && tokenString == s.cfg.ConfigureToken {
+		return &CredentialContext{
+			CredentialName: "env:configure",
+			Permissions:    model.Permissions{Configure: true},
+			Source:         "env_token",
+		}, nil
+	}
+	if s.cfg.ExecutionToken != "" && tokenString == s.cfg.ExecutionToken {
+		return &CredentialContext{
+			CredentialName: "env:execute",
+			Permissions:    model.Permissions{Execute: true},
+			Source:         "env_token",
+		}, nil
+	}
+	if s.cfg.MCPToken != "" {
+		if tokenString == s.cfg.MCPToken {
+			return &CredentialContext{
+				CredentialName: "env:mcp",
+				Permissions:    model.AllPermissions(),
+				Source:         "env_token",
+			}, nil
+		}
+		// 配置了全局 MCP Token 但未匹配任何 Token → 检查 DB 是否有凭据
+		hasDBCred, _ := s.store.HasAnyCredential(ctx)
+		if !hasDBCred {
+			return nil, fmt.Errorf("Unauthorized: invalid or missing MCP token")
+		}
+		return nil, fmt.Errorf("Unauthorized: invalid or missing MCP token")
+	}
+
+	// P3: 无任何 Token 配置（env 为空且 DB 无凭据）→ 全开放
+	hasDBCred, _ := s.store.HasAnyCredential(ctx)
+	if hasDBCred && tokenString == "" {
+		return nil, fmt.Errorf("Unauthorized: token required (credentials are configured)")
+	}
+
+	return &CredentialContext{
+		CredentialName: "open_access",
+		Permissions:    model.AllPermissions(),
+		Source:         "open_access",
+	}, nil
+}
+
+func (s *Server) handleRPC(ctx context.Context, credCtx *CredentialContext, req jsonRPCRequest) jsonRPCResponse {
 	resp := jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
@@ -290,7 +366,7 @@ func (s *Server) handleRPC(ctx context.Context, role string, req jsonRPCRequest)
 		resp.Result = map[string]any{}
 
 	case "tools/list":
-		tools := GetToolDefinitions(role)
+		tools := GetToolDefinitionsForPermissions(credCtx.Permissions)
 		resp.Result = map[string]any{
 			"tools": tools,
 		}
@@ -305,7 +381,7 @@ func (s *Server) handleRPC(ctx context.Context, role string, req jsonRPCRequest)
 			return resp
 		}
 
-		res, isErr, err := s.dispatchTool(ctx, role, callParams.Name, callParams.Arguments)
+		res, isErr, err := s.dispatchTool(ctx, credCtx, callParams.Name, callParams.Arguments)
 		if err != nil {
 			resp.Result = toolCallResult{
 				Content: []mcpContentItem{
@@ -361,13 +437,9 @@ func (s *Server) handleRPC(ctx context.Context, role string, req jsonRPCRequest)
 	return resp
 }
 
-func (s *Server) dispatchTool(ctx context.Context, role, toolName string, args json.RawMessage) (any, bool, error) {
-	// Role check
-	if role == "configure" && toolName != "configure_task" {
-		return nil, true, fmt.Errorf("tool %q not allowed for configure token", toolName)
-	}
-	if role == "execute" && toolName != "report_progress" {
-		return nil, true, fmt.Errorf("tool %q not allowed for execution token", toolName)
+func (s *Server) dispatchTool(ctx context.Context, credCtx *CredentialContext, toolName string, args json.RawMessage) (any, bool, error) {
+	if !credCtx.Permissions.AllowsTool(toolName) {
+		return nil, true, fmt.Errorf("tool %q not allowed for credential %q", toolName, credCtx.CredentialName)
 	}
 
 	switch toolName {
@@ -391,6 +463,12 @@ func (s *Server) dispatchTool(ctx context.Context, role, toolName string, args j
 		return res, err != nil, err
 	case "get_system_info":
 		res, err := s.handleGetSystemInfo(ctx, args)
+		return res, err != nil, err
+	case "manage_skills":
+		res, err := s.handleManageSkills(ctx, args)
+		return res, err != nil, err
+	case "workflow_context":
+		res, err := s.handleWorkflowContext(ctx, args)
 		return res, err != nil, err
 	default:
 		return nil, true, fmt.Errorf("unknown tool: %s", toolName)

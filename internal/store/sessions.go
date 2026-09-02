@@ -12,14 +12,15 @@ import (
 )
 
 type CreateSessionInput struct {
-	SessionID        string              `json:"session_id,omitempty"`
-	WorkflowID       string              `json:"workflow_id,omitempty"`
-	HostName         string              `json:"host_name,omitempty"`
-	ProjectDirectory string              `json:"project_directory"`
-	Title            string              `json:"title,omitempty"`
-	Summary          string              `json:"summary"`
-	UserPresence     string              `json:"user_presence,omitempty"`
-	TimeoutSeconds   int                 `json:"timeout_seconds,omitempty"`
+	SessionID          string `json:"session_id,omitempty"`
+	WorkflowID         string `json:"workflow_id,omitempty"`
+	EnvHostName        string `json:"env_host_name,omitempty"`
+	CredentialHostName string `json:"credential_host_name,omitempty"`
+	ProjectDirectory   string `json:"project_directory"`
+	Title              string `json:"title,omitempty"`
+	Summary            string `json:"summary"`
+	UserPresence       string `json:"user_presence,omitempty"`
+	TimeoutSeconds     int    `json:"timeout_seconds,omitempty"`
 }
 
 type SubmitFeedbackInput struct {
@@ -67,9 +68,6 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 				if effectiveTitle != "" {
 					existing.Title = effectiveTitle
 				}
-				if input.HostName != "" {
-					existing.HostName = input.HostName
-				}
 				if input.ProjectDirectory != "" {
 					existing.ProjectDirectory = input.ProjectDirectory
 				}
@@ -98,9 +96,17 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 				presence = "online"
 			}
 		}
-		hostName := input.HostName
-		if hostName == "" && globalSettings != nil && globalSettings.HostName != "" {
+		// host_name 优先级链（服务端自主决定，防止 AI 伪装）:
+		// P1: Web UI 设置 > P2: 凭据绑定 > P3: 环境变量 > P4: Workflow 继承 > P5: 默认 "hosts"
+		hostName := ""
+		if globalSettings != nil && globalSettings.HostName != "" {
 			hostName = globalSettings.HostName
+		}
+		if hostName == "" && input.CredentialHostName != "" {
+			hostName = input.CredentialHostName
+		}
+		if hostName == "" && input.EnvHostName != "" {
+			hostName = input.EnvHostName
 		}
 		promptWaitMin := 2
 		waitCountdownMin := 2
@@ -124,7 +130,8 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 				if input.UserPresence == "" && lastSess.UserPresence != "" {
 					presence = lastSess.UserPresence
 				}
-				if input.HostName == "" && lastSess.HostName != "" {
+				// P4: Workflow 继承（仅当 P1-P3 均为空时）
+				if hostName == "" && lastSess.HostName != "" {
 					hostName = lastSess.HostName
 				}
 				if lastSess.PromptWaitMinutes > 0 {
@@ -137,6 +144,10 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 					maxChecks = lastSess.MaxNoFeedbackChecks
 				}
 			}
+		}
+		// P5: 兜底默认值
+		if hostName == "" {
+			hostName = "hosts"
 		}
 
 		// 检查是否有提前暂存的待处理用户反馈 (QueuedFeedback - 提前秒回直取机制)
@@ -223,6 +234,19 @@ func (s *Store) GetLatestWorkflowFeedbackSession(ctx context.Context, workflowID
 		return nil, err
 	}
 	return &session, nil
+}
+
+func (s *Store) GetSessionsByWorkflow(ctx context.Context, workflowID string, limit int) ([]model.FeedbackSession, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	var sessions []model.FeedbackSession
+	err := s.db.WithContext(ctx).
+		Where("workflow_id = ?", workflowID).
+		Order("created_at DESC").
+		Limit(limit).
+		Find(&sessions).Error
+	return sessions, err
 }
 
 func (s *Store) GetCurrentFeedbackSession(ctx context.Context, projectDir string) (*model.FeedbackSession, error) {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch, nextTick } from 'vue'
 import dayjs from 'dayjs'
 import type { FeedbackSession } from '../api/types'
 
@@ -33,6 +33,17 @@ const emit = defineEmits<{
 const hoveredSession = ref<FeedbackSession | null>(null)
 const tooltipTop = ref(0)
 const scrubberContainer = ref<HTMLElement | null>(null)
+const railContainer = ref<HTMLElement | null>(null)
+
+watch(() => props.activeSessionId, (newId) => {
+  if (!newId) return
+  nextTick(() => {
+    const tickEl = document.getElementById(`scrubber-tick-${newId}`)
+    if (tickEl) {
+      tickEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  })
+}, { immediate: true })
 
 function handleMouseEnter(session: FeedbackSession, event: MouseEvent) {
   hoveredSession.value = session
@@ -68,7 +79,10 @@ function getSessionStatusLabel(status: string) {
     @mouseleave="handleMouseLeave"
   >
     <!-- Timeline Vertical Rail of Ticks -->
-    <div class="flex flex-col items-end gap-1 py-1 w-6 max-h-[50vh] overflow-y-auto no-scrollbar">
+    <div
+      ref="railContainer"
+      class="flex flex-col items-end gap-1 py-1 w-6 max-h-[50vh] overflow-y-auto no-scrollbar scrollbar-none"
+    >
       <template v-for="(session, idx) in sessions" :key="session.session_id">
         <!-- Intermediate subtle tick dashes (仅在总轮次 <= 6 时展示，避免多轮对话高度过高溢出) -->
         <template v-if="sessions.length <= 6">
@@ -78,13 +92,14 @@ function getSessionStatusLabel(status: string) {
 
         <!-- Major session tick mark -->
         <div
+          :id="`scrubber-tick-${session.session_id}`"
           class="relative flex items-center justify-end cursor-pointer py-0.5 group/tick w-full"
           @mouseenter="(e) => handleMouseEnter(session, e)"
           @click="handleClick(session.session_id)"
         >
           <!-- The Tick Line -->
           <div
-            class="transition-all duration-150 rounded-xs"
+            class="transition-all duration-200 rounded-xs"
             :class="[
               activeSessionId === session.session_id
                 ? 'w-6 h-[2.5px] bg-foreground shadow-2xs'

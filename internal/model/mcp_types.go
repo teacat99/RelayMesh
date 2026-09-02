@@ -16,20 +16,29 @@ const (
 )
 
 type TaskSummary struct {
-	ID                         string    `json:"task_id"`
-	ProjectID                  string    `json:"project_id"`
-	State                      string    `json:"state"`
-	Revision                   int64     `json:"revision"`
-	ReportSequence             int64     `json:"report_sequence"`
-	FeedbackSequence           int64     `json:"feedback_sequence"`
-	AcknowledgedReportSequence int64     `json:"acknowledged_report_sequence"`
-	UnreadReportCount          int64     `json:"unread_report_count"`
-	UpdatedAt                  time.Time `json:"updated_at"`
+	ID                         string     `json:"task_id"`
+	ProjectID                  string     `json:"project_id"`
+	Title                      string     `json:"title"`
+	Mode                       string     `json:"mode"`
+	State                      string     `json:"state"`
+	CurrentStageID             string     `json:"current_stage_id,omitempty"`
+	Stages                     TaskStages `json:"stages,omitempty"`
+	CommanderSessionID         string     `json:"commander_session_id,omitempty"`
+	ExecutorSessionID          string     `json:"executor_session_id,omitempty"`
+	Revision                   int64      `json:"revision"`
+	ReportSequence             int64      `json:"report_sequence"`
+	FeedbackSequence           int64      `json:"feedback_sequence"`
+	AcknowledgedReportSequence int64      `json:"acknowledged_report_sequence"`
+	UnreadReportCount          int64      `json:"unread_report_count"`
+	UpdatedAt                  time.Time  `json:"updated_at"`
 }
 
 type CreateTaskInput struct {
 	ProjectID      string     `json:"project_id"`
 	TaskID         string     `json:"task_id,omitempty"`
+	Title          string     `json:"title,omitempty"`
+	Mode           string     `json:"mode,omitempty"`
+	Stages         TaskStages `json:"stages,omitempty"`
 	Segments       []Segment  `json:"segments"`
 	WaitPolicy     WaitPolicy `json:"wait_policy"`
 	IdempotencyKey string     `json:"idempotency_key,omitempty"`
@@ -44,6 +53,15 @@ type UpdateTaskInput struct {
 	OldText          string `json:"old_text,omitempty"`
 	NewText          string `json:"new_text"`
 	IdempotencyKey   string `json:"idempotency_key,omitempty"`
+}
+
+type UpdateStagesInput struct {
+	ProjectID        string     `json:"project_id"`
+	TaskID           string     `json:"task_id"`
+	ExpectedRevision int64      `json:"expected_revision,omitempty"`
+	CurrentStageID   string     `json:"current_stage_id,omitempty"`
+	Stages           TaskStages `json:"stages"`
+	IdempotencyKey   string     `json:"idempotency_key,omitempty"`
 }
 
 type SetWaitPolicyInput struct {
@@ -64,6 +82,7 @@ type SendFeedbackInput struct {
 	ProjectID        string          `json:"project_id"`
 	TaskID           string          `json:"task_id"`
 	ExpectedRevision int64           `json:"expected_revision"`
+	Source           string          `json:"source,omitempty"` // "human" | "commander"
 	Body             string          `json:"body"`
 	References       []PathReference `json:"references,omitempty"`
 	IdempotencyKey   string          `json:"idempotency_key,omitempty"`

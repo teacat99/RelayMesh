@@ -2,6 +2,8 @@
 import { ref, computed, onMounted } from 'vue'
 import { useSettingsStore } from '../../stores/settings'
 import { useAuthStore } from '../../stores/auth'
+import { useCredentialsStore } from '../../stores/credentials'
+import type { MCPCredential, MCPPermissions } from '../../api/client'
 import {
   Shield,
   Key,
@@ -25,13 +27,21 @@ import {
   KeyRound,
   RotateCcw,
   Save,
-  CheckCircle2
+  CheckCircle2,
+  Plus,
+  Pencil,
+  Trash2,
+  X,
+  ToggleLeft,
+  ToggleRight,
+  AlertCircle
 } from 'lucide-vue-next'
 import Button from '../ui/button/Button.vue'
 import { toast } from 'vue-sonner'
 
 const settingsStore = useSettingsStore()
 const authStore = useAuthStore()
+const credStore = useCredentialsStore()
 
 const activeClientType = ref<'cursor' | 'claude' | 'cline'>('cursor')
 const customMcpToken = ref('')
@@ -46,6 +56,29 @@ const showOldPass = ref(false)
 const showNewPass = ref(false)
 const isUpdatingCredentials = ref(false)
 const isResettingCredentials = ref(false)
+
+// 凭据管理状态
+const credIsEditing = ref(false)
+const credEditTarget = ref<number | null>(null)
+const credForm = ref({
+  name: '',
+  host_name: '',
+  note: '',
+  is_active: true,
+  permissions: { feedback: true, sessions: true, system_info: true, skills: true, configure: true, execute: true } as MCPPermissions
+})
+const credFormError = ref('')
+const credRevealedToken = ref<string | null>(null)
+const credCopiedId = ref<number | null>(null)
+
+const credPermLabels: { key: keyof MCPPermissions; label: string; tools: string }[] = [
+  { key: 'feedback', label: '沟通反馈', tools: 'interactive_feedback, continue_feedback_session' },
+  { key: 'sessions', label: '会话查询', tools: 'list_sessions, get_session_history' },
+  { key: 'system_info', label: '系统信息', tools: 'get_system_info' },
+  { key: 'skills', label: '规范管理', tools: 'manage_skills' },
+  { key: 'configure', label: '任务指挥', tools: 'configure_task' },
+  { key: 'execute', label: '任务执行', tools: 'report_progress' },
+]
 
 const currentHost = computed(() => {
   return window.location.hostname || 'localhost'
@@ -211,7 +244,108 @@ onMounted(() => {
     settingsStore.fetchBlockedIPs()
     authStore.checkAuthStatus()
   }
+  credStore.fetchCredentials()
 })
+
+// ─── 凭据管理 ───
+
+function credOpenCreate() {
+  credEditTarget.value = null
+  credForm.value = {
+    name: '',
+    host_name: '',
+    note: '',
+    is_active: true,
+    permissions: { feedback: true, sessions: true, system_info: true, skills: true, configure: true, execute: true }
+  }
+  credFormError.value = ''
+  credRevealedToken.value = null
+  credIsEditing.value = true
+}
+
+function credOpenEdit(cred: MCPCredential) {
+  credEditTarget.value = cred.id
+  credForm.value = {
+    name: cred.name,
+    host_name: cred.host_name || '',
+    note: cred.note || '',
+    is_active: cred.is_active,
+    permissions: { ...cred.permissions }
+  }
+  credFormError.value = ''
+  credRevealedToken.value = null
+  credIsEditing.value = true
+}
+
+function credCloseEditor() {
+  credIsEditing.value = false
+  credEditTarget.value = null
+  credFormError.value = ''
+  credRevealedToken.value = null
+}
+
+async function credHandleSave() {
+  credFormError.value = ''
+  const { name, host_name, note, is_active, permissions } = credForm.value
+  if (!name.trim()) { credFormError.value = '凭据名称不能为空'; return }
+
+  try {
+    if (credEditTarget.value !== null) {
+      await credStore.updateCredential(credEditTarget.value, { name, host_name, note, is_active, permissions })
+      credCloseEditor()
+      toast.success('凭据已更新', { duration: 2000 })
+    } else {
+      const res = await credStore.createCredential({ name: name.trim(), host_name, note, is_active, permissions })
+      credRevealedToken.value = res.token
+      toast.success('凭据已创建', { duration: 2000 })
+    }
+  } catch (e: any) {
+    credFormError.value = e?.response?.data?.error || e.message || '保存失败'
+  }
+}
+
+async function credHandleDelete(id: number, name: string) {
+  if (!confirm(`确认删除凭据「${name}」？此操作不可撤销。`)) return
+  try {
+    await credStore.deleteCredential(id)
+    toast.success(`凭据「${name}」已删除`, { duration: 2000 })
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || '删除失败', { duration: 3000 })
+  }
+}
+
+async function credHandleToggle(cred: MCPCredential) {
+  await credStore.toggleActive(cred.id, !cred.is_active)
+}
+
+async function credHandleRegenerate(id: number) {
+  if (!confirm('确认重新生成 Token？旧 Token 将立即失效，使用旧 Token 的 MCP 客户端需要更新配置。')) return
+  try {
+    const token = await credStore.regenerateToken(id)
+    credRevealedToken.value = token
+    toast.success('Token 已重新生成', { duration: 2000 })
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || '重新生成失败', { duration: 3000 })
+  }
+}
+
+async function credCopyToken(token: string, id: number) {
+  try {
+    await navigator.clipboard.writeText(token)
+    credCopiedId.value = id
+    toast.success('Token 已复制', { duration: 1500 })
+    setTimeout(() => { credCopiedId.value = null }, 2000)
+  } catch {
+    /* ignore */
+  }
+}
+
+function credPermSummary(perms: MCPPermissions): string {
+  const all = Object.values(perms).every(v => v)
+  if (all) return '全部权限'
+  const active = credPermLabels.filter(p => perms[p.key]).map(p => p.label)
+  return active.length ? active.join('、') : '无权限'
+}
 </script>
 
 <template>
@@ -606,7 +740,238 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 5. MCP 客户端配置代码示例生成器 (Client Configuration Snippets) -->
+    <!-- 5. MCP 凭据管理 (Credential Management) -->
+    <div class="p-3.5 rounded-xs border border-border/80 bg-card/40 space-y-3">
+      <div class="flex items-center justify-between border-b border-border/60 pb-2.5">
+        <div class="flex items-center gap-2">
+          <KeyRound class="w-4 h-4 text-foreground shrink-0" />
+          <div>
+            <h3 class="font-bold text-xs sm:text-sm text-foreground tracking-tight">MCP 凭据管理</h3>
+            <p class="text-[10px] text-muted-foreground font-sans mt-0.5">
+              为 AI 客户端分发独立 Token，每条凭据可绑定主机名（<code class="text-primary/80">host_name</code>）和细粒度权限
+            </p>
+          </div>
+        </div>
+        <button
+          v-if="!credIsEditing"
+          type="button"
+          class="flex items-center gap-1.5 px-2.5 py-1 rounded-xs text-[10px] font-mono bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer"
+          @click="credOpenCreate"
+        >
+          <Plus class="w-3 h-3" />
+          <span>新建凭据</span>
+        </button>
+      </div>
+
+      <div class="space-y-2.5 pt-1">
+        <!-- Token Reveal Banner -->
+        <div v-if="credRevealedToken && credIsEditing" class="p-3 rounded-xs border border-primary/40 bg-primary/5 space-y-2">
+          <div class="flex items-center gap-2">
+            <Eye class="w-3.5 h-3.5 text-primary" />
+            <span class="text-xs font-mono font-bold text-primary">Token 已生成 — 请立即复制，关闭后不再显示</span>
+          </div>
+          <div class="flex items-center gap-2 bg-card p-2 rounded-xs border border-border/80">
+            <code class="flex-1 text-xs font-mono text-foreground break-all select-all">{{ credRevealedToken }}</code>
+            <button
+              type="button"
+              class="shrink-0 p-1.5 rounded-sm hover:bg-muted cursor-pointer"
+              title="复制"
+              @click="credCopyToken(credRevealedToken!, 0)"
+            >
+              <Copy class="w-3.5 h-3.5" :class="credCopiedId === 0 ? 'text-primary' : 'text-muted-foreground'" />
+            </button>
+          </div>
+          <button
+            type="button"
+            class="px-3 py-1.5 rounded-xs text-xs font-mono bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer"
+            @click="credCloseEditor"
+          >完成</button>
+        </div>
+
+        <!-- Editor -->
+        <div v-if="credIsEditing && !credRevealedToken" class="p-3 rounded-xs border border-primary/30 bg-card/80 space-y-2.5">
+          <div class="flex items-center justify-between border-b border-border/70 pb-2">
+            <span class="font-mono font-bold text-xs text-foreground">{{ credEditTarget !== null ? '编辑凭据' : '新建凭据' }}</span>
+            <button type="button" class="p-1 rounded-sm hover:bg-muted cursor-pointer" @click="credCloseEditor">
+              <X class="w-3.5 h-3.5 text-muted-foreground" />
+            </button>
+          </div>
+
+          <div v-if="credFormError" class="flex items-center gap-1.5 text-xs text-destructive font-mono">
+            <AlertCircle class="w-3 h-3 shrink-0" />
+            {{ credFormError }}
+          </div>
+
+          <div class="grid gap-2.5">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label class="block text-[10px] text-muted-foreground font-mono mb-1">凭据名称</label>
+                <input
+                  v-model="credForm.name"
+                  type="text"
+                  class="w-full h-8 text-xs font-mono px-2.5 rounded-xs bg-background border border-border/80 focus:border-primary focus:outline-none transition-colors text-foreground placeholder:text-muted-foreground/50"
+                  placeholder="wsl-cursor"
+                  maxlength="128"
+                />
+              </div>
+              <div>
+                <label class="block text-[10px] text-muted-foreground font-mono mb-1">绑定主机名 <span class="text-muted-foreground/60">(可选, P2)</span></label>
+                <input
+                  v-model="credForm.host_name"
+                  type="text"
+                  class="w-full h-8 text-xs font-mono px-2.5 rounded-xs bg-background border border-border/80 focus:border-primary focus:outline-none transition-colors text-foreground placeholder:text-muted-foreground/50"
+                  placeholder="wsl"
+                  maxlength="128"
+                />
+              </div>
+            </div>
+            <div>
+              <label class="block text-[10px] text-muted-foreground font-mono mb-1">备注 <span class="text-muted-foreground/60">(可选)</span></label>
+              <input
+                v-model="credForm.note"
+                type="text"
+                class="w-full h-8 text-xs font-mono px-2.5 rounded-xs bg-background border border-border/80 focus:border-primary focus:outline-none transition-colors text-foreground placeholder:text-muted-foreground/50"
+                placeholder="WSL 上的 Cursor IDE"
+                maxlength="512"
+              />
+            </div>
+
+            <div>
+              <label class="block text-[10px] text-muted-foreground font-mono mb-1.5">工具权限</label>
+              <div class="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                <label
+                  v-for="p in credPermLabels"
+                  :key="p.key"
+                  class="flex items-start gap-2 p-2 rounded-xs border border-border/60 hover:border-border cursor-pointer transition-colors"
+                  :class="credForm.permissions[p.key] ? 'bg-primary/5 border-primary/30' : 'bg-background'"
+                >
+                  <input
+                    v-model="credForm.permissions[p.key]"
+                    type="checkbox"
+                    class="mt-0.5 accent-primary"
+                  />
+                  <div>
+                    <span class="text-[11px] font-mono font-medium" :class="credForm.permissions[p.key] ? 'text-foreground' : 'text-muted-foreground'">{{ p.label }}</span>
+                    <p class="text-[9px] text-muted-foreground/60 font-mono mt-0.5 hidden sm:block">{{ p.tools }}</p>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <button type="button" class="p-0.5 rounded-sm cursor-pointer" @click="credForm.is_active = !credForm.is_active">
+                <component
+                  :is="credForm.is_active ? ToggleRight : ToggleLeft"
+                  class="w-5 h-5 transition-colors"
+                  :class="credForm.is_active ? 'text-primary' : 'text-muted-foreground'"
+                />
+              </button>
+              <span class="text-xs font-mono" :class="credForm.is_active ? 'text-foreground' : 'text-muted-foreground'">
+                {{ credForm.is_active ? '启用' : '已禁用（Token 将被拒绝）' }}
+              </span>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-end gap-2 pt-2 border-t border-border/70">
+            <button
+              type="button"
+              class="px-3 py-1.5 rounded-xs text-xs font-mono text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
+              @click="credCloseEditor"
+            >取消</button>
+            <button
+              type="button"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-xs text-xs font-mono bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer"
+              @click="credHandleSave"
+            >
+              <Check class="w-3 h-3" />
+              <span>{{ credEditTarget !== null ? '保存' : '创建并生成 Token' }}</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Credentials List -->
+        <div v-if="credStore.credentials.length === 0 && !credIsEditing" class="p-4 text-center text-[11px] text-muted-foreground font-mono border border-dashed border-border/60 rounded-xs bg-card/30">
+          暂无凭据，所有 MCP 请求以环境变量 Token 或开放模式运行
+        </div>
+
+        <div v-else-if="!credIsEditing || (credIsEditing && credRevealedToken)" class="divide-y divide-border/60 border border-border/70 rounded-xs bg-card/60 overflow-hidden">
+          <div
+            v-for="cred in credStore.credentials"
+            :key="cred.id"
+            class="flex items-start gap-3 p-2.5 hover:bg-card/80 transition-colors group"
+          >
+            <button
+              type="button"
+              class="mt-0.5 p-0.5 rounded-sm cursor-pointer shrink-0"
+              :title="cred.is_active ? '点击禁用' : '点击启用'"
+              @click="credHandleToggle(cred)"
+            >
+              <component
+                :is="cred.is_active ? ToggleRight : ToggleLeft"
+                class="w-5 h-5 transition-colors"
+                :class="cred.is_active ? 'text-primary' : 'text-muted-foreground/50'"
+              />
+            </button>
+
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-mono font-bold text-xs text-foreground">{{ cred.name }}</span>
+                <span
+                  v-if="cred.host_name"
+                  class="text-[9px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 font-mono font-medium"
+                >{{ cred.host_name }}</span>
+                <span
+                  v-if="!cred.is_active"
+                  class="text-[9px] px-1.5 py-0.5 rounded-full bg-destructive/10 text-destructive font-mono font-medium"
+                >disabled</span>
+              </div>
+              <div class="flex items-center gap-2 mt-0.5">
+                <code class="text-[10px] font-mono text-muted-foreground">{{ cred.token }}</code>
+              </div>
+              <p class="text-[10px] text-muted-foreground/70 font-mono mt-0.5">{{ credPermSummary(cred.permissions) }}</p>
+              <p v-if="cred.note" class="text-[10px] text-muted-foreground/60 font-sans mt-0.5 truncate">{{ cred.note }}</p>
+            </div>
+
+            <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+              <button type="button" class="p-1.5 rounded-sm hover:bg-muted cursor-pointer" title="重新生成 Token" @click="credHandleRegenerate(cred.id)">
+                <RefreshCw class="w-3 h-3 text-muted-foreground" />
+              </button>
+              <button type="button" class="p-1.5 rounded-sm hover:bg-muted cursor-pointer" title="编辑" @click="credOpenEdit(cred)">
+                <Pencil class="w-3 h-3 text-muted-foreground" />
+              </button>
+              <button type="button" class="p-1.5 rounded-sm hover:bg-destructive/10 cursor-pointer" title="删除" @click="credHandleDelete(cred.id, cred.name)">
+                <Trash2 class="w-3 h-3 text-muted-foreground hover:text-destructive" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Regenerated Token Reveal -->
+        <div v-if="credRevealedToken && !credIsEditing" class="p-3 rounded-xs border border-primary/40 bg-primary/5 space-y-2">
+          <div class="flex items-center gap-2">
+            <Eye class="w-3.5 h-3.5 text-primary" />
+            <span class="text-xs font-mono font-bold text-primary">新 Token 已生成 — 请立即复制</span>
+          </div>
+          <div class="flex items-center gap-2 bg-card p-2 rounded-xs border border-border/80">
+            <code class="flex-1 text-xs font-mono text-foreground break-all select-all">{{ credRevealedToken }}</code>
+            <button
+              type="button"
+              class="shrink-0 p-1.5 rounded-sm hover:bg-muted cursor-pointer"
+              @click="credCopyToken(credRevealedToken!, -1)"
+            >
+              <Copy class="w-3.5 h-3.5" :class="credCopiedId === -1 ? 'text-primary' : 'text-muted-foreground'" />
+            </button>
+          </div>
+          <button
+            type="button"
+            class="text-xs font-mono text-muted-foreground hover:text-foreground cursor-pointer"
+            @click="credRevealedToken = null"
+          >关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 6. MCP 客户端配置代码示例生成器 (Client Configuration Snippets) -->
     <div class="p-3.5 rounded-xs border border-border/80 bg-card/40 space-y-3">
       <div class="flex items-center justify-between border-b border-border/60 pb-2.5">
         <div class="flex items-center gap-2">

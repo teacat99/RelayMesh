@@ -4,6 +4,8 @@ import type { FeedbackSession, SessionImage } from '../api/types'
 import { sessionsApi } from '../api/client'
 import { useNotifyStore } from './notify'
 import { useAuthStore } from './auth'
+import { useTaskStore } from './task'
+import { useSettingsStore } from './settings'
 
 export const useSessionStore = defineStore('session', () => {
   const currentSession = ref<FeedbackSession | null>(null)
@@ -13,6 +15,7 @@ export const useSessionStore = defineStore('session', () => {
   const loading = ref(false)
   const submitting = ref(false)
   const sseConnected = ref(false)
+  const lastPhaseEvent = ref<{ workflow_id: string; phase: string } | null>(null)
   let eventSource: EventSource | null = null
 
   const notifyStore = useNotifyStore()
@@ -52,9 +55,52 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  let fetchSessionsSeq = 0
+  let refreshTimer: any = null
+
+  function applySessionPayload(data: any) {
+    if (!data || typeof data !== 'object') return
+    const sess = (data.session || data) as FeedbackSession
+    if (!sess || !sess.session_id) return
+
+    const idx = sessions.value.findIndex(s => s.session_id === sess.session_id)
+    if (idx !== -1) {
+      sessions.value[idx] = { ...sessions.value[idx], ...sess }
+    } else {
+      sessions.value.unshift(sess)
+    }
+
+    if (selectedSession.value?.session_id === sess.session_id) {
+      selectedSession.value = { ...selectedSession.value, ...sess }
+    }
+
+    if (currentSession.value?.session_id === sess.session_id) {
+      if (sess.status === 'pending') {
+        currentSession.value = { ...currentSession.value, ...sess }
+      } else {
+        currentSession.value = null
+      }
+    } else if (sess.status === 'pending' && !currentSession.value) {
+      currentSession.value = sess
+    }
+  }
+
+  function debouncedRefresh() {
+    if (refreshTimer) clearTimeout(refreshTimer)
+    refreshTimer = setTimeout(() => {
+      fetchCurrentSession()
+      fetchSessions()
+      fetchQueuedFeedbacks()
+    }, 120)
+  }
+
   async function fetchSessions(status?: string) {
+    const reqSeq = ++fetchSessionsSeq
     try {
       const res = await sessionsApi.list({ status, limit: 200 })
+      if (reqSeq !== fetchSessionsSeq) {
+        return
+      }
       sessions.value = res.sessions
       if (!selectedSession.value) {
         if (currentSession.value) {
@@ -82,11 +128,8 @@ export const useSessionStore = defineStore('session', () => {
         user_messages: userMessages,
         images: images
       })
-      if (currentSession.value?.session_id === sessionId) {
-        currentSession.value = res.session
-      }
-      if (selectedSession.value?.session_id === sessionId) {
-        selectedSession.value = res.session
+      if (res.session) {
+        applySessionPayload(res.session)
       }
       await fetchSessions()
       return res.session
@@ -261,6 +304,15 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  function parseSSEEventData(e: MessageEvent): any {
+    if (!e.data) return null
+    try {
+      return JSON.parse(e.data)
+    } catch (_) {
+      return null
+    }
+  }
+
   function connectSSE() {
     if (eventSource) return
 
@@ -276,45 +328,71 @@ export const useSessionStore = defineStore('session', () => {
     eventSource.onerror = () => {
       sseConnected.value = false
     }
-    eventSource.addEventListener('session_update', () => {
-      fetchCurrentSession()
-      fetchSessions()
-      fetchQueuedFeedbacks()
+    eventSource.addEventListener('session_update', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      if (payload) applySessionPayload(payload)
+      debouncedRefresh()
     })
-    eventSource.addEventListener('session_updated', () => {
-      fetchCurrentSession()
-      fetchSessions()
-      fetchQueuedFeedbacks()
+    eventSource.addEventListener('session_updated', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      if (payload) applySessionPayload(payload)
+      debouncedRefresh()
     })
-    eventSource.addEventListener('session_completed', () => {
-      fetchCurrentSession()
-      fetchSessions()
-      fetchQueuedFeedbacks()
+    eventSource.addEventListener('session_completed', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      if (payload) applySessionPayload(payload)
+      debouncedRefresh()
     })
-    eventSource.addEventListener('session_cancelled', () => {
-      fetchCurrentSession()
-      fetchSessions()
-      fetchQueuedFeedbacks()
+    eventSource.addEventListener('session_cancelled', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      if (payload) applySessionPayload(payload)
+      debouncedRefresh()
     })
-    eventSource.addEventListener('session_archived', () => {
-      fetchCurrentSession()
-      fetchSessions()
-      fetchQueuedFeedbacks()
+    eventSource.addEventListener('session_archived', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      if (payload) applySessionPayload(payload)
+      debouncedRefresh()
     })
-    eventSource.addEventListener('session_unarchived', () => {
-      fetchCurrentSession()
-      fetchSessions()
-      fetchQueuedFeedbacks()
+    eventSource.addEventListener('session_unarchived', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      if (payload) applySessionPayload(payload)
+      debouncedRefresh()
     })
-    eventSource.addEventListener('session_keepalive', () => {
-      fetchCurrentSession()
-      fetchSessions()
+    eventSource.addEventListener('session_keepalive', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      if (payload) applySessionPayload(payload)
+      debouncedRefresh()
     })
     eventSource.addEventListener('queued_feedback_updated', () => {
       fetchQueuedFeedbacks()
     })
     eventSource.addEventListener('queued_feedback_revoked', () => {
       fetchQueuedFeedbacks()
+    })
+    eventSource.addEventListener('task_update', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      const taskStore = useTaskStore()
+      taskStore.debouncedRefresh(payload?.task_id)
+    })
+    eventSource.addEventListener('task_feedback', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      const taskStore = useTaskStore()
+      taskStore.debouncedRefresh(payload?.task_id)
+    })
+    eventSource.addEventListener('task_ack', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      const taskStore = useTaskStore()
+      taskStore.debouncedRefresh(payload?.task_id)
+    })
+    eventSource.addEventListener('settings_updated', () => {
+      const settingsStore = useSettingsStore()
+      settingsStore.fetchRemoteSettings()
+    })
+    eventSource.addEventListener('phase_changed', (e: MessageEvent) => {
+      const payload = parseSSEEventData(e)
+      if (payload?.workflow_id) {
+        lastPhaseEvent.value = { workflow_id: payload.workflow_id, phase: payload.phase || '' }
+      }
     })
   }
 
@@ -334,6 +412,7 @@ export const useSessionStore = defineStore('session', () => {
     loading,
     submitting,
     sseConnected,
+    lastPhaseEvent,
     selectSession,
     fetchCurrentSession,
     fetchSessions,

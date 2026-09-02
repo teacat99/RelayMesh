@@ -91,7 +91,7 @@ export function useDraftManager() {
         if (data && Array.isArray(data.drafts) && data.drafts.length > 0) {
           multiDrafts.value = {
             activeIndex: typeof data.activeIndex === 'number' && data.activeIndex < data.drafts.length ? data.activeIndex : 0,
-            drafts: data.drafts.slice(0, 5)
+            drafts: data.drafts
           }
           loadedLocal = true
         }
@@ -118,17 +118,16 @@ export function useDraftManager() {
       onApplyDraft(currentDraft)
     }
 
-    // Background asynchronous database synchronization
-    try {
-      const res = await draftsApi.get(wId)
-      if (res && res.draft && res.draft.drafts_json) {
-        const serverData = JSON.parse(res.draft.drafts_json)
-        if (serverData && Array.isArray(serverData.drafts) && serverData.drafts.length > 0) {
-          const localHasContent = multiDrafts.value.drafts.some(d => (d.text && d.text.trim().length > 0) || (d.images && d.images.length > 0))
-          if (!localHasContent) {
+    // 仅当本地无任何记录时才从数据库恢复，防止覆盖已清空的草稿
+    if (!loadedLocal) {
+      try {
+        const res = await draftsApi.get(wId)
+        if (res && res.draft && res.draft.drafts_json) {
+          const serverData = JSON.parse(res.draft.drafts_json)
+          if (serverData && Array.isArray(serverData.drafts) && serverData.drafts.length > 0) {
             multiDrafts.value = {
               activeIndex: typeof serverData.activeIndex === 'number' && serverData.activeIndex < serverData.drafts.length ? serverData.activeIndex : 0,
-              drafts: serverData.drafts.slice(0, 5)
+              drafts: serverData.drafts
             }
             try {
               localStorage.setItem(wKey, JSON.stringify(multiDrafts.value))
@@ -139,14 +138,13 @@ export function useDraftManager() {
             }
           }
         }
+      } catch (err) {
+        console.warn('Failed to load workflow draft from database:', err)
       }
-    } catch (err) {
-      console.warn('Failed to load workflow draft from database:', err)
     }
   }
 
   function addNewDraft(workflowId: string, currentText: string, currentPresets: string[], currentImages: SessionImage[], onApply: (d: InputDraftItem) => void) {
-    if (multiDrafts.value.drafts.length >= 5) return
     saveDrafts(workflowId, currentText, currentPresets, currentImages)
     const newId = String(Date.now())
     const newDraft: InputDraftItem = {

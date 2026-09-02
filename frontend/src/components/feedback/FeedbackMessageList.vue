@@ -163,6 +163,9 @@ watch(topSentinelRef, () => {
 
 onMounted(() => {
   setupTopObserver()
+  nextTick(() => {
+    updateActiveSessionFromScroll()
+  })
 })
 
 onBeforeUnmount(() => {
@@ -272,6 +275,9 @@ function scrollToBottom(smooth = true) {
   isScrolledUp.value = false
   unreadNewMessagesCount.value = 0
   emit('scroll-state-change', false)
+  if (props.conversationRounds.length > 0) {
+    activeSessionIdInScrubber.value = props.conversationRounds[props.conversationRounds.length - 1].session_id
+  }
   if (chatScrollContainer.value) {
     const el = chatScrollContainer.value
     if (smooth) {
@@ -281,12 +287,14 @@ function scrollToBottom(smooth = true) {
       })
       setTimeout(() => {
         if (el) el.scrollTop = el.scrollHeight
+        updateActiveSessionFromScroll()
       }, 250)
     } else {
       // 首次加载/刷新/切换会话：瞬间即时直达底部，无滑动动画
       el.scrollTop = el.scrollHeight
       nextTick(() => {
         if (el) el.scrollTop = el.scrollHeight
+        updateActiveSessionFromScroll()
       })
     }
   }
@@ -296,6 +304,58 @@ function scrollToBottom(smooth = true) {
 function scrollByDelta(delta: number) {
   if (chatScrollContainer.value) {
     chatScrollContainer.value.scrollTop += delta
+  }
+}
+
+function updateActiveSessionFromScroll() {
+  if (!chatScrollContainer.value || props.conversationRounds.length === 0) return
+
+  const container = chatScrollContainer.value
+  const { scrollTop, scrollHeight, clientHeight } = container
+
+  // 1. 若接近最底部 (30px 内)，直接选定最新一轮
+  if (scrollHeight - (scrollTop + clientHeight) <= 30) {
+    const lastSession = props.conversationRounds[props.conversationRounds.length - 1]
+    if (lastSession) {
+      activeSessionIdInScrubber.value = lastSession.session_id
+      return
+    }
+  }
+
+  // 2. 若在最顶部 (10px 内)，选定当前展示的最早一轮
+  if (scrollTop <= 10 && displayedConversationRounds.value.length > 0) {
+    activeSessionIdInScrubber.value = displayedConversationRounds.value[0].session_id
+    return
+  }
+
+  // 3. 计算视口中间偏上基准线 (35% 高度处作为阅读视线)
+  const containerRect = container.getBoundingClientRect()
+  const targetY = containerRect.top + containerRect.height * 0.35
+
+  let bestSessionId: string | null = null
+  let minDistance = Infinity
+
+  for (const s of displayedConversationRounds.value) {
+    const el = document.getElementById(`session-${s.session_id}`)
+    if (el) {
+      const rect = el.getBoundingClientRect()
+      // 如果当前卡片正跨越视线基准点
+      if (rect.top <= targetY && rect.bottom >= targetY) {
+        bestSessionId = s.session_id
+        break
+      }
+      // 否则计算卡片中心点与视线基准点的距离
+      const cardCenter = (rect.top + rect.bottom) / 2
+      const dist = Math.abs(cardCenter - targetY)
+      if (dist < minDistance) {
+        minDistance = dist
+        bestSessionId = s.session_id
+      }
+    }
+  }
+
+  if (bestSessionId) {
+    activeSessionIdInScrubber.value = bestSessionId
   }
 }
 
@@ -316,17 +376,8 @@ function handleScroll() {
     loadEarlierRounds()
   }
 
-  // Detect nearest session for scrubber highlight
-  for (const s of props.conversationRounds) {
-    const el = document.getElementById(`session-${s.session_id}`)
-    if (el) {
-      const rect = el.getBoundingClientRect()
-      if (rect.top <= 260 && rect.bottom >= 100) {
-        activeSessionIdInScrubber.value = s.session_id
-        break
-      }
-    }
-  }
+  // 自动实时更新 TimelineScrubber 跟踪的活跃会话节点
+  updateActiveSessionFromScroll()
 }
 
 defineExpose({
@@ -342,7 +393,7 @@ defineExpose({
     <!-- Scrollable Conversation Feed -->
     <div
       ref="chatScrollContainer"
-      class="h-full overflow-y-auto px-3 sm:px-8 py-4 sm:py-6 space-y-6 sm:space-y-8 transition-[padding] duration-150"
+      class="h-full overflow-y-auto px-3 sm:px-8 py-4 sm:py-6 space-y-6 sm:space-y-8 transition-[padding] duration-150 no-scrollbar scrollbar-none"
       :class="props.hasDraftImages ? 'pb-28 sm:pb-32' : 'pb-14 sm:pb-16'"
       @scroll="handleScroll"
     >

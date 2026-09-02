@@ -21,7 +21,6 @@ import {
   Volume2,
   VolumeX,
   Radio,
-  Cpu,
   Settings
 } from 'lucide-vue-next'
 

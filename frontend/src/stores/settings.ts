@@ -71,14 +71,14 @@ export interface StatusStrategyConfig {
 
 export interface FlowPromptsConfig {
   online: {
-    waitPollPrompt: string           // 在线等待轮询提示词 (支持 {wait_minutes})
-    exhaustedPrompt: string          // 在线超限终态提示词 (支持 {max_checks}, {total_hours})
+    waitPollPrompt: string           // 在线等待轮询提示词 (支持 {wait_minutes}, {wait_ms}, {session_id}, {workflow_id})
+    exhaustedPrompt: string          // 在线超限终态提示词 (支持 {max_checks}, {total_hours}, {workflow_id})
   }
   away: {
-    immediatePrompt: string          // 暂离模式即时分流提示词 (支持 {user_status})
+    immediatePrompt: string          // 安全兜底模式提示词 (支持 {session_id}, {workflow_id})
   }
   autopilot: {
-    immediatePrompt: string          // 托管自驾模式接管提示词 (支持 {scope_limit})
+    immediatePrompt: string          // 外部编排模式提示词 (支持 {session_id}, {workflow_id})
   }
 }
 
@@ -89,6 +89,13 @@ export interface SecuritySettings {
   whitelistIps?: string[]
 }
 
+export interface PhaseTemplateItem {
+  id: string
+  label: string
+  description?: string
+  prompt?: string
+}
+
 export interface AppSettings {
   hostName: string
   defaultTimeoutSeconds: number
@@ -97,6 +104,8 @@ export interface AppSettings {
   statusStrategies: StatusStrategyConfig
   flowPrompts: FlowPromptsConfig
   security: SecuritySettings
+  userMemory: string
+  phaseTemplate: PhaseTemplateItem[]
   autoExtendMinutes: number
   promptWaitMinutes: number
   maxNoFeedbackChecks: number
@@ -119,6 +128,13 @@ const STORAGE_KEY = 'relaymesh.settings'
 const DEFAULT_SETTINGS: AppSettings = {
   hostName: '',
   defaultTimeoutSeconds: 120, // 2 minutes
+  phaseTemplate: [
+    { id: 'assess', label: '评估', description: '需求接入与理解确认', prompt: '当前处于需求评估阶段。通过 feedback 收集用户描述，逐条记录到会话文档，保留用户原话。对每条需求复述自己的理解：真实场景、根因推测、期望行为、验收标准。等待用户确认后再进入方案阶段。不急于敲定方案选型，先听完并理解真实需求，并引导用户完善需求，汇报不同方案的利弊，对每个需求列出推荐方案、风险、改动范围与备选。方向敲定后可调整到方案阶段。⚠️ 本阶段禁止修改代码。可以读取代码验证可行性，但不得创建、修改或删除任何源代码文件。如确需修改代码，必须先通过 feedback 获得用户二次确认并切换到开发阶段。' },
+    { id: 'plan', label: '方案', description: '方案设计与评审拍板', prompt: '当前处于方案设计阶段。决策确认→问题拆解→数据流→不变量→边界→影响面→备选→验收。阅读代码和文档，注意核对方案可行性，确保实施阶段的逻辑闭环；通过 feedback 与用户逐项确认，将每条决策写入会话文档「关键决策」。决策全部锁定后等待用户确认再进入开发。⚠️ 本阶段禁止修改代码。可以读取代码验证可行性，但不得创建、修改或删除任何源代码文件。如确需修改代码，必须先通过 feedback 获得用户二次确认并切换到开发阶段。' },
+    { id: 'dev', label: '开发', description: '编码实施与增量验证', prompt: '当前处于开发执行阶段。改前先读相关代码与文档，沿用项目惯用模式。每完成一个逻辑单元立即增量验证（lint/type-check→build），不等全部完成再统一修。改 import/接口/类型时检查所有引用方。每 200-500 行改动即 commit。如发现方案和代码冲突，先记录并尝试解决，解决不了则向用户汇报，并回退到方案阶段。开发完成后进入验证阶段。' },
+    { id: 'verify', label: '验证', description: '三件套通过与功能验证', prompt: '当前处于部署验证阶段。执行三件套：lint/type-check→build→功能验证。部署、DB迁移、push main 等不可逆操作必须二次确认。完成标准 = 功能 + 类型 + 编译 + 校验 + 文档同步 + 配置同步 + 开发记录，每条须有可验证证据。验证失败回退到开发阶段修复，验证成功进入完成阶段，使用 feedback 汇报。' },
+    { id: 'done', label: '完成', description: '汇报完成与等待下一步', prompt: '当前阶段的开发任务完成。通过 feedback 提交最终汇报：修改内容、原因、影响范围、验证结果与后续建议。盘点后台进程和未提交变更，归档会话文档。等待用户确认下一步需求或结束会话。' },
+  ],
   quickPresets: [
     { id: 'qp-1', title: '按计划推进', content: '按计划推进', allowAppend: false, appendTitle: '按计划推进', isAppendActive: false, isMutex: false, mutexTargets: [] },
     { id: 'qp-2', title: '同意方案，请继续', content: '同意方案，请继续', allowAppend: false, appendTitle: '同意方案', isAppendActive: false, isMutex: false, mutexTargets: [] },
@@ -169,16 +185,17 @@ const DEFAULT_SETTINGS: AppSettings = {
     lockoutMinutes: 15,
     whitelistIps: ['127.0.0.1', '::1']
   },
+  userMemory: '',
   flowPrompts: {
     online: {
-      waitPollPrompt: '严格执行：等待 {wait_minutes} 分钟，期间不得输出、调用工具或执行任何其他操作。等待结束后，第一步调用 continue_feedback_session 工具获取反馈；本指令不得作为循环触发或循环判定条件；循环与否仅由 continue_feedback_session 的返回结果决定。',
-      exhaustedPrompt: '用户反馈已超时。立即挂起当前任务，停止后续执行，并终止终端中仍在运行的后台进程。随后总结当前会话的执行进度、已完成事项、未完成事项及后续恢复点；总结完成后结束本轮执行，不再进行其他操作。'
+      waitPollPrompt: '',
+      exhaustedPrompt: ''
     },
     away: {
-      immediatePrompt: '【系统回执·用户暂离】用户当前处于暂离状态。请将非阻塞性问题记录暂存，优先推进已明确授权的开发范围，不可逆动作一律暂缓。'
+      immediatePrompt: ''
     },
     autopilot: {
-      immediatePrompt: '【系统回执·托管自驾】当前处于 M-C 自驾模式，方案已自动接管授权。请严格按照规划目标推进，如遇不可逆高风险操作（DB迁移/部署/破坏性命令）请立即停下。'
+      immediatePrompt: ''
     }
   },
   autoExtendMinutes: 5,
@@ -198,11 +215,41 @@ const DEFAULT_SETTINGS: AppSettings = {
   autoScrollToBottom: true
 }
 
+const KNOWN_STALE_PREFIXES: Record<string, string[]> = {
+  'online.waitPollPrompt': [
+    '严格执行：等待 {wait_minutes} 分钟',
+    '严格执行：等待',
+  ],
+  'online.exhaustedPrompt': [
+    '用户反馈已超时，进入会话结束与环境收尾规程',
+  ],
+  'away.immediatePrompt': [
+    '【系统回执·用户暂离】用户当前处于暂离状态',
+  ],
+  'autopilot.immediatePrompt': [
+    '【系统回执·托管自驾】当前处于 M-C 自驾模式',
+  ],
+}
+
+function migrateStaleFlowPrompts(fp: any): void {
+  if (!fp) return
+  for (const [path, prefixes] of Object.entries(KNOWN_STALE_PREFIXES)) {
+    const [section, key] = path.split('.')
+    const val = fp[section]?.[key]
+    if (typeof val === 'string' && val.length > 0 && prefixes.some(p => val.startsWith(p))) {
+      fp[section][key] = ''
+    }
+  }
+}
+
 function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
+      if (parsed.flowPrompts) {
+        migrateStaleFlowPrompts(parsed.flowPrompts)
+      }
       return {
         ...DEFAULT_SETTINGS,
         ...parsed,

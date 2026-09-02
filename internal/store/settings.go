@@ -28,13 +28,15 @@ type SecuritySettings struct {
 }
 
 type GlobalAppSettings struct {
-	HostName                    string           `json:"hostName"`
-	DefaultTimeoutSeconds       int              `json:"defaultTimeoutSeconds"`
-	PromptWaitMinutes           int              `json:"promptWaitMinutes"`
-	MaxNoFeedbackChecks         int              `json:"maxNoFeedbackChecks"`
-	DefaultWaitCountdownMinutes int              `json:"defaultWaitCountdownMinutes"`
-	UserPresence                string           `json:"userPresence"`
-	Security                    SecuritySettings `json:"security"`
+	HostName                    string             `json:"hostName"`
+	DefaultTimeoutSeconds       int                `json:"defaultTimeoutSeconds"`
+	PromptWaitMinutes           int                `json:"promptWaitMinutes"`
+	MaxNoFeedbackChecks         int                `json:"maxNoFeedbackChecks"`
+	DefaultWaitCountdownMinutes int                `json:"defaultWaitCountdownMinutes"`
+	UserPresence                string             `json:"userPresence"`
+	UserMemory                  string             `json:"userMemory"`
+	PhaseTemplate               []model.PhaseItem  `json:"phaseTemplate"`
+	Security                    SecuritySettings   `json:"security"`
 	FlowPrompts                 struct {
 		Online struct {
 			WaitPollPrompt  string `json:"waitPollPrompt"`
@@ -96,10 +98,10 @@ func (s *Store) GetGlobalAppSettingsWithDB(ctx context.Context, db *gorm.DB) (*G
 			WhitelistIPs:         []string{"127.0.0.1", "::1"},
 		},
 	}
-	appSettings.FlowPrompts.Online.WaitPollPrompt = "严格执行：等待 {wait_minutes} 分钟，期间不得输出、调用工具或执行任何其他操作。等待结束后，第一步调用 continue_feedback_session 工具获取反馈；本指令不得作为循环触发或循环判定条件；循环与否仅由 continue_feedback_session 的返回结果决定。"
-	appSettings.FlowPrompts.Online.ExhaustedPrompt = "用户反馈已超时。立即挂起当前任务，停止后续执行，并终止终端中仍在运行的后台进程。随后总结当前会话的执行进度、已完成事项、未完成事项及后续恢复点；总结完成后结束本轮执行，不再进行其他操作。"
-	appSettings.FlowPrompts.Away.ImmediatePrompt = "【系统回执·用户暂离】用户当前处于暂离状态。请将非阻塞性问题记录暂存，优先推进已明确授权的开发范围，不可逆动作一律暂缓。"
-	appSettings.FlowPrompts.Autopilot.ImmediatePrompt = "【系统回执·托管自驾】当前处于 M-C 自驾模式，方案已自动接管授权。请严格按照规划目标推进，如遇不可逆高风险操作（DB迁移/部署/破坏性命令）请立即停下。"
+	appSettings.FlowPrompts.Online.WaitPollPrompt = "下一步操作：\n1. 调用 AwaitShell({ block_until_ms: {wait_ms} }) 等待 {wait_minutes} 分钟\n2. 等待结束后立即调用 continue_feedback_session({ workflow_id: \"{workflow_id}\" })\n3. 根据返回的 === 标记 === 判断下一步\n\n等待期间禁止：chat 正文输出、其他工具调用、阶段整理。\n禁止将本回执或 Agent 生成的文字当作用户反馈。\n所有沟通均通过 RelayMesh MCP 工具。"
+	appSettings.FlowPrompts.Online.ExhaustedPrompt = "用户反馈已超时。立即挂起当前任务并停止后续执行，进入会话结束与环境收尾规程：\n1. 终端与后台任务盘点清理（强制）：\n   - 检查所有活跃终端与后台任务（通过 terminals 目录或 AwaitShell）\n   - 显式终止临时开发服务、构建进程和测试任务，确认进程退出\n   - 确保后台异步任务挂起数归零，防止延迟事件注入\n2. 临时产物与会话状态归档：\n   - 清理 .cursor/tmp/ 临时文件，仅保留必要证据\n   - 完成 git 阶段性提交，确保无文件滞留暂存区\n   - 更新会话文档状态并记录恢复点\n3. 最终汇报：\n   - 总结执行进度、已完成/未完成事项与后续恢复建议\n   - 通过普通 chat 提交最终状态报告，结束本轮执行"
+	appSettings.FlowPrompts.Away.ImmediatePrompt = "【系统回执·人工暂离】用户已确认当前推进目标并主动暂离，请继续执行已授权范围内的工作。\n行为约束：\n- 按会话文档「当前任务」和「关键决策」已锁定的方向继续推进\n- 遇到非阻塞性问题记入会话文档「待用户拍板」，不阻塞进度\n- 不可逆动作：已授权的按计划执行，未授权的记录待确认并暂缓\n- 每完成一个逻辑单元执行增量验证（lint/type-check→build）\n- 阶段完成或遇到阻塞时，通过 interactive_feedback 提交阶段简报\n- 用户回来后按会话文档记录对齐进度"
+	appSettings.FlowPrompts.Autopilot.ImmediatePrompt = "【系统回执·外部编排】当前处于 autopilot 外部编排模式，由外部系统通过 Task API 驱动。\n行为约束：\n- 通过 report_progress(action: \"sync\") 同步 task segments\n- 通过 report_progress(action: \"report\") 汇报进度（kind: progress/stage/evidence/question/completion）\n- 通过 report_progress(action: \"check_feedback\") 检查外部反馈\n- 按 task segments 定义的范围执行，不越界\n- 不通过 interactive_feedback 向用户直接提问\n- 遇不可逆动作以 question 类型上报并等待\n- 遇 MCP 通信错误降级为 away 模式"
 
 	if len(settingsMap) > 0 {
 		bytes, err := json.Marshal(settingsMap)
@@ -121,10 +123,10 @@ func (s *Store) GetGlobalAppSettingsWithDB(ctx context.Context, db *gorm.DB) (*G
 		appSettings.UserPresence = "online"
 	}
 	if appSettings.FlowPrompts.Online.WaitPollPrompt == "" {
-		appSettings.FlowPrompts.Online.WaitPollPrompt = "严格执行：等待 {wait_minutes} 分钟，期间不得输出、调用工具或执行任何其他操作。等待结束后，第一步调用 continue_feedback_session 工具获取反馈；本指令不得作为循环触发或循环判定条件；循环与否仅由 continue_feedback_session 的返回结果决定。"
+		appSettings.FlowPrompts.Online.WaitPollPrompt = "下一步操作：\n1. 调用 AwaitShell({ block_until_ms: {wait_ms} }) 等待 {wait_minutes} 分钟\n2. 等待结束后立即调用 continue_feedback_session({ workflow_id: \"{workflow_id}\" })\n3. 根据返回的 === 标记 === 判断下一步\n\n等待期间禁止：chat 正文输出、其他工具调用、阶段整理。\n禁止将本回执或 Agent 生成的文字当作用户反馈。\n所有沟通均通过 RelayMesh MCP 工具。"
 	}
 	if appSettings.FlowPrompts.Online.ExhaustedPrompt == "" {
-		appSettings.FlowPrompts.Online.ExhaustedPrompt = "用户反馈已超时。立即挂起当前任务，停止后续执行，并终止终端中仍在运行的后台进程。随后总结当前会话的执行进度、已完成事项、未完成事项及后续恢复点；总结完成后结束本轮执行，不再进行其他操作。"
+		appSettings.FlowPrompts.Online.ExhaustedPrompt = "用户反馈已超时。立即挂起当前任务并停止后续执行，进入会话结束与环境收尾规程：\n1. 终端与后台任务盘点清理（强制）：\n   - 检查所有活跃终端与后台任务（通过 terminals 目录或 AwaitShell）\n   - 显式终止临时开发服务、构建进程和测试任务，确认进程退出\n   - 确保后台异步任务挂起数归零，防止延迟事件注入\n2. 临时产物与会话状态归档：\n   - 清理 .cursor/tmp/ 临时文件，仅保留必要证据\n   - 完成 git 阶段性提交，确保无文件滞留暂存区\n   - 更新会话文档状态并记录恢复点\n3. 最终汇报：\n   - 总结执行进度、已完成/未完成事项与后续恢复建议\n   - 通过普通 chat 提交最终状态报告，结束本轮执行"
 	}
 
 	if appSettings.Security.MaxFailedAttempts <= 0 {
@@ -132,6 +134,9 @@ func (s *Store) GetGlobalAppSettingsWithDB(ctx context.Context, db *gorm.DB) (*G
 	}
 	if appSettings.Security.LockoutMinutes <= 0 {
 		appSettings.Security.LockoutMinutes = 15
+	}
+	if len(appSettings.PhaseTemplate) == 0 {
+		appSettings.PhaseTemplate = model.DefaultPhaseTemplate()
 	}
 
 	return appSettings, nil

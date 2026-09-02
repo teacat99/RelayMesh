@@ -81,10 +81,25 @@ export interface WaitPolicy {
   exhausted_instruction?: string
 }
 
+export interface TaskStage {
+  id: string
+  name: string
+  status: 'pending' | 'in_progress' | 'completed' | 'blocked'
+  summary?: string
+  evidence?: string
+  updated_at?: string
+}
+
 export interface TaskSummary {
   task_id: string
   project_id: string
-  state: 'active' | 'closed' | 'archived'
+  title?: string
+  mode?: string
+  state: 'active' | 'closed' | 'archived' | 'paused'
+  current_stage_id?: string
+  stages?: TaskStage[]
+  commander_session_id?: string
+  executor_session_id?: string
   revision: number
   report_sequence: number
   feedback_sequence: number
@@ -113,6 +128,7 @@ export interface Feedback {
   task_id: string
   sequence: number
   task_revision: number
+  source?: 'human' | 'commander'
   body: string
   references?: PathReference[]
   created_at: string
