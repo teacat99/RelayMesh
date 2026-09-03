@@ -62,8 +62,8 @@ func TestMCPServer_InitializeAndToolsList(t *testing.T) {
 	}
 	resMap := toolsResp.Result.(map[string]any)
 	toolsList := resMap["tools"].([]any)
-	if len(toolsList) != 7 {
-		t.Fatalf("expected 7 tools, got %d", len(toolsList))
+	if len(toolsList) != 9 {
+		t.Fatalf("expected 9 tools, got %d", len(toolsList))
 	}
 
 	// 3. Configure token tools list

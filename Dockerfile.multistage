@@ -21,7 +21,8 @@ RUN go mod download
 COPY . .
 COPY --from=frontend-builder /app/web/dist /app/web/dist
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/relaymesh ./cmd/relaymesh
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION}" -o /app/relaymesh ./cmd/relaymesh
 
 FROM alpine:3.21 AS runner
 WORKDIR /app

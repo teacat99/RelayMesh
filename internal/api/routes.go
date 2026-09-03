@@ -906,7 +906,27 @@ func (h *APIHandler) ListCredentials(c *gin.Context) {
 			UpdatedAt:   cr.UpdatedAt.Format(time.RFC3339),
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"credentials": result})
+	envCreds := []gin.H{}
+	if h.cfg.MCPToken != "" {
+		envCreds = append(envCreds, gin.H{
+			"source": "env",
+			"type":   "mcp_token",
+			"name":   "MCP Token (环境变量)",
+			"token":  store.MaskToken(h.cfg.MCPToken),
+			"note":   "通过 RELAYMESH_MCP_TOKEN 环境变量配置，无法在前端修改或删除",
+		})
+	}
+	if h.cfg.WebPassword != "" {
+		envCreds = append(envCreds, gin.H{
+			"source":   "env",
+			"type":     "web_auth",
+			"name":     "Web 访问凭据 (环境变量)",
+			"username": h.cfg.WebUsername,
+			"note":     "通过 RELAYMESH_WEB_USERNAME/PASSWORD 环境变量配置",
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"credentials": result, "env_credentials": envCreds})
 }
 
 func (h *APIHandler) GetCredential(c *gin.Context) {

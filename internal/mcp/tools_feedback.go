@@ -173,7 +173,7 @@ func (s *Server) handleGetSystemInfo(ctx context.Context, raw json.RawMessage) (
 		"num_cpu":      runtime.NumCPU(),
 		"go_version":   runtime.Version(),
 		"server_name":  "RelayMesh Feedback & Task Hub",
-		"version":      "1.0.0",
+		"version":      s.cfg.Version,
 		"project_id":   s.cfg.ProjectID,
 		"current_time": time.Now().Format(time.RFC3339),
 	}

@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { credentialsApi, type MCPCredential, type MCPPermissions } from '../api/client'
+import { credentialsApi, type MCPCredential, type MCPPermissions, type EnvCredential } from '../api/client'
 
 export const useCredentialsStore = defineStore('credentials', () => {
   const credentials = ref<MCPCredential[]>([])
+  const envCredentials = ref<EnvCredential[]>([])
   const isLoading = ref(false)
   const error = ref<string | null>(null)
 
@@ -13,6 +14,7 @@ export const useCredentialsStore = defineStore('credentials', () => {
     try {
       const res = await credentialsApi.list()
       credentials.value = res.credentials || []
+      envCredentials.value = res.env_credentials || []
     } catch (e: any) {
       error.value = e?.response?.data?.error || e.message || 'Failed to fetch credentials'
     } finally {
@@ -53,6 +55,7 @@ export const useCredentialsStore = defineStore('credentials', () => {
 
   return {
     credentials,
+    envCredentials,
     isLoading,
     error,
     fetchCredentials,

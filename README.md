@@ -23,11 +23,17 @@
 
 在长周期开发与自动化任务中，AI Agent（如 Cursor、Claude Desktop、VS Code、Codex）常面临**上下文压缩丢失决策**、**等待人工确认时频繁超时报错 (`-32001`)**、**Web 界面简陋难用**、以及**公网部署缺乏零信任安全**等痛点。
 
-RelayMesh 基于 **Go 1.25** 与 **Vue 3.5** 纯原生重构，提供标准 **Streamable HTTP MCP** 接口、沉浸式桌面级 Web 控制台、毫秒级 SSE 实时事件流与单二进制内嵌托管，常驻内存仅 **~6.4MB**，支持本地开箱即用直连与公网高安全生产部署。
+RelayMesh 基于 **Go 1.25** 与 **Vue 3.5** 纯原生重构，支持 **原生 stdio 本地直启（随 AI 客户端自启退出、零配置开箱即用）** 与 **Streamable HTTP MCP** 双 Transport 架构，提供沉浸式桌面级 Web 控制台、毫秒级 SSE 实时事件流与单二进制内嵌托管，常驻内存仅 **~6.4MB**，兼顾本地极简免配置运行与公网高安全生产部署。
 
 ---
 
 ## ✨ 核心特性 (Key Features)
+
+### ⚡ 0. 原生本地 stdio 直启与双 Transport 架构 (New in v1.2.0)
+- **单一配置开箱即用**：无需克隆仓库、无需配置 Token、无需手动启动后台守护，Cursor / Claude 配置文件一条 `go run ...@latest mcp stdio` 即可即时运行；
+- **双 Transport 共享内核**：stdio 与 HTTP 双 Transport 共享同一个状态存储、同一个 `mcp.Server` 实例，stdio 运行期间自动伴随本地 Web 控制台；
+- **工作区绝对零污染**：stdio 模式下数据库与自签名证书自动存放于 OS 标准用户目录（Linux: `~/.local/share/relaymesh`；macOS: `Application Support`；Windows: `%LOCALAPPDATA%`），绝不向代码项目目录写入任何临时文件；
+- **全生命周期平滑管理**：客户端关闭 `stdin` 时平滑退出，端口冲突自动 Fail Fast 友好提示，stdout 严格独占 MCP JSON-RPC 消息流。
 
 ### 🤖 1. 标准 Streamable HTTP MCP 协议中枢
 - **双角色无缝支持**：
@@ -107,12 +113,16 @@ RelayMesh 支持多种部署运行形态，覆盖从「本地极速免安装试�
 Go 1.24+ 开发者无需手动克隆仓库或配置 Node 环境，直接通过 Go 命令行一键拉取并即时运行内嵌完整 Web 控制台的单二进制：
 
 ```bash
-# 1. 直接运行最新版（自动下载、缓存并运行，类似 npx / uvx 模式）
+# 1. 直接运行最新版 HTTP 服务（自动下载、缓存并运行，类似 npx / uvx 模式）
 go run github.com/teacat99/RelayMesh/cmd/relaymesh@latest
 
-# 2. 或全局安装到 $GOPATH/bin 作为系统 CLI 工具使用
+# 2. 或直接运行原生 stdio MCP 模式（为 Cursor / Claude 等 MCP Host 提供直启端点）
+go run github.com/teacat99/RelayMesh/cmd/relaymesh@latest mcp stdio
+
+# 3. 或全局安装到 $GOPATH/bin 作为系统 CLI 工具使用
 go install github.com/teacat99/RelayMesh/cmd/relaymesh@latest
-relaymesh
+relaymesh            # 启动 HTTP/HTTPS 常驻服务与 Web 控制台
+relaymesh mcp stdio  # 启动原生 stdio MCP 服务
 ```
 > 💡 **桌面环境智能唤醒**：在 macOS / Windows / Linux 桌面或 WSL2 环境下启动时，RelayMesh 将在 800ms 内自动唤醒系统默认浏览器打开 Web 控制台；容器或远程无头服务器则严格静默跳过。
 
@@ -137,9 +147,12 @@ curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/main/install.sh 
 
 下载后直接运行：
 ```bash
-# Linux / macOS 赋予执行权限并运行
+# Linux / macOS 赋予执行权限并运行 HTTP 常驻服务
 chmod +x relaymesh-*
 ./relaymesh-linux-amd64
+
+# 或以原生 stdio 模式运行（与 AI 客户端直接交互）
+./relaymesh-linux-amd64 mcp stdio
 ```
 
 ---
@@ -187,6 +200,7 @@ services:
     image: teacat99/relaymesh:latest
     container_name: relaymesh-prod
     restart: unless-stopped
+    user: "0:0"  # 以 root 运行，避免 bind mount 权限问题（Alpine 最小镜像 + 单二进制，安全风险极低）
     ports:
       - "127.0.0.1:18775:18775"
     environment:
@@ -238,7 +252,41 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/relaymesh ./cmd/relaymesh
 ### 1. Cursor IDE 配置
 在项目根目录 `.cursor/mcp.json` 或全局配置 `~/.cursor/mcp.json` 中配置：
 
-**本地免密直连模式：**
+**原生 stdio 本地直启（⚡ 推荐，零配置免常驻，进程随 Cursor 启动/退出）：**
+
+*方式 A：Go 开发者免克隆免安装（自动拉取最新版即时运行，类似 npx 模式）：*
+```json
+{
+  "mcpServers": {
+    "relaymesh": {
+      "command": "go",
+      "args": [
+        "run",
+        "github.com/teacat99/RelayMesh/cmd/relaymesh@latest",
+        "mcp",
+        "stdio"
+      ]
+    }
+  }
+}
+```
+
+*方式 B：单二进制直启（开箱即用，零运行环境依赖）：*
+```json
+{
+  "mcpServers": {
+    "relaymesh": {
+      "command": "/path/to/relaymesh",
+      "args": [
+        "mcp",
+        "stdio"
+      ]
+    }
+  }
+}
+```
+
+**本地常驻 HTTP 服务直连模式（适用于 Docker 或后台长期运行的本地服务）：**
 ```json
 {
   "mcpServers": {
@@ -277,9 +325,26 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/relaymesh ./cmd/relaymesh
 ---
 
 ### 2. Claude Desktop 配置
-在 `claude_desktop_config.json` 中配置（Claude Desktop 原生仅支持 URL 形式传参）：
+在 `claude_desktop_config.json` 中配置：
 
-**本地免密直连模式：**
+**原生 stdio 本地直启（⚡ 推荐，随 Claude Desktop 一键自启）：**
+```json
+{
+  "mcpServers": {
+    "relaymesh": {
+      "command": "go",
+      "args": [
+        "run",
+        "github.com/teacat99/RelayMesh/cmd/relaymesh@latest",
+        "mcp",
+        "stdio"
+      ]
+    }
+  }
+}
+```
+
+**本地常驻 HTTP 服务直连模式：**
 ```json
 {
   "mcpServers": {
@@ -321,49 +386,71 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/relaymesh ./cmd/relaymesh
 
 ## 🌐 Nginx / 1Panel 反向代理配置 (Reverse Proxy)
 
-在公网生产环境部署时，建议通过 Nginx 或 1Panel 反向代理统一绑定域名与泛域名 SSL 证书：
+在公网生产环境部署时，建议通过 Nginx 或 1Panel 反向代理统一绑定域名与泛域名 SSL 证书。
+
+### 方式一：1Panel / 宝塔等面板反向代理（推荐）
+
+在面板中创建网站并配置反向代理后，修改 proxy 配置文件（如 `/www/sites/relaymesh.yourdomain.com/proxy/relaymesh.conf`），确保包含以下关键指令：
+
+```nginx
+location ^~ / {
+    proxy_pass http://127.0.0.1:18775;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header REMOTE-HOST $remote_addr;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $http_connection;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Port $server_port;
+
+    # SSE 实时流：禁用缓冲，确保事件即时推送
+    proxy_buffering off;
+    proxy_cache off;
+
+    # MCP 长轮询：延长超时防止断连（3600s = 1 小时）
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    proxy_connect_timeout 60s;
+
+    proxy_ssl_server_name off;
+    proxy_ssl_name $proxy_host;
+}
+```
+
+### 方式二：手写 Nginx server 块配置
 
 ```nginx
 server {
     listen 443 ssl http2;
     server_name relaymesh.yourdomain.com;
 
-    # SSL 证书配置
     ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
 
-    # 全局代理基础配置
     location / {
         proxy_pass http://127.0.0.1:18775;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $http_connection;
+
+        # SSE 实时流与 MCP 长轮询必须配置
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
 
         client_max_body_size 50M;
     }
-
-    # 关键：SSE 实时流与 MCP 长挂起专用代理配置
-    location ~* ^/(api/v1/events|sse/events|mcp) {
-        proxy_pass http://127.0.0.1:18775;
-        proxy_http_version 1.1;
-        proxy_set_header Connection '';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # 禁用代理缓存与缓冲，确保实时事件毫秒级直达
-        proxy_buffering off;
-        proxy_cache off;
-        chunked_transfer_encoding off;
-
-        # 配置 1 小时长超时，防止轮询被 Nginx 提前切断
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
 }
 ```
+
+> **关键配置说明**：`proxy_buffering off` 是 SSE 实时事件流的必需项，否则 Nginx 缓冲会导致前端无法收到实时更新。`proxy_read_timeout 3600s` 防止 MCP 长轮询连接被 Nginx 默认 60s 超时切断。
 
 ---
 
@@ -413,11 +500,21 @@ docker login
 
 ## 🛠️ 运维与命令行工具 (CLI Tools)
 
-RelayMesh 单二进制内置安全重置命令，支持随时在宿主机或容器内恢复初始环境：
+RelayMesh 单二进制内置标准 CLI 常用命令：
 
 ```bash
-# 重置 Web 访问账号密码为环境变量默认值（清除数据库中的在线修改记录）
+# 1. 默认无参或显式 serve：启动 HTTP/HTTPS 后台服务与 Web 控制台
+./relaymesh
+./relaymesh serve
+
+# 2. 原生 stdio MCP 模式：直接作为 MCP 客户端的子进程运行
+./relaymesh mcp stdio
+
+# 3. 重置 Web 访问账号密码为环境变量默认值（清除数据库中的在线修改记录）
 ./relaymesh reset-auth
+
+# 4. 查看当前版本
+./relaymesh version
 ```
 
 ---

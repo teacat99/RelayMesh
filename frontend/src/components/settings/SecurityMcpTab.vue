@@ -889,9 +889,35 @@ function credPermSummary(perms: MCPPermissions): string {
           </div>
         </div>
 
+        <!-- Env Credentials (read-only) -->
+        <div v-if="credStore.envCredentials.length > 0" class="divide-y divide-border/60 border border-border/70 rounded-xs bg-card/60 overflow-hidden mb-2">
+          <div
+            v-for="(ec, idx) in credStore.envCredentials"
+            :key="'env-' + idx"
+            class="flex items-start gap-3 p-2.5 bg-muted/20"
+          >
+            <div class="mt-0.5 shrink-0">
+              <Lock class="w-3.5 h-3.5 text-muted-foreground/70" />
+            </div>
+            <div class="flex-1 min-w-0 space-y-0.5">
+              <div class="flex items-center gap-1.5">
+                <span class="text-[11px] font-semibold text-foreground truncate">{{ ec.name }}</span>
+                <span class="text-[9px] px-1.5 py-0.5 rounded-xs bg-primary/10 text-primary font-mono shrink-0">ENV</span>
+              </div>
+              <div v-if="ec.token" class="text-[10px] font-mono text-muted-foreground">
+                Token: {{ ec.token }}
+              </div>
+              <div v-if="ec.username" class="text-[10px] font-mono text-muted-foreground">
+                用户名: {{ ec.username }}
+              </div>
+              <p class="text-[10px] text-muted-foreground/70">{{ ec.note }}</p>
+            </div>
+          </div>
+        </div>
+
         <!-- Credentials List -->
-        <div v-if="credStore.credentials.length === 0 && !credIsEditing" class="p-4 text-center text-[11px] text-muted-foreground font-mono border border-dashed border-border/60 rounded-xs bg-card/30">
-          暂无凭据，所有 MCP 请求以环境变量 Token 或开放模式运行
+        <div v-if="credStore.credentials.length === 0 && credStore.envCredentials.length === 0 && !credIsEditing" class="p-4 text-center text-[11px] text-muted-foreground font-mono border border-dashed border-border/60 rounded-xs bg-card/30">
+          暂无凭据，所有 MCP 请求以开放模式运行
         </div>
 
         <div v-else-if="!credIsEditing || (credIsEditing && credRevealedToken)" class="divide-y divide-border/60 border border-border/70 rounded-xs bg-card/60 overflow-hidden">

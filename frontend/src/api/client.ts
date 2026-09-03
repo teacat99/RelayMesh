@@ -259,8 +259,17 @@ export interface MCPCredential {
   updated_at: string
 }
 
+export interface EnvCredential {
+  source: 'env'
+  type: 'mcp_token' | 'web_auth'
+  name: string
+  token?: string
+  username?: string
+  note: string
+}
+
 export const credentialsApi = {
-  async list(): Promise<{ credentials: MCPCredential[] }> {
+  async list(): Promise<{ credentials: MCPCredential[]; env_credentials?: EnvCredential[] }> {
     const res = await api.get('/credentials')
     return res.data
   },

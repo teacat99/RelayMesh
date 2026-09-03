@@ -144,65 +144,13 @@ func (s *Server) notifyTaskUpdate(taskID string) {
 	}
 }
 
-// HTTP JSON-RPC 2.0 Handler
-type jsonRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      any             `json:"id"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-type jsonRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      any         `json:"id"`
-	Result  any         `json:"result,omitempty"`
-	Error   *rpcError   `json:"error,omitempty"`
-}
-
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Data    any    `json:"data,omitempty"`
-}
-
-type mcpContentItem struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	Data     string `json:"data,omitempty"`
-	MIMEType string `json:"mimeType,omitempty"`
-}
-
-type toolCallResult struct {
-	Content []mcpContentItem `json:"content"`
-	IsError bool             `json:"isError"`
-}
-
-type CredentialContext struct {
-	CredentialID   uint
-	CredentialName string
-	HostName       string
-	Permissions    model.Permissions
-	Source         string // "db_credential", "env_token", "open_access"
-}
-
-type credCtxKeyType struct{}
-
-var credCtxKey = credCtxKeyType{}
-
-func CredentialFromContext(ctx context.Context) *CredentialContext {
-	if v, ok := ctx.Value(credCtxKey).(*CredentialContext); ok {
-		return v
-	}
-	return nil
-}
-
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		// Server Info / Health
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"name":    "RelayMesh Streamable MCP Server",
-			"version": "1.0.0",
+			"version": s.cfg.Version,
 			"status":  "running",
 		})
 		return
@@ -268,9 +216,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res := s.handleRPC(ctx, credCtx, req)
+	execRes := s.HandleRPCRequest(ctx, credCtx, &req)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(res)
+	if execRes.IsNotification {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("{}"))
+		return
+	}
+	json.NewEncoder(w).Encode(execRes.Response)
 }
 
 func (s *Server) resolveCredential(ctx context.Context, tokenString string) (*CredentialContext, error) {
@@ -336,105 +289,6 @@ func (s *Server) resolveCredential(ctx context.Context, tokenString string) (*Cr
 		Permissions:    model.AllPermissions(),
 		Source:         "open_access",
 	}, nil
-}
-
-func (s *Server) handleRPC(ctx context.Context, credCtx *CredentialContext, req jsonRPCRequest) jsonRPCResponse {
-	resp := jsonRPCResponse{
-		JSONRPC: "2.0",
-		ID:      req.ID,
-	}
-
-	switch req.Method {
-	case "initialize":
-		resp.Result = map[string]any{
-			"protocolVersion": "2024-11-05",
-			"capabilities": map[string]any{
-				"tools": map[string]any{
-					"listChanged": false,
-				},
-				"prompts": map[string]any{
-					"listChanged": false,
-				},
-			},
-			"serverInfo": map[string]any{
-				"name":    "RelayMesh",
-				"version": "1.0.0",
-			},
-		}
-
-	case "notifications/initialized":
-		resp.Result = map[string]any{}
-
-	case "tools/list":
-		tools := GetToolDefinitionsForPermissions(credCtx.Permissions)
-		resp.Result = map[string]any{
-			"tools": tools,
-		}
-
-	case "tools/call":
-		var callParams struct {
-			Name      string          `json:"name"`
-			Arguments json.RawMessage `json:"arguments"`
-		}
-		if err := json.Unmarshal(req.Params, &callParams); err != nil {
-			resp.Error = &rpcError{Code: -32602, Message: "Invalid params"}
-			return resp
-		}
-
-		res, isErr, err := s.dispatchTool(ctx, credCtx, callParams.Name, callParams.Arguments)
-		if err != nil {
-			resp.Result = toolCallResult{
-				Content: []mcpContentItem{
-					{Type: "text", Text: fmt.Sprintf("Error: %v", err)},
-				},
-				IsError: true,
-			}
-		} else {
-			var text string
-			if str, ok := res.(string); ok {
-				text = str
-			} else {
-				bytes, _ := json.MarshalIndent(res, "", "  ")
-				text = string(bytes)
-			}
-
-			resp.Result = toolCallResult{
-				Content: []mcpContentItem{
-					{Type: "text", Text: text},
-				},
-				IsError: isErr,
-			}
-		}
-
-	case "prompts/list":
-		resp.Result = map[string]any{
-			"prompts": []map[string]any{
-				{
-					"name":        "chat",
-					"description": "Start interactive feedback session with user via RelayMesh Web UI.",
-				},
-			},
-		}
-
-	case "prompts/get":
-		resp.Result = map[string]any{
-			"description": "Start interactive feedback session with user via RelayMesh Web UI.",
-			"messages": []map[string]any{
-				{
-					"role": "user",
-					"content": map[string]any{
-						"type": "text",
-						"text": "Please use interactive_feedback to interact with user through RelayMesh Web UI.",
-					},
-				},
-			},
-		}
-
-	default:
-		resp.Error = &rpcError{Code: -32601, Message: fmt.Sprintf("Method not found: %s", req.Method)}
-	}
-
-	return resp
 }
 
 func (s *Server) dispatchTool(ctx context.Context, credCtx *CredentialContext, toolName string, args json.RawMessage) (any, bool, error) {

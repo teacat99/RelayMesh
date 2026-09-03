@@ -6,6 +6,7 @@ services:
     image: teacat99/relaymesh:latest
     container_name: relaymesh
     restart: unless-stopped
+    user: "0:0"
     ports:
       # 如配合 Nginx/1Panel 等反向代理，可绑定到 127.0.0.1:18775；如直接暴露可使用 18775:18775
       - "18775:18775"

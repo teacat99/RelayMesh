@@ -180,6 +180,14 @@ func (s *Server) MCPServer() *mcp.Server {
 	return s.mcpServer
 }
 
+func (s *Server) Store() *store.Store {
+	return s.store
+}
+
+func (s *Server) Broker() *SSEBroker {
+	return s.broker
+}
+
 func (s *Server) Run(addr string) error {
 	return s.engine.Run(addr)
 }

@@ -72,6 +72,18 @@ func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
+// Close closes the underlying sql.DB connection.
+func (s *Store) Close() error {
+	if s.db == nil {
+		return nil
+	}
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
+}
+
 func (s *Store) WithTx(ctx context.Context, fn func(tx *gorm.DB) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
