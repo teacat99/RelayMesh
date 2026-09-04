@@ -76,7 +76,7 @@ function formatMaxChecks(val?: number): string {
   return String(val)
 }
 
-const activeSession = computed(() => sessionStore.currentSession || sessionStore.selectedSession)
+const activeSession = computed(() => sessionStore.selectedSession || sessionStore.currentSession)
 
 const currentCountdownMinutes = computed(() => {
   const sess = activeSession.value

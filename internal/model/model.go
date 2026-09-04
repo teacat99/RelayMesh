@@ -236,6 +236,7 @@ func (s *SessionImages) Scan(value interface{}) error {
 type FeedbackSession struct {
 	ID                   string        `gorm:"primaryKey;size:128" json:"session_id"`
 	WorkflowID           string        `gorm:"index;size:128" json:"workflow_id"`
+	CredentialID         *uint         `gorm:"index" json:"credential_id,omitempty"`
 	HostName             string        `gorm:"size:128" json:"host_name,omitempty"`
 	ProjectDirectory     string        `gorm:"size:512" json:"project_directory"`
 	Title                string        `gorm:"size:256" json:"title"`
@@ -335,7 +336,7 @@ func AllPermissions() Permissions {
 
 func (p Permissions) AllowsTool(toolName string) bool {
 	switch toolName {
-	case "interactive_feedback", "continue_feedback_session":
+	case "interactive_feedback", "continue_feedback_session", "get_session_image":
 		return p.Feedback
 	case "list_sessions", "get_session_history":
 		return p.Sessions

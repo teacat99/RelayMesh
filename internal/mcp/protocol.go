@@ -63,6 +63,8 @@ type CredentialContext struct {
 	CredentialID   uint
 	CredentialName string
 	HostName       string
+	TokenString    string
+	BaseURL        string
 	Permissions    model.Permissions
 	Source         string // "db_credential", "env_token", "open_access", "local_stdio"
 }
@@ -79,10 +81,14 @@ func CredentialFromContext(ctx context.Context) *CredentialContext {
 }
 
 // LocalStdioCredential returns the trusted local stdio credential context with full permissions.
-func LocalStdioCredential() *CredentialContext {
+func LocalStdioCredential(defaultHost ...string) *CredentialContext {
+	host := "localhost"
+	if len(defaultHost) > 0 && strings.TrimSpace(defaultHost[0]) != "" {
+		host = strings.TrimSpace(defaultHost[0])
+	}
 	return &CredentialContext{
 		CredentialName: "local_stdio",
-		HostName:       "localhost",
+		HostName:       host,
 		Permissions:    model.AllPermissions(),
 		Source:         "local_stdio",
 	}
@@ -163,6 +169,13 @@ func (s *Server) HandleRPCRequest(ctx context.Context, credCtx *CredentialContex
 					{Type: "text", Text: fmt.Sprintf("Error: %v", err)},
 				},
 				IsError: true,
+			}
+		} else if customRes, ok := res.(toolCallResult); ok {
+			resp.Result = customRes
+		} else if items, ok := res.([]mcpContentItem); ok {
+			resp.Result = toolCallResult{
+				Content: items,
+				IsError: isErr,
 			}
 		} else {
 			var text string

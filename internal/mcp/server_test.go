@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/teacat99/RelayMesh/internal/config"
+	"github.com/teacat99/RelayMesh/internal/model"
 	"github.com/teacat99/RelayMesh/internal/store"
 )
 
@@ -21,11 +23,15 @@ func setupTestMCPServer(t *testing.T) *Server {
 		FeedbackTimeoutSeconds: 1,
 		WaitAfterMinutes:       5,
 		MaxNoFeedbackChecks:    3,
+		WaitCountdownMinutes:   0,
 	}
 	st, err := store.New(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create memory store: %v", err)
 	}
+	_ = st.SaveSettings(context.Background(), map[string]any{
+		"defaultWaitCountdownMinutes": 0,
+	})
 	return NewServer(cfg, st, nil)
 }
 
@@ -62,8 +68,8 @@ func TestMCPServer_InitializeAndToolsList(t *testing.T) {
 	}
 	resMap := toolsResp.Result.(map[string]any)
 	toolsList := resMap["tools"].([]any)
-	if len(toolsList) != 9 {
-		t.Fatalf("expected 9 tools, got %d", len(toolsList))
+	if len(toolsList) != 10 {
+		t.Fatalf("expected 10 tools, got %d", len(toolsList))
 	}
 
 	// 3. Configure token tools list
@@ -270,7 +276,7 @@ func TestMCPServer_FeedbackSessionFlow(t *testing.T) {
 		SessionID:      "test-cancelled-sess",
 		WorkflowID:     "wf-test-cancel",
 		Summary:        "测试取消",
-		TimeoutSeconds: 120,
+		TimeoutSeconds: 1,
 	})
 	srv.store.CancelFeedbackSession(context.Background(), cancelSession.ID)
 
@@ -352,3 +358,213 @@ func TestMCPServer_GlobalMCPTokenAndQueryParam(t *testing.T) {
 		t.Fatalf("expected 200 OK for valid query param token, got %d", w.Code)
 	}
 }
+
+func TestMCPServer_URLHostnameOverride(t *testing.T) {
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create in-memory store: %v", err)
+	}
+
+	cfg := &config.Config{
+		MCPToken: "token-host-test",
+		HostName: "server-default-host",
+	}
+
+	srv := NewServer(cfg, st, nil)
+
+	// 调用 interactive_feedback 工具，且 URL 携带 ?token=token-host-test&hostname=wsl-box
+	callBody := `{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "tools/call",
+		"params": {
+			"name": "interactive_feedback",
+			"arguments": {
+				"workflow_id": "wf-host-test",
+				"summary": "Testing hostname query param override"
+			}
+		}
+	}`
+
+	// 先往该 workflow 注入一个 queued feedback 秒回，防止挂起等待
+	_, _ = st.QueueWorkflowFeedback(context.Background(), store.QueueFeedbackInput{
+		WorkflowID:   "wf-host-test",
+		ResponseText: "auto reply",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp?token=token-host-test&hostname=wsl-box", bytes.NewBufferString(callBody))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 验证存储在 DB 中的 session 其 host_name 字段被正确赋予了 wsl-box，而非服务端的 server-default-host
+	sessions, err := st.ListFeedbackSessions(context.Background(), "", "", 10)
+	if err != nil || len(sessions) == 0 {
+		t.Fatalf("failed to query created session: %v", err)
+	}
+
+	if sessions[0].HostName != "wsl-box" {
+		t.Fatalf("expected HostName to be 'wsl-box', got %q", sessions[0].HostName)
+	}
+}
+
+func TestMCPServer_GetSessionImage(t *testing.T) {
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+
+	cfg := &config.Config{
+		MCPToken: "test-image-token",
+		HostName: "localhost",
+		Port:     18775,
+	}
+
+	srv := NewServer(cfg, st, nil)
+
+	// 1. 创建包含图片的会话
+	sess, err := st.CreateFeedbackSession(context.Background(), store.CreateSessionInput{
+		WorkflowID: "wf-img-test",
+		Title:      "Image Test",
+		Summary:    "Summary with image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	// 注入图片
+	testBase64 := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	_, err = st.SubmitFeedback(context.Background(), store.SubmitFeedbackInput{
+		SessionID:    sess.ID,
+		ResponseText: "with image",
+		Images: []model.SessionImage{
+			{
+				Name:   "pixel.png",
+				Format: "png",
+				Data:   testBase64,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to submit feedback with image: %v", err)
+	}
+
+	// 2. 测试 output_mode: "image" 原生视觉模式
+	callBodyImage := fmt.Sprintf(`{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "tools/call",
+		"params": {
+			"name": "get_session_image",
+			"arguments": {
+				"session_id": "%s",
+				"image_index": 0,
+				"output_mode": "image"
+			}
+		}
+	}`, sess.ID)
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp?token=test-image-token", bytes.NewBufferString(callBodyImage))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal rpc response: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", resp.Error)
+	}
+
+	resMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", resp.Result)
+	}
+	contentList, ok := resMap["content"].([]any)
+	if !ok || len(contentList) < 2 {
+		t.Fatalf("expected at least 2 content items (text + image), got %d", len(contentList))
+	}
+	imgItem := contentList[1].(map[string]any)
+	if imgItem["type"] != "image" {
+		t.Fatalf("expected type 'image', got %v", imgItem["type"])
+	}
+	if imgItem["data"] != testBase64 {
+		t.Fatalf("expected data to match base64")
+	}
+
+	// 3. 测试 output_mode: "base64" 模式
+	callBodyBase64 := fmt.Sprintf(`{
+		"jsonrpc": "2.0",
+		"id": 2,
+		"method": "tools/call",
+		"params": {
+			"name": "get_session_image",
+			"arguments": {
+				"session_id": "%s",
+				"image_index": 0,
+				"output_mode": "base64"
+			}
+		}
+	}`, sess.ID)
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp?token=test-image-token", bytes.NewBufferString(callBodyBase64))
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp2 jsonRPCResponse
+	json.Unmarshal(w.Body.Bytes(), &resp2)
+	resMap2 := resp2.Result.(map[string]any)
+	contentList2 := resMap2["content"].([]any)
+	textItem := contentList2[0].(map[string]any)
+	var base64Result map[string]any
+	if err := json.Unmarshal([]byte(textItem["text"].(string)), &base64Result); err != nil {
+		t.Fatalf("failed to parse base64 json result: %v", err)
+	}
+	if base64Result["name"] != "pixel.png" || base64Result["base64_data"] != testBase64 {
+		t.Fatalf("unexpected base64 result: %+v", base64Result)
+	}
+}
+
+func TestMCPServer_InteractiveFeedbackContentPriority(t *testing.T) {
+	srv := setupTestMCPServer(t)
+
+	// 测试当客户端同时传入简短 summary 与详尽 content 时，优先选择最长的 content 作为正文
+	callReq := `{
+		"jsonrpc": "2.0",
+		"id": 99,
+		"method": "tools/call",
+		"params": {
+			"name": "interactive_feedback",
+			"arguments": {
+				"project_directory": "/test/dir",
+				"summary": "简短的一句话概括",
+				"content": "### 详尽完整的正文汇报内容\n\n1. 详情项一\n2. 详情项二\n包含更多字数与结构",
+				"workflow_id": "wf-test-priority"
+			}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(callReq))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// 检查存储在 DB 中的 session summary 是否为较长的 content
+	sess, err := srv.store.GetLatestWorkflowFeedbackSession(context.Background(), "wf-test-priority")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	if !strings.Contains(sess.Summary, "### 详尽完整的正文汇报内容") {
+		t.Fatalf("expected session.Summary to pick longer content, got: %s", sess.Summary)
+	}
+}
+

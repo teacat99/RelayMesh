@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/teacat99/RelayMesh/internal/config"
+	"github.com/teacat99/RelayMesh/internal/mcp"
+	"github.com/teacat99/RelayMesh/internal/model"
 	"github.com/teacat99/RelayMesh/internal/store"
 )
 
@@ -252,5 +255,205 @@ func TestAPI_UsernamePasswordAuth(t *testing.T) {
 	srv.Engine().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 with reset env credentials, got %d", w.Code)
+	}
+}
+
+func TestAPI_BriefSessionsAndWorkflowSessions(t *testing.T) {
+	srv, st := setupTestAPIServer(t)
+	ctx := context.Background()
+
+	longSummary := "This is a very long summary text that should be excluded in brief list mode."
+	_, err := st.CreateFeedbackSession(ctx, store.CreateSessionInput{
+		WorkflowID: "wf-brief-test",
+		Title:      "Brief Test Session",
+		Summary:    longSummary,
+	})
+	if err != nil {
+		t.Fatalf("failed to create test session: %v", err)
+	}
+
+	// 1. 测试 GET /api/v1/sessions?brief=true -> summary 应为空
+	reqBrief := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?brief=true", nil)
+	wBrief := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wBrief, reqBrief)
+
+	if wBrief.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", wBrief.Code)
+	}
+	var respBrief struct {
+		Sessions []struct {
+			ID      string `json:"session_id"`
+			Title   string `json:"title"`
+			Summary string `json:"summary"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(wBrief.Body.Bytes(), &respBrief); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if len(respBrief.Sessions) == 0 {
+		t.Fatalf("expected at least 1 session in brief response")
+	}
+	if respBrief.Sessions[0].Summary != "" {
+		t.Fatalf("expected empty summary in brief mode, got: %q", respBrief.Sessions[0].Summary)
+	}
+
+	// 2. 测试 GET /api/v1/sessions (默认) -> summary 应当完整包含
+	reqFull := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	wFull := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wFull, reqFull)
+
+	if wFull.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", wFull.Code)
+	}
+	var respFull struct {
+		Sessions []struct {
+			ID      string `json:"session_id"`
+			Summary string `json:"summary"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(wFull.Body.Bytes(), &respFull); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if respFull.Sessions[0].Summary != longSummary {
+		t.Fatalf("expected full summary, got: %q", respFull.Sessions[0].Summary)
+	}
+
+	// 3. 测试 GET /api/v1/workflows/:workflow_id/sessions -> 应当完整返回
+	reqWf := httptest.NewRequest(http.MethodGet, "/api/v1/workflows/wf-brief-test/sessions", nil)
+	wWf := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wWf, reqWf)
+
+	if wWf.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", wWf.Code)
+	}
+	var respWf struct {
+		Sessions []struct {
+			ID      string `json:"session_id"`
+			Summary string `json:"summary"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(wWf.Body.Bytes(), &respWf); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if len(respWf.Sessions) == 0 || respWf.Sessions[0].Summary != longSummary {
+		t.Fatalf("expected full summary in workflow sessions endpoint")
+	}
+}
+
+func TestAPI_SessionImageAndCredentials(t *testing.T) {
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		ProjectID: "test-img-proj",
+		Host:      "127.0.0.1",
+		Port:      18775,
+		JWTSecret: "test-secret-456",
+		MCPToken:  "test-env-mcp-token-xyz",
+		Version:   "v1.2.0-dev-test",
+	}
+
+	mcpSrv := mcp.NewServer(cfg, st, nil)
+	srv := NewServer(cfg, st, nil)
+	srv.mcpServer = mcpSrv
+
+	// 1. 测试 GET /api/v1/auth/status 包含 version
+	reqStatus := httptest.NewRequest(http.MethodGet, "/api/v1/auth/status", nil)
+	wStatus := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wStatus, reqStatus)
+	if wStatus.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", wStatus.Code)
+	}
+	var authStatus struct {
+		Version string `json:"version"`
+	}
+	json.Unmarshal(wStatus.Body.Bytes(), &authStatus)
+	if authStatus.Version != "v1.2.0-dev-test" {
+		t.Fatalf("expected version v1.2.0-dev-test, got %q", authStatus.Version)
+	}
+
+	// 2. 测试 GET /api/v1/credentials 包含环境变量凭据且标记 is_env: true
+	reqCreds := httptest.NewRequest(http.MethodGet, "/api/v1/credentials", nil)
+	wCreds := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wCreds, reqCreds)
+	if wCreds.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", wCreds.Code)
+	}
+	var credsResp struct {
+		Credentials []struct {
+			ID    uint   `json:"id"`
+			Name  string `json:"name"`
+			IsEnv bool   `json:"is_env"`
+		} `json:"credentials"`
+		EnvCreds []any `json:"env_credentials"`
+	}
+	json.Unmarshal(wCreds.Body.Bytes(), &credsResp)
+	if len(credsResp.Credentials) == 0 {
+		t.Fatalf("expected at least 1 credential")
+	}
+	foundEnv := false
+	var envCredID uint
+	for _, c := range credsResp.Credentials {
+		if c.IsEnv {
+			foundEnv = true
+			envCredID = c.ID
+			break
+		}
+	}
+	if !foundEnv {
+		t.Fatalf("expected to find is_env=true credential")
+	}
+
+	// 3. 测试试图删除环境变量凭据应被拒绝
+	reqDel := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/credentials/%d", envCredID), nil)
+	wDel := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wDel, reqDel)
+	if wDel.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when deleting env credential, got %d", wDel.Code)
+	}
+
+	// 4. 创建带图片的 Session 并测试 GET /api/v1/sessions/:id/images/:index
+	// 1x1 透明 PNG base64
+	samplePNG := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+	sess, err := st.CreateFeedbackSession(context.Background(), store.CreateSessionInput{
+		WorkflowID: "wf-img-test",
+		Title:      "Image Test",
+		Summary:    "Testing images",
+	})
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	// 提交反馈附带图片
+	_, err = st.SubmitFeedback(context.Background(), store.SubmitFeedbackInput{
+		SessionID:    sess.ID,
+		ResponseText: "Here is screenshot",
+		Images: []model.SessionImage{
+			{
+				Name:   "test.png",
+				Format: "png",
+				Data:   samplePNG,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to submit feedback with image: %v", err)
+	}
+
+	// GET 图片端点
+	reqImg := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/sessions/%s/images/0", sess.ID), nil)
+	wImg := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wImg, reqImg)
+	if wImg.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for image, got %d: %s", wImg.Code, wImg.Body.String())
+	}
+	if ct := wImg.Header().Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("expected image/png content type, got %s", ct)
+	}
+	if wImg.Body.Len() == 0 {
+		t.Fatalf("expected non-empty image body")
 	}
 }

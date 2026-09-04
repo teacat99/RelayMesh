@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -188,6 +189,7 @@ func (a *AuthHandler) Status(c *gin.Context) {
 		"host_name":         a.cfg.HostName,
 		"current_username":  effectiveUser,
 		"is_customized":     isCustomized,
+		"version":           a.cfg.Version,
 	})
 }
 
@@ -298,13 +300,27 @@ func (a *AuthHandler) ClearAllBlockedIPs(c *gin.Context) {
 }
 
 func (a *AuthHandler) VerifyToken(tokenString string) bool {
-	if strings.TrimSpace(tokenString) == "" {
+	tokenString = strings.TrimSpace(tokenString)
+	if tokenString == "" {
 		return false
 	}
+	// 1. JWT Token (Web 管理登录凭据)
 	token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
 		return []byte(a.cfg.JWTSecret), nil
 	})
-	return err == nil && token.Valid
+	if err == nil && token.Valid {
+		return true
+	}
+	// 2. MCP Token 鉴权 (允许 Agent 持有有效 MCP Token 访问图片下载等资源)
+	if a.cfg.MCPToken != "" && tokenString == a.cfg.MCPToken {
+		return true
+	}
+	if a.store != nil {
+		if cred, err := a.store.FindCredentialByToken(context.Background(), tokenString); err == nil && cred != nil && cred.IsActive {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *AuthHandler) Middleware() gin.HandlerFunc {

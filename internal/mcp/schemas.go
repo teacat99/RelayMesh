@@ -114,7 +114,11 @@ var (
 			"summary": {
 				"type": "string",
 				"default": "",
-				"description": "Markdown summary of the AI's current work / plan / question, rendered in the Web UI."
+				"description": "Main markdown content / summary of the AI's current work, proposal, or question, rendered in the Web UI."
+			},
+			"content": {
+				"type": "string",
+				"description": "Alternative alias for summary (accepted for backward/multimodal compatibility)."
 			},
 			"title": {
 				"type": "string",
@@ -143,6 +147,28 @@ var (
 			"workflow_id": {
 				"type": "string",
 				"description": "Optional workflow identifier to automatically continue/poll the latest pending turn of that workflow."
+			}
+		}
+	}`)
+
+	getSessionImageSchema = json.RawMessage(`{
+		"type": "object",
+		"required": ["session_id"],
+		"properties": {
+			"session_id": {
+				"type": "string",
+				"description": "Target feedback session id (e.g. 'sess-a558c09c')."
+			},
+			"image_index": {
+				"type": "integer",
+				"default": 0,
+				"description": "0-based index of the attached image (e.g. 0 for image #1, 1 for image #2). Default is 0."
+			},
+			"output_mode": {
+				"type": "string",
+				"enum": ["image", "base64"],
+				"default": "image",
+				"description": "Output mode. 'image' returns native MCP ImageContent (for multimodal models like Claude/GPT-4o/Gemini); 'base64' returns structured JSON with image metadata and base64 string for saving to local disk."
 			}
 		}
 	}`)
@@ -433,6 +459,17 @@ Response markers and their meanings:
 Important: Keepalive responses ("=== 等待回执 ===") are NOT user feedback. Do not interpret or act on them as user instructions.
 Prefer workflow_id over session_id — the server auto-locates the latest pending session in that workflow.`,
 			InputSchema: continueFeedbackSessionSchema,
+		})
+		tools = append(tools, ToolDefinition{
+			Name: "get_session_image",
+			Description: `Retrieve attached image from a feedback session directly via MCP channel.
+
+Essential for isolated or offline sandboxes where the agent cannot make external HTTP requests or download files via URL.
+
+Output Modes:
+- "image" (default): Returns native MCP ImageContent block. Multimodal models (Claude, GPT-4o, Gemini) will directly 'see' the image pixels in visual context without downloading.
+- "base64": Returns structured JSON containing image metadata (name, format, size_bytes) and base64 string, convenient for saving to disk.`,
+			InputSchema: getSessionImageSchema,
 		})
 	}
 

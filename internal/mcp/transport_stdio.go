@@ -98,7 +98,7 @@ func (t *StdioTransport) Run(ctx context.Context) error {
 
 		// Notification: MUST NOT produce response
 		if !req.HasID() || strings.HasPrefix(req.Method, "notifications/") {
-			credCtx := LocalStdioCredential()
+			credCtx := LocalStdioCredential(t.server.cfg.HostName)
 			t.server.HandleRPCRequest(ctx, credCtx, &req)
 			continue
 		}
@@ -115,7 +115,7 @@ func (t *StdioTransport) Run(ctx context.Context) error {
 				t.wg.Done()
 			}()
 
-			credCtx := LocalStdioCredential()
+			credCtx := LocalStdioCredential(t.server.cfg.HostName)
 			reqCtxWithCred := context.WithValue(c, credCtxKey, credCtx)
 
 			execRes := t.server.HandleRPCRequest(reqCtxWithCred, credCtx, &r)

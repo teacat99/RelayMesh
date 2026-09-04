@@ -36,6 +36,12 @@ func runServe() {
 	}
 	log.Printf("Database initialized at %s", cfg.DBPath)
 
+	if cfg.MCPToken != "" {
+		if _, err := st.EnsureEnvMCPCredential(context.Background(), cfg.MCPToken); err != nil {
+			log.Printf("Warning: failed to ensure env MCP credential: %v", err)
+		}
+	}
+
 	// 2. Prepare embedded frontend assets
 	var staticFS fs.FS
 	if distFS, err := fs.Sub(web.FS, "dist"); err == nil {

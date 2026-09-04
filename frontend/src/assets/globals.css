@@ -47,6 +47,19 @@
   --shadow-float: 0 12px 32px rgba(0, 0, 0, 0.08), 0 4px 8px rgba(0, 0, 0, 0.04);
 }
 
+html,
+body,
+#app {
+  height: 100%;
+  height: 100dvh;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+}
+
 :root {
   --background: #ffffff;
   --foreground: #3f3f46;
@@ -179,47 +192,127 @@
   pointer-events: auto;
 }
 
-/* Toast 单行自适应布局：左侧内容 + 右侧关闭按钮，高度对齐快捷回复按钮 */
+/* ==============================================================================
+   Toast 统一单行、元素零偏移与符号化一体重构 (Demand 13 / 完善迭代)
+   ============================================================================== */
+
+/* 1. Toast 容器：强制单行水平流式，统一定高 30px，垂直完全居中，右侧贴边 */
 [data-sonner-toaster] [data-sonner-toast] {
   width: auto !important;
-  min-width: 108px !important;
-  max-width: calc(100vw - var(--sidebar-current-width, 0px) - 3rem) !important;
-  white-space: nowrap !important;
+  min-width: 120px !important;
+  max-width: calc(100vw - var(--sidebar-current-width, 0px) - 1.5rem) !important;
   display: flex !important;
   flex-direction: row !important;
-  align-items: stretch !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
   padding: 0 !important;
   box-sizing: border-box !important;
-  height: 26px !important;
-  min-height: 26px !important;
+  height: 30px !important;
+  min-height: 30px !important;
+  max-height: 30px !important;
   overflow: hidden !important;
+  border-radius: var(--radius) !important;
 }
 
+/* 2. 左侧图标区：统一尺寸、边距与居中，彻底消除垂直/水平偏移 */
+[data-sonner-toaster] [data-sonner-toast] [data-icon] {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 14px !important;
+  height: 14px !important;
+  min-width: 14px !important;
+  min-height: 14px !important;
+  margin: 0 0 0 0.6rem !important;
+  padding: 0 !important;
+  flex-shrink: 0 !important;
+  align-self: center !important;
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-icon] svg {
+  width: 14px !important;
+  height: 14px !important;
+  display: block !important;
+}
+
+/* 3. 中间文本区：消除额外上下间距，单行对齐不折行 */
 [data-sonner-toaster] [data-sonner-toast] [data-content] {
   display: flex !important;
   flex-direction: row !important;
+  flex-wrap: nowrap !important;
   align-items: center !important;
   gap: 0.35rem !important;
-  white-space: nowrap !important;
   flex: 1 !important;
   min-width: 0 !important;
+  padding: 0 0.6rem 0 0.45rem !important;
+  margin: 0 !important;
+  align-self: center !important;
+}
+
+/* 如果该 toast 没有 data-icon，确保左侧间距保持舒适的 0.65rem */
+[data-sonner-toaster] [data-sonner-toast]:not(:has([data-icon])) [data-content] {
+  padding-left: 0.65rem !important;
 }
 
 [data-sonner-toaster] [data-sonner-toast] [data-title] {
-  white-space: nowrap !important;
   font-size: 11px !important;
   line-height: 1 !important;
-  display: inline-block !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
 [data-sonner-toaster] [data-sonner-toast] [data-description] {
-  white-space: nowrap !important;
   font-size: 10px !important;
   line-height: 1 !important;
-  display: inline-block !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
-/* 关闭按钮：强制排列到最右侧，行内分隔线 + 居中 X */
+/* 4. 操作按钮单元格：与关闭按钮完全一体同构，纵向撑满，单像素左分割线，绝对居中 */
+[data-sonner-toaster] [data-sonner-toast] [data-button],
+[data-sonner-toaster] [data-sonner-toast] [data-cancel] {
+  position: static !important;
+  transform: none !important;
+  order: 9990 !important;
+  width: 28px !important;
+  min-width: 28px !important;
+  align-self: stretch !important;
+  height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: transparent !important;
+  border: none !important;
+  border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent) !important;
+  color: color-mix(in srgb, var(--muted-foreground) 80%, transparent) !important;
+  font-size: 13px !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+  transition: all 0.15s ease !important;
+  flex-shrink: 0 !important;
+  opacity: 1 !important;
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-button]:hover,
+[data-sonner-toaster] [data-sonner-toast] [data-cancel]:hover {
+  color: var(--foreground) !important;
+  background: var(--muted) !important;
+}
+
+/* 5. 关闭按钮单元格：常驻显示（不依赖 hover），与操作按钮并列贴齐最右侧 */
 [data-sonner-toaster] [data-sonner-toast] [data-close-button] {
   position: static !important;
   transform: none !important;
@@ -227,11 +320,15 @@
   left: auto !important;
   top: auto !important;
   order: 9999 !important;
-  width: 24px !important;
+  width: 28px !important;
+  min-width: 28px !important;
+  align-self: stretch !important;
   height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
   border-radius: 0 !important;
-  border-top-right-radius: calc(var(--radius) - 2px) !important;
-  border-bottom-right-radius: calc(var(--radius) - 2px) !important;
+  border-top-right-radius: calc(var(--radius) - 1px) !important;
+  border-bottom-right-radius: calc(var(--radius) - 1px) !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
@@ -242,6 +339,8 @@
   cursor: pointer !important;
   transition: all 0.15s ease !important;
   flex-shrink: 0 !important;
+  opacity: 1 !important;
+  visibility: visible !important;
 }
 
 [data-sonner-toaster] [data-sonner-toast] [data-close-button]:hover {
@@ -250,8 +349,10 @@
 }
 
 [data-sonner-toaster] [data-sonner-toast] [data-close-button] svg {
-  width: 16px !important;
-  height: 16px !important;
+  width: 14px !important;
+  height: 14px !important;
+  display: block !important;
+  margin: 0 !important;
 }
 
 /* Sidebar PC Smooth Slide Collapse & Expand Animation */

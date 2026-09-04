@@ -53,6 +53,71 @@ func (s *Store) HasAnyCredential(ctx context.Context) (bool, error) {
 	return count > 0, err
 }
 
+func (s *Store) syncLegacySessionsToCredential(ctx context.Context, cred *model.MCPCredential) {
+	if cred == nil || cred.ID == 0 {
+		return
+	}
+	// 1. 将此前未绑定凭据（credential_id 为空或 0）的历史会话全部回填归属至该凭据
+	_ = s.db.WithContext(ctx).Model(&model.FeedbackSession{}).
+		Where("credential_id IS NULL OR credential_id = 0").
+		Update("credential_id", cred.ID).Error
+
+	// 2. 若该凭据已配置了自定义主机名（且非空），将历史会话的主机名同步刷新为最新主机名
+	if cred.HostName != "" {
+		_ = s.db.WithContext(ctx).Model(&model.FeedbackSession{}).
+			Where("credential_id = ?", cred.ID).
+			Update("host_name", cred.HostName).Error
+	}
+}
+
+// EnsureEnvMCPCredential 确保环境变量 RELAYMESH_MCP_TOKEN 在数据库中存在对应的可管理凭据
+func (s *Store) EnsureEnvMCPCredential(ctx context.Context, envToken string) (*model.MCPCredential, error) {
+	envToken = strings.TrimSpace(envToken)
+	if envToken == "" {
+		return nil, nil
+	}
+
+	var resCred *model.MCPCredential
+	var cred model.MCPCredential
+	err := s.db.WithContext(ctx).Where("token = ?", envToken).First(&cred).Error
+	if err == nil {
+		resCred = &cred
+	} else if err != gorm.ErrRecordNotFound {
+		return nil, err
+	} else {
+		// 检查是否已有同名旧记录因 Token 变更而需更新
+		var existingEnv model.MCPCredential
+		if err := s.db.WithContext(ctx).Where("name = ?", "MCP Token (环境变量)").First(&existingEnv).Error; err == nil {
+			existingEnv.Token = envToken
+			existingEnv.UpdatedAt = time.Now()
+			if err := s.db.WithContext(ctx).Save(&existingEnv).Error; err != nil {
+				return nil, err
+			}
+			resCred = &existingEnv
+		} else {
+			now := time.Now()
+			newCred := model.MCPCredential{
+				Name:        "MCP Token (环境变量)",
+				Token:       envToken,
+				IsActive:    true,
+				Permissions: model.AllPermissions(),
+				Note:        "通过 RELAYMESH_MCP_TOKEN 环境变量配置",
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}
+			if err := s.db.WithContext(ctx).Create(&newCred).Error; err != nil {
+				return nil, err
+			}
+			resCred = &newCred
+		}
+	}
+
+	if resCred != nil {
+		s.syncLegacySessionsToCredential(ctx, resCred)
+	}
+	return resCred, nil
+}
+
 func (s *Store) ListCredentials(ctx context.Context) ([]model.MCPCredential, error) {
 	var creds []model.MCPCredential
 	err := s.db.WithContext(ctx).Order("created_at ASC").Find(&creds).Error
@@ -133,6 +198,22 @@ func (s *Store) UpdateCredential(ctx context.Context, id uint, updates map[strin
 		updates["updated_at"] = time.Now()
 		if err := tx.Model(&cred).Updates(updates).Error; err != nil {
 			return err
+		}
+		// 若更新了 host_name，则同步追溯更新所有使用该凭据 (CredentialID) 的历史会话
+		if hnVal, ok := updates["host_name"]; ok {
+			newHostName, _ := hnVal.(string)
+			newHostName = strings.TrimSpace(newHostName)
+			// 将未绑定凭据的历史会话绑定至此凭据
+			_ = tx.Model(&model.FeedbackSession{}).
+				Where("credential_id IS NULL OR credential_id = 0").
+				Update("credential_id", id).Error
+
+			// 追溯级联更新同 Token (CredentialID) 的所有历史会话的主机名
+			if err := tx.Model(&model.FeedbackSession{}).
+				Where("credential_id = ?", id).
+				Update("host_name", newHostName).Error; err != nil {
+				return err
+			}
 		}
 		return tx.Where("id = ?", id).First(&cred).Error
 	})

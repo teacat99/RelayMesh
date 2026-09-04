@@ -15,6 +15,7 @@ import {
 } from 'lucide-vue-next'
 import type { UnifiedItem } from '../AppSidebar.vue'
 import dayjs from 'dayjs'
+import { computeSessionTimer } from '../../composables/useSessionTimer'
 
 const props = defineProps<{
   item: UnifiedItem
@@ -63,73 +64,13 @@ function getItemPresence(item: UnifiedItem): { label: string; dotClass: string }
   return { label: '在线', dotClass: 'bg-emerald-500 shadow-[0_0_4px_rgba(16,185,129,0.6)]' }
 }
 
-function formatTimerDuration(seconds: number): string {
-  if (seconds < 0) seconds = 0
-  const ONE_DAY = 86400
-  const ONE_HOUR = 3600
-
-  if (seconds >= ONE_DAY) {
-    const days = Math.floor(seconds / ONE_DAY)
-    const remainSec = seconds % ONE_DAY
-    const hours = Math.floor(remainSec / ONE_HOUR)
-    const mins = Math.floor((remainSec % ONE_HOUR) / 60)
-    return `${days}d·${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`
-  }
-
-  if (seconds >= ONE_HOUR) {
-    const hours = Math.floor(seconds / ONE_HOUR)
-    const mins = Math.floor((seconds % ONE_HOUR) / 60)
-    const secs = seconds % 60
-    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-  }
-
-  const mins = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-}
-
 function getItemTimerInfo(item: UnifiedItem) {
   if (item.type !== 'feedback') {
     return { text: '', prefix: '', isCountdown: false }
   }
 
   const rawSess = item.raw as any
-  const isPending = item.status === 'pending'
-  const isMcpActive = !!rawSess?.is_mcp_active
-
-  if (isPending) {
-    if (isMcpActive) {
-      const mcpStart = rawSess?.mcp_active_at ? new Date(rawSess.mcp_active_at).getTime() : 0
-      const mcpElapsed = mcpStart ? Math.max(0, Math.floor((props.now - mcpStart) / 1000)) : 0
-      const targetMinutes = rawSess?.wait_countdown_minutes ?? 2
-      const targetSec = targetMinutes * 60
-
-      if (targetSec > 0 && mcpElapsed < targetSec) {
-        const remain = targetSec - mcpElapsed
-        return { text: formatTimerDuration(remain), prefix: '剩余', isCountdown: true }
-      }
-      return { text: formatTimerDuration(mcpElapsed), prefix: '剩余', isCountdown: false }
-    }
-
-    if (rawSess?.last_keepalive_at) {
-      const keepaliveStart = new Date(rawSess.last_keepalive_at).getTime()
-      const keepaliveElapsed = Math.max(0, Math.floor((props.now - keepaliveStart) / 1000))
-      return { text: formatTimerDuration(keepaliveElapsed), prefix: '等待', isCountdown: false }
-    }
-
-    return { text: '00:00', prefix: '等待', isCountdown: false }
-  }
-
-  // 非 pending 状态（无交互/已完成/AI 执行中）：
-  if (item.status === 'completed') {
-    const execStartTime = rawSess?.updated_at
-      ? new Date(rawSess.updated_at).getTime()
-      : (rawSess?.created_at ? new Date(rawSess.created_at).getTime() : 0)
-    const execElapsed = execStartTime ? Math.max(0, Math.floor((props.now - execStartTime) / 1000)) : 0
-    return { text: formatTimerDuration(execElapsed), prefix: '执行', isCountdown: false }
-  }
-
-  return { text: '', prefix: '', isCountdown: false }
+  return computeSessionTimer(rawSess, props.now, rawSess?.wait_countdown_minutes ?? 2)
 }
 
 function formatTime(dateStr: string) {

@@ -197,6 +197,32 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 提取 URL Query 或 Header 中的主机名（用于客户端自报主机身份，如 ?hostname=wsl 或 X-Host-Name: wsl）
+	queryHostName := strings.TrimSpace(r.URL.Query().Get("hostname"))
+	if queryHostName == "" {
+		queryHostName = strings.TrimSpace(r.URL.Query().Get("host_name"))
+	}
+	if queryHostName == "" {
+		queryHostName = strings.TrimSpace(r.Header.Get("X-Host-Name"))
+	}
+	if queryHostName == "" {
+		queryHostName = strings.TrimSpace(r.Header.Get("X-Hostname"))
+	}
+	if queryHostName != "" && credCtx != nil {
+		credCtx.HostName = queryHostName
+	}
+
+	if credCtx != nil {
+		if credCtx.TokenString == "" {
+			credCtx.TokenString = tokenString
+		}
+		scheme := "http"
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
+		}
+		credCtx.BaseURL = fmt.Sprintf("%s://%s", scheme, r.Host)
+	}
+
 	ctx := context.WithValue(r.Context(), credCtxKey, credCtx)
 
 	body, err := io.ReadAll(r.Body)
@@ -264,8 +290,16 @@ func (s *Server) resolveCredential(ctx context.Context, tokenString string) (*Cr
 	}
 	if s.cfg.MCPToken != "" {
 		if tokenString == s.cfg.MCPToken {
+			var credID uint
+			var hostName string
+			if envCred, _ := s.store.EnsureEnvMCPCredential(ctx, s.cfg.MCPToken); envCred != nil {
+				credID = envCred.ID
+				hostName = envCred.HostName
+			}
 			return &CredentialContext{
+				CredentialID:   credID,
 				CredentialName: "env:mcp",
+				HostName:       hostName,
 				Permissions:    model.AllPermissions(),
 				Source:         "env_token",
 			}, nil
@@ -308,6 +342,9 @@ func (s *Server) dispatchTool(ctx context.Context, credCtx *CredentialContext, t
 		return res, err != nil, err
 	case "continue_feedback_session":
 		res, err := s.handleContinueFeedbackSession(ctx, args)
+		return res, err != nil, err
+	case "get_session_image":
+		res, err := s.handleGetSessionImage(ctx, args)
 		return res, err != nil, err
 	case "list_sessions":
 		res, err := s.handleListSessions(ctx, args)

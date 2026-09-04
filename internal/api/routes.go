@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -59,8 +60,15 @@ func (h *APIHandler) ListSessions(c *gin.Context) {
 	projectDir := c.Query("project_directory")
 	status := c.Query("status")
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
+	brief := c.Query("brief") == "true" || c.Query("compact") == "true"
 
-	sessions, err := h.store.ListFeedbackSessions(c.Request.Context(), projectDir, status, limit)
+	var sessions []model.FeedbackSession
+	var err error
+	if brief {
+		sessions, err = h.store.ListFeedbackSessionsBrief(c.Request.Context(), projectDir, status, limit)
+	} else {
+		sessions, err = h.store.ListFeedbackSessions(c.Request.Context(), projectDir, status, limit)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -73,6 +81,34 @@ func (h *APIHandler) ListSessions(c *gin.Context) {
 		}
 		sessions[i].LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(sessions[i].ID)
 	}
+	c.JSON(http.StatusOK, gin.H{"sessions": sessions})
+}
+
+func (h *APIHandler) GetWorkflowSessions(c *gin.Context) {
+	workflowID := strings.TrimSpace(c.Param("workflow_id"))
+	if workflowID == "" {
+		workflowID = strings.TrimSpace(c.Param("id"))
+	}
+	if workflowID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workflow_id is required"})
+		return
+	}
+
+	sessions, err := h.store.ListWorkflowFeedbackSessions(c.Request.Context(), workflowID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	for i := range sessions {
+		if active, startedAt, timeoutSec := h.mcpServer.GetActiveWaiterInfo(sessions[i].ID); active {
+			sessions[i].IsMCPActive = true
+			sessions[i].MCPActiveAt = startedAt
+			sessions[i].MCPTimeoutSec = timeoutSec
+		}
+		sessions[i].LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(sessions[i].ID)
+	}
+
 	c.JSON(http.StatusOK, gin.H{"sessions": sessions})
 }
 
@@ -90,6 +126,59 @@ func (h *APIHandler) GetSession(c *gin.Context) {
 	}
 	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
 	c.JSON(http.StatusOK, gin.H{"session": session})
+}
+
+func (h *APIHandler) GetSessionImage(c *gin.Context) {
+	id := c.Param("id")
+	indexStr := c.Param("index")
+	idx, err := strconv.Atoi(indexStr)
+	if err != nil || idx < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid image index"})
+		return
+	}
+
+	session, err := h.store.GetFeedbackSession(c.Request.Context(), id)
+	if err != nil || session == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		return
+	}
+
+	if idx >= len(session.Images) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "image index out of range"})
+		return
+	}
+
+	img := session.Images[idx]
+	raw := strings.TrimSpace(img.Data)
+	if commaIdx := strings.Index(raw, ","); commaIdx != -1 {
+		raw = raw[commaIdx+1:]
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(raw)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode image data"})
+		return
+	}
+
+	contentType := "image/png"
+	format := strings.ToLower(strings.TrimSpace(img.Format))
+	switch format {
+	case "jpg", "jpeg":
+		contentType = "image/jpeg"
+	case "webp":
+		contentType = "image/webp"
+	case "gif":
+		contentType = "image/gif"
+	case "svg", "svg+xml":
+		contentType = "image/svg+xml"
+	}
+
+	c.Header("Content-Type", contentType)
+	c.Header("Cache-Control", "public, max-age=86400")
+	c.Data(http.StatusOK, contentType, decoded)
 }
 
 type SubmitFeedbackRequest struct {
@@ -321,6 +410,13 @@ func (h *APIHandler) RenameSession(c *gin.Context) {
 		return
 	}
 
+	if active, startedAt, timeoutSec := h.mcpServer.GetActiveWaiterInfo(session.ID); active {
+		session.IsMCPActive = true
+		session.MCPActiveAt = startedAt
+		session.MCPTimeoutSec = timeoutSec
+	}
+	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
+
 	h.broker.Broadcast("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
@@ -340,6 +436,13 @@ func (h *APIHandler) UpdateSessionPromptWait(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	if active, startedAt, timeoutSec := h.mcpServer.GetActiveWaiterInfo(session.ID); active {
+		session.IsMCPActive = true
+		session.MCPActiveAt = startedAt
+		session.MCPTimeoutSec = timeoutSec
+	}
+	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
 
 	h.broker.Broadcast("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
@@ -361,6 +464,13 @@ func (h *APIHandler) UpdateSessionMaxChecks(c *gin.Context) {
 		return
 	}
 
+	if active, startedAt, timeoutSec := h.mcpServer.GetActiveWaiterInfo(session.ID); active {
+		session.IsMCPActive = true
+		session.MCPActiveAt = startedAt
+		session.MCPTimeoutSec = timeoutSec
+	}
+	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
+
 	h.broker.Broadcast("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
@@ -381,6 +491,13 @@ func (h *APIHandler) UpdateSessionWaitCountdown(c *gin.Context) {
 		return
 	}
 
+	if active, startedAt, timeoutSec := h.mcpServer.GetActiveWaiterInfo(session.ID); active {
+		session.IsMCPActive = true
+		session.MCPActiveAt = startedAt
+		session.MCPTimeoutSec = timeoutSec
+	}
+	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
+
 	h.broker.Broadcast("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
@@ -400,6 +517,13 @@ func (h *APIHandler) UpdateSessionUserPresence(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	if active, startedAt, timeoutSec := h.mcpServer.GetActiveWaiterInfo(session.ID); active {
+		session.IsMCPActive = true
+		session.MCPActiveAt = startedAt
+		session.MCPTimeoutSec = timeoutSec
+	}
+	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
 
 	h.broker.Broadcast("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
@@ -787,7 +911,7 @@ func (h *APIHandler) GetSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"settings": settings})
+	c.JSON(http.StatusOK, gin.H{"settings": settings, "version": h.cfg.Version})
 }
 
 func (h *APIHandler) UpdateSettings(c *gin.Context) {
@@ -875,6 +999,10 @@ func (h *APIHandler) DeleteNorm(c *gin.Context) {
 // ─── MCP Credentials ───
 
 func (h *APIHandler) ListCredentials(c *gin.Context) {
+	if h.cfg.MCPToken != "" {
+		_, _ = h.store.EnsureEnvMCPCredential(c.Request.Context(), h.cfg.MCPToken)
+	}
+
 	creds, err := h.store.ListCredentials(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -889,11 +1017,13 @@ func (h *APIHandler) ListCredentials(c *gin.Context) {
 		IsActive    bool              `json:"is_active"`
 		Permissions model.Permissions `json:"permissions"`
 		Note        string            `json:"note"`
+		IsEnv       bool              `json:"is_env"`
 		CreatedAt   string            `json:"created_at"`
 		UpdatedAt   string            `json:"updated_at"`
 	}
 	var result []maskedCred
 	for _, cr := range creds {
+		isEnv := (h.cfg.MCPToken != "" && cr.Token == h.cfg.MCPToken) || cr.Name == "MCP Token (环境变量)"
 		result = append(result, maskedCred{
 			ID:          cr.ID,
 			Name:        cr.Name,
@@ -902,31 +1032,13 @@ func (h *APIHandler) ListCredentials(c *gin.Context) {
 			IsActive:    cr.IsActive,
 			Permissions: cr.Permissions,
 			Note:        cr.Note,
+			IsEnv:       isEnv,
 			CreatedAt:   cr.CreatedAt.Format(time.RFC3339),
 			UpdatedAt:   cr.UpdatedAt.Format(time.RFC3339),
 		})
 	}
-	envCreds := []gin.H{}
-	if h.cfg.MCPToken != "" {
-		envCreds = append(envCreds, gin.H{
-			"source": "env",
-			"type":   "mcp_token",
-			"name":   "MCP Token (环境变量)",
-			"token":  store.MaskToken(h.cfg.MCPToken),
-			"note":   "通过 RELAYMESH_MCP_TOKEN 环境变量配置，无法在前端修改或删除",
-		})
-	}
-	if h.cfg.WebPassword != "" {
-		envCreds = append(envCreds, gin.H{
-			"source":   "env",
-			"type":     "web_auth",
-			"name":     "Web 访问凭据 (环境变量)",
-			"username": h.cfg.WebUsername,
-			"note":     "通过 RELAYMESH_WEB_USERNAME/PASSWORD 环境变量配置",
-		})
-	}
 
-	c.JSON(http.StatusOK, gin.H{"credentials": result, "env_credentials": envCreds})
+	c.JSON(http.StatusOK, gin.H{"credentials": result, "env_credentials": []gin.H{}})
 }
 
 func (h *APIHandler) GetCredential(c *gin.Context) {
@@ -998,6 +1110,7 @@ func (h *APIHandler) UpdateCredential(c *gin.Context) {
 	cred.Token = store.MaskToken(cred.Token)
 
 	h.broker.Broadcast("credentials_updated", gin.H{"id": cred.ID, "action": "update"})
+	h.broker.Broadcast("session_updated", gin.H{"action": "credentials_updated"})
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "credential": cred})
 }
 
@@ -1006,6 +1119,16 @@ func (h *APIHandler) DeleteCredential(c *gin.Context) {
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credential id"})
+		return
+	}
+
+	targetCred, err := h.store.GetCredential(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if (h.cfg.MCPToken != "" && targetCred.Token == h.cfg.MCPToken) || targetCred.Name == "MCP Token (环境变量)" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该凭据来自环境变量 RELAYMESH_MCP_TOKEN，不可删除；如需停用请直接点击禁用开关"})
 		return
 	}
 
@@ -1023,6 +1146,16 @@ func (h *APIHandler) RegenerateCredentialToken(c *gin.Context) {
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credential id"})
+		return
+	}
+
+	targetCred, err := h.store.GetCredential(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if (h.cfg.MCPToken != "" && targetCred.Token == h.cfg.MCPToken) || targetCred.Name == "MCP Token (环境变量)" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该凭据由环境变量 RELAYMESH_MCP_TOKEN 驱动，不可重新生成 Token"})
 		return
 	}
 

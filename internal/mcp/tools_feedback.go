@@ -2,8 +2,11 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -15,6 +18,8 @@ import (
 type interactiveFeedbackArgs struct {
 	ProjectDirectory string `json:"project_directory"`
 	Summary          string `json:"summary"`
+	Content          string `json:"content,omitempty"`
+	Detail           string `json:"detail,omitempty"`
 	Title            string `json:"title,omitempty"`
 	WorkflowID       string `json:"workflow_id,omitempty"`
 	Phase            string `json:"phase,omitempty"`
@@ -31,6 +36,16 @@ func (s *Server) handleInteractiveFeedback(ctx context.Context, raw json.RawMess
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
+	// 智能选取最完整详尽的正文内容（防止客户端将正文传进 content/detail 而将简述传进 summary 导致正文被丢弃）
+	chosen := strings.TrimSpace(args.Summary)
+	if len(strings.TrimSpace(args.Content)) > len(chosen) {
+		chosen = strings.TrimSpace(args.Content)
+	}
+	if len(strings.TrimSpace(args.Detail)) > len(chosen) {
+		chosen = strings.TrimSpace(args.Detail)
+	}
+	args.Summary = chosen
+
 	if strings.TrimSpace(args.Summary) == "" {
 		return nil, store.NewInvalidInputError("summary is required and cannot be empty")
 	}
@@ -42,12 +57,15 @@ func (s *Server) handleInteractiveFeedback(ctx context.Context, raw json.RawMess
 
 	credCtx := CredentialFromContext(ctx)
 	credHostName := ""
+	var credID uint
 	if credCtx != nil {
 		credHostName = credCtx.HostName
+		credID = credCtx.CredentialID
 	}
 
 	session, err := s.store.CreateFeedbackSession(ctx, store.CreateSessionInput{
 		WorkflowID:         args.WorkflowID,
+		CredentialID:       credID,
 		EnvHostName:        s.cfg.HostName,
 		CredentialHostName: credHostName,
 		ProjectDirectory:   args.ProjectDirectory,
@@ -78,7 +96,10 @@ func (s *Server) handleInteractiveFeedback(ctx context.Context, raw json.RawMess
 
 	// 获取业务层动态配置的真实挂起等待时长
 	waitSec := s.cfg.FeedbackTimeoutSeconds
-	if session.WaitCountdownMinutes > 0 {
+	if s.cfg.FeedbackTimeoutSeconds > 0 && s.cfg.FeedbackTimeoutSeconds <= 5 {
+		// 测试或显式覆盖模式：优先遵循显式指定的短等待时长
+		waitSec = s.cfg.FeedbackTimeoutSeconds
+	} else if session.WaitCountdownMinutes > 0 {
 		waitSec = session.WaitCountdownMinutes * 60
 	} else if session.TimeoutSeconds > 0 {
 		waitSec = session.TimeoutSeconds
@@ -148,7 +169,10 @@ func (s *Server) handleContinueFeedbackSession(ctx context.Context, raw json.Raw
 
 	// 获取业务层动态配置的真实挂起等待时长
 	waitSec := s.cfg.FeedbackTimeoutSeconds
-	if sess.WaitCountdownMinutes > 0 {
+	if s.cfg.FeedbackTimeoutSeconds > 0 && s.cfg.FeedbackTimeoutSeconds <= 5 {
+		// 测试或显式覆盖模式：优先遵循显式指定的短等待时长
+		waitSec = s.cfg.FeedbackTimeoutSeconds
+	} else if sess.WaitCountdownMinutes > 0 {
 		waitSec = sess.WaitCountdownMinutes * 60
 	} else if sess.TimeoutSeconds > 0 {
 		waitSec = sess.TimeoutSeconds
@@ -250,10 +274,11 @@ func (s *Server) markConsumedAndBroadcast(ctx context.Context, sess *model.Feedb
 }
 
 func formatSessionHeader(sess *model.FeedbackSession) string {
-	if sess.WorkflowID != "" {
-		return fmt.Sprintf("session_id: %s, workflow_id: %s", sess.ID, sess.WorkflowID)
+	wID := sess.WorkflowID
+	if wID == "" {
+		wID = "wf-" + strings.TrimPrefix(sess.ID, "sess-")
 	}
-	return fmt.Sprintf("session_id: %s", sess.ID)
+	return fmt.Sprintf("session_id: %s, workflow_id: %s", sess.ID, wID)
 }
 
 func (s *Server) formatSessionHeaderWithContext(ctx context.Context, sess *model.FeedbackSession) string {
@@ -263,20 +288,24 @@ func (s *Server) formatSessionHeaderWithContext(ctx context.Context, sess *model
 		header += "\ncontext: " + strings.TrimSpace(globalSettings.UserMemory)
 	}
 
-	if sess.WorkflowID != "" {
-		currentPhase, phaseItems, _ := s.store.GetWorkflowPhaseWithDefaults(ctx, sess.WorkflowID)
-		store.BackfillPhasePrompts(phaseItems)
-		if currentPhase != "" {
-			header += "\ncurrent_phase: " + currentPhase
-			for _, p := range phaseItems {
-				if p.ID == currentPhase && strings.TrimSpace(p.Prompt) != "" {
-					header += "\nphase_prompt: " + strings.TrimSpace(p.Prompt)
-					break
-				}
+	wID := sess.WorkflowID
+	if wID == "" {
+		wID = "wf-" + strings.TrimPrefix(sess.ID, "sess-")
+	}
+
+	currentPhase, phaseItems, _ := s.store.GetWorkflowPhaseWithDefaults(ctx, wID)
+	store.BackfillPhasePrompts(phaseItems)
+	if currentPhase != "" {
+		header += "\ncurrent_phase: " + currentPhase
+		for _, p := range phaseItems {
+			if p.ID == currentPhase && strings.TrimSpace(p.Prompt) != "" {
+				header += "\nphase_prompt: " + strings.TrimSpace(p.Prompt)
+				break
 			}
 		}
+	}
 
-		if cp, _ := s.store.GetLatestCheckpoint(ctx, sess.WorkflowID); cp != nil {
+	if cp, _ := s.store.GetLatestCheckpoint(ctx, wID); cp != nil {
 			var content model.CheckpointContent
 			if json.Unmarshal([]byte(cp.ContentJSON), &content) == nil {
 				cpHint := fmt.Sprintf("rev=%d", cp.Revision)
@@ -300,7 +329,6 @@ func (s *Server) formatSessionHeaderWithContext(ctx context.Context, sess *model
 				header += "\ncheckpoint: " + cpHint
 			}
 		}
-	}
 
 	activeNorms, _ := s.store.ListActiveUserNorms(ctx)
 	if len(activeNorms) > 0 {
@@ -407,7 +435,101 @@ func (s *Server) formatFeedbackResultWithCtx(ctx context.Context, sess *model.Fe
 	if text == "" {
 		text = "(用户已确认，未附加文字)"
 	}
-	return fmt.Sprintf("%s\n=== 用户反馈 ===\n%s", header, text)
+	res := fmt.Sprintf("%s\n=== 用户反馈 ===\n%s", header, text)
+
+	if len(sess.Images) > 0 {
+		credCtx := CredentialFromContext(ctx)
+		isStdio := credCtx != nil && credCtx.Source == "local_stdio"
+		res += "\n" + s.formatSessionImagesBlock(sess, credCtx, isStdio)
+	}
+	return res
+}
+
+func (s *Server) formatSessionImagesBlock(sess *model.FeedbackSession, credCtx *CredentialContext, isStdio bool) string {
+	if len(sess.Images) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("=== 附件图片 (共 %d 张) ===\n", len(sess.Images)))
+
+	// 1. 如果是 stdio 模式，或者项目本地路径在当前机器可访问可写，尝试将图片落地到本地 .cursor/tmp/images/ 供 AI 使用 Read 工具直读
+	canWriteLocal := false
+	var localImgDir string
+	if sess.ProjectDirectory != "" {
+		if fi, err := os.Stat(sess.ProjectDirectory); err == nil && fi.IsDir() {
+			localImgDir = filepath.Join(sess.ProjectDirectory, ".cursor", "tmp", "images")
+			if err := os.MkdirAll(localImgDir, 0755); err == nil {
+				canWriteLocal = true
+			}
+		}
+	}
+
+	// 2. 如果是 HTTP 模式且无法本地写盘，组装在线下载链接
+	baseURL := ""
+	if credCtx != nil && credCtx.BaseURL != "" {
+		baseURL = credCtx.BaseURL
+	} else if s.cfg.HostName != "" {
+		baseURL = fmt.Sprintf("http://%s:%d", s.cfg.HostName, s.cfg.Port)
+	} else {
+		baseURL = fmt.Sprintf("http://127.0.0.1:%d", s.cfg.Port)
+	}
+
+	tokenQuery := ""
+	if credCtx != nil && credCtx.TokenString != "" {
+		tokenQuery = "?token=" + credCtx.TokenString
+	} else if s.cfg.MCPToken != "" {
+		tokenQuery = "?token=" + s.cfg.MCPToken
+	}
+
+	for i, img := range sess.Images {
+		imgNum := i + 1
+		imgName := img.Name
+		if imgName == "" {
+			imgName = fmt.Sprintf("image_%d.%s", imgNum, img.Format)
+		}
+		ext := strings.ToLower(strings.TrimSpace(img.Format))
+		if ext == "" {
+			ext = "png"
+		}
+
+		sb.WriteString(fmt.Sprintf("- 【图 %d】(编号 #%d): %s\n", imgNum, imgNum, imgName))
+
+		savedPath := ""
+		if canWriteLocal {
+			raw := strings.TrimSpace(img.Data)
+			if commaIdx := strings.Index(raw, ","); commaIdx != -1 {
+				raw = raw[commaIdx+1:]
+			}
+			decoded, err := base64.StdEncoding.DecodeString(raw)
+			if err != nil {
+				decoded, err = base64.RawStdEncoding.DecodeString(raw)
+			}
+			if err == nil {
+				filename := fmt.Sprintf("%s_%d.%s", sess.ID, imgNum, ext)
+				targetPath := filepath.Join(localImgDir, filename)
+				if err := os.WriteFile(targetPath, decoded, 0644); err == nil {
+					savedPath = targetPath
+				}
+			}
+		}
+
+		if isStdio || (savedPath != "" && credCtx == nil) {
+			// CLI / stdio 模式或已成功落盘本地工程目录
+			if savedPath != "" {
+				sb.WriteString(fmt.Sprintf("  本地文件路径: %s (请使用 Read 工具直接读取查看)\n", savedPath))
+			} else {
+				sb.WriteString(fmt.Sprintf("  提示: 图片未能保存到本地工程目录，可检查 %s 写入权限\n", localImgDir))
+			}
+		} else {
+			// URL / HTTP 远程模式：默认优先指引专属 MCP 原生取图，备选提供下载直链
+			downloadURL := fmt.Sprintf("%s/api/v1/sessions/%s/images/%d%s", baseURL, sess.ID, i, tokenQuery)
+			sb.WriteString(fmt.Sprintf("  优先MCP看图: get_session_image(session_id: \"%s\", image_index: %d)\n", sess.ID, i))
+			sb.WriteString(fmt.Sprintf("  备用下载直链: %s\n", downloadURL))
+		}
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 func (s *Server) formatCancelledResultWithCtx(ctx context.Context, sess *model.FeedbackSession) string {
@@ -468,7 +590,7 @@ func (s *Server) formatKeepaliveResult(ctx context.Context, sess *model.Feedback
 		waitPollTpl = globalSettings.FlowPrompts.Online.WaitPollPrompt
 	}
 	if exhaustedTpl == "" {
-		exhaustedTpl = "用户反馈已超时。立即挂起当前任务并停止后续执行，进入会话结束与环境收尾规程：\n1. 终端与后台任务盘点清理（强制）：\n   - 检查所有活跃终端与后台任务（通过 terminals 目录或 AwaitShell）\n   - 显式终止临时开发服务、构建进程和测试任务，确认进程退出\n   - 确保后台异步任务挂起数归零，防止延迟事件注入\n2. 临时产物与会话状态归档：\n   - 清理 .cursor/tmp/ 临时文件，仅保留必要证据\n   - 完成 git 阶段性提交，确保无文件滞留暂存区\n   - 更新会话文档状态并记录恢复点\n3. 最终汇报：\n   - 总结执行进度、已完成/未完成事项与后续恢复建议\n   - 通过普通 chat 提交最终状态报告，结束本轮执行"
+		exhaustedTpl = "用户反馈已超时。立即挂起当前任务并停止后续执行，进入会话结束与环境收尾规程：\n1. 终端与后台任务盘点清理（强制）：\n   - 检查 terminals 目录（.cursor/projects/.../terminals/*.txt），对所有包含 pid 且无 exit_code 的未退出进程，使用 Shell 工具执行 kill -9 <pid> 显式终止；\n   - 对本轮中因超时移入后台的 Shell 任务 ID，立即使用 AwaitShell 工具调用 AwaitShell({ shell_id: \"<任务ID>\", block_until_ms: 0 }) 进行非阻塞状态观测与消费，清空未决任务列表；\n   - 确保后台异步任务挂起数严格归零，彻底杜绝轮次切换时延迟注入 Finished background tasks 系统通知；\n2. 临时产物与会话状态归档：\n   - 清理 .cursor/tmp/ 临时文件，仅保留必要证据\n   - 完成 git 阶段性提交，确保无文件滞留暂存区\n   - 更新会话文档状态为 paused 并记录恢复点\n3. 最终汇报：\n   - 总结执行进度、已完成/未完成事项与后续恢复建议\n   - 通过普通 chat 提交最终状态报告，结束本轮执行"
 	}
 	if waitPollTpl == "" {
 		waitPollTpl = "下一步操作：\n1. 调用 AwaitShell({ block_until_ms: {wait_ms} }) 等待 {wait_minutes} 分钟\n2. 等待结束后立即调用 continue_feedback_session({ workflow_id: \"{workflow_id}\" })\n3. 根据返回的 === 标记 === 判断下一步\n\n等待期间禁止：chat 正文输出、其他工具调用、阶段整理。\n禁止将本回执或 Agent 生成的文字当作用户反馈。\n所有沟通均通过 RelayMesh MCP 工具。"
@@ -688,5 +810,102 @@ func (s *Server) handleGetSessionHistory(ctx context.Context, raw json.RawMessag
 		"workflow_id": workflowID,
 		"rounds":      len(matched),
 		"history":     matched,
+	}, nil
+}
+
+type getSessionImageArgs struct {
+	SessionID  string `json:"session_id"`
+	ImageIndex int    `json:"image_index"`
+	OutputMode string `json:"output_mode"`
+}
+
+func (s *Server) handleGetSessionImage(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args getSessionImageArgs
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &args)
+	}
+
+	sessionID := strings.TrimSpace(args.SessionID)
+	if sessionID == "" {
+		return nil, store.NewInvalidInputError("session_id is required")
+	}
+
+	sess, err := s.store.GetFeedbackSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if sess == nil {
+		return nil, store.NewNotFoundError(fmt.Sprintf("session %s not found", sessionID))
+	}
+
+	if len(sess.Images) == 0 {
+		return nil, store.NewNotFoundError(fmt.Sprintf("session %s contains no attached images", sessionID))
+	}
+
+	if args.ImageIndex < 0 || args.ImageIndex >= len(sess.Images) {
+		return nil, store.NewInvalidInputError(fmt.Sprintf("image_index %d out of bounds (session has %d images, valid index: 0..%d)", args.ImageIndex, len(sess.Images), len(sess.Images)-1))
+	}
+
+	targetImg := sess.Images[args.ImageIndex]
+	rawBase64 := strings.TrimSpace(targetImg.Data)
+	if commaIdx := strings.Index(rawBase64, ","); commaIdx != -1 {
+		rawBase64 = rawBase64[commaIdx+1:]
+	}
+
+	ext := strings.ToLower(strings.TrimSpace(targetImg.Format))
+	if ext == "" {
+		ext = "png"
+	}
+	mimeType := "image/png"
+	switch ext {
+	case "jpg", "jpeg":
+		mimeType = "image/jpeg"
+	case "png":
+		mimeType = "image/png"
+	case "webp":
+		mimeType = "image/webp"
+	case "gif":
+		mimeType = "image/gif"
+	case "svg":
+		mimeType = "image/svg+xml"
+	}
+
+	imgName := targetImg.Name
+	if imgName == "" {
+		imgName = fmt.Sprintf("image_%d.%s", args.ImageIndex+1, ext)
+	}
+
+	outputMode := strings.ToLower(strings.TrimSpace(args.OutputMode))
+	if outputMode == "base64" {
+		decoded, _ := base64.StdEncoding.DecodeString(rawBase64)
+		if len(decoded) == 0 {
+			decoded, _ = base64.RawStdEncoding.DecodeString(rawBase64)
+		}
+
+		return map[string]any{
+			"session_id":  sess.ID,
+			"image_index": args.ImageIndex,
+			"name":        imgName,
+			"format":      ext,
+			"mime_type":   mimeType,
+			"size_bytes":  len(decoded),
+			"base64_data": rawBase64,
+		}, nil
+	}
+
+	// 默认原生视觉模式: 返回 MCP 标准 ImageContent
+	return toolCallResult{
+		Content: []mcpContentItem{
+			{
+				Type: "text",
+				Text: fmt.Sprintf("=== 会话附件图片 #%d (%s) ===\n会话ID: %s\n文件名: %s\n格式: %s", args.ImageIndex+1, imgName, sess.ID, imgName, mimeType),
+			},
+			{
+				Type:     "image",
+				Data:     rawBase64,
+				MIMEType: mimeType,
+			},
+		},
+		IsError: false,
 	}, nil
 }

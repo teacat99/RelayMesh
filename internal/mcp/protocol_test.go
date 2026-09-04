@@ -74,12 +74,12 @@ func TestProtocol_NotificationHandling(t *testing.T) {
 	}
 	resMap := toolsRes.Response.Result.(map[string]any)
 	if toolsList, ok := resMap["tools"].([]ToolDefinition); ok {
-		if len(toolsList) != 9 {
-			t.Fatalf("expected 9 tools for stdio credential, got %d", len(toolsList))
+		if len(toolsList) != 10 {
+			t.Fatalf("expected 10 tools for stdio credential, got %d", len(toolsList))
 		}
 	} else if toolsAny, ok := resMap["tools"].([]any); ok {
-		if len(toolsAny) != 9 {
-			t.Fatalf("expected 9 tools for stdio credential, got %d", len(toolsAny))
+		if len(toolsAny) != 10 {
+			t.Fatalf("expected 10 tools for stdio credential, got %d", len(toolsAny))
 		}
 	} else {
 		t.Fatalf("unexpected type for tools in result: %T", resMap["tools"])

@@ -60,6 +60,7 @@ const isResettingCredentials = ref(false)
 // 凭据管理状态
 const credIsEditing = ref(false)
 const credEditTarget = ref<number | null>(null)
+const credTargetIsEnv = ref<boolean>(false)
 const credForm = ref({
   name: '',
   host_name: '',
@@ -251,6 +252,7 @@ onMounted(() => {
 
 function credOpenCreate() {
   credEditTarget.value = null
+  credTargetIsEnv.value = false
   credForm.value = {
     name: '',
     host_name: '',
@@ -265,6 +267,7 @@ function credOpenCreate() {
 
 function credOpenEdit(cred: MCPCredential) {
   credEditTarget.value = cred.id
+  credTargetIsEnv.value = !!cred.is_env
   credForm.value = {
     name: cred.name,
     host_name: cred.host_name || '',
@@ -280,6 +283,7 @@ function credOpenEdit(cred: MCPCredential) {
 function credCloseEditor() {
   credIsEditing.value = false
   credEditTarget.value = null
+  credTargetIsEnv.value = false
   credFormError.value = ''
   credRevealedToken.value = null
 }
@@ -797,6 +801,11 @@ function credPermSummary(perms: MCPPermissions): string {
             </button>
           </div>
 
+          <div v-if="credTargetIsEnv" class="p-2.5 rounded-xs bg-primary/10 border border-primary/30 text-[11px] font-mono text-primary flex items-start gap-2">
+            <Info class="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>此凭据来自环境变量 RELAYMESH_MCP_TOKEN。可在此自定义名称、主机名、权限及启停状态；Token 自身受环境只读保护。</span>
+          </div>
+
           <div v-if="credFormError" class="flex items-center gap-1.5 text-xs text-destructive font-mono">
             <AlertCircle class="w-3 h-3 shrink-0" />
             {{ credFormError }}
@@ -889,34 +898,8 @@ function credPermSummary(perms: MCPPermissions): string {
           </div>
         </div>
 
-        <!-- Env Credentials (read-only) -->
-        <div v-if="credStore.envCredentials.length > 0" class="divide-y divide-border/60 border border-border/70 rounded-xs bg-card/60 overflow-hidden mb-2">
-          <div
-            v-for="(ec, idx) in credStore.envCredentials"
-            :key="'env-' + idx"
-            class="flex items-start gap-3 p-2.5 bg-muted/20"
-          >
-            <div class="mt-0.5 shrink-0">
-              <Lock class="w-3.5 h-3.5 text-muted-foreground/70" />
-            </div>
-            <div class="flex-1 min-w-0 space-y-0.5">
-              <div class="flex items-center gap-1.5">
-                <span class="text-[11px] font-semibold text-foreground truncate">{{ ec.name }}</span>
-                <span class="text-[9px] px-1.5 py-0.5 rounded-xs bg-primary/10 text-primary font-mono shrink-0">ENV</span>
-              </div>
-              <div v-if="ec.token" class="text-[10px] font-mono text-muted-foreground">
-                Token: {{ ec.token }}
-              </div>
-              <div v-if="ec.username" class="text-[10px] font-mono text-muted-foreground">
-                用户名: {{ ec.username }}
-              </div>
-              <p class="text-[10px] text-muted-foreground/70">{{ ec.note }}</p>
-            </div>
-          </div>
-        </div>
-
         <!-- Credentials List -->
-        <div v-if="credStore.credentials.length === 0 && credStore.envCredentials.length === 0 && !credIsEditing" class="p-4 text-center text-[11px] text-muted-foreground font-mono border border-dashed border-border/60 rounded-xs bg-card/30">
+        <div v-if="credStore.credentials.length === 0 && !credIsEditing" class="p-4 text-center text-[11px] text-muted-foreground font-mono border border-dashed border-border/60 rounded-xs bg-card/30">
           暂无凭据，所有 MCP 请求以开放模式运行
         </div>
 
@@ -943,6 +926,10 @@ function credPermSummary(perms: MCPPermissions): string {
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="font-mono font-bold text-xs text-foreground">{{ cred.name }}</span>
                 <span
+                  v-if="cred.is_env"
+                  class="text-[9px] px-1.5 py-0.5 rounded-xs bg-primary/10 text-primary border border-primary/20 font-mono font-medium shrink-0"
+                >ENV</span>
+                <span
                   v-if="cred.host_name"
                   class="text-[9px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 font-mono font-medium"
                 >{{ cred.host_name }}</span>
@@ -959,13 +946,13 @@ function credPermSummary(perms: MCPPermissions): string {
             </div>
 
             <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-              <button type="button" class="p-1.5 rounded-sm hover:bg-muted cursor-pointer" title="重新生成 Token" @click="credHandleRegenerate(cred.id)">
+              <button v-if="!cred.is_env" type="button" class="p-1.5 rounded-sm hover:bg-muted cursor-pointer" title="重新生成 Token" @click="credHandleRegenerate(cred.id)">
                 <RefreshCw class="w-3 h-3 text-muted-foreground" />
               </button>
               <button type="button" class="p-1.5 rounded-sm hover:bg-muted cursor-pointer" title="编辑" @click="credOpenEdit(cred)">
                 <Pencil class="w-3 h-3 text-muted-foreground" />
               </button>
-              <button type="button" class="p-1.5 rounded-sm hover:bg-destructive/10 cursor-pointer" title="删除" @click="credHandleDelete(cred.id, cred.name)">
+              <button v-if="!cred.is_env" type="button" class="p-1.5 rounded-sm hover:bg-destructive/10 cursor-pointer" title="删除" @click="credHandleDelete(cred.id, cred.name)">
                 <Trash2 class="w-3 h-3 text-muted-foreground hover:text-destructive" />
               </button>
             </div>

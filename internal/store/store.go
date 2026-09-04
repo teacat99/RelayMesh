@@ -65,6 +65,13 @@ func New(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("failed to automigrate database tables: %w", err)
 	}
 
+	// 存量老数据自愈：自动为历史遗留的空 workflow_id 会话补齐规范的 wf-{id} 标识（如 sess-e61b8709 自动自愈为 wf-e61b8709）
+	_ = db.Model(&model.FeedbackSession{}).
+		Where("workflow_id IS NULL OR workflow_id = ''").
+		Updates(map[string]interface{}{
+			"workflow_id": gorm.Expr("'wf-' || replace(id, 'sess-', '')"),
+		}).Error
+
 	return &Store{db: db}, nil
 }
 

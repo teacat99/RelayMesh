@@ -12,6 +12,8 @@ import FeedbackInputDock from '../components/feedback/FeedbackInputDock.vue'
 import TaskWorkspace from '../components/feedback/TaskWorkspace.vue'
 import type { FeedbackSession, SessionImage } from '../api/types'
 import { toast } from 'vue-sonner'
+import { AlertTriangle, RefreshCw, WifiOff } from 'lucide-vue-next'
+import { useSessionTimer } from '../composables/useSessionTimer'
 
 const sessionStore = useSessionStore()
 const taskStore = useTaskStore()
@@ -30,142 +32,25 @@ const hasDraftImages = computed(() => {
 const messageListRef = ref<InstanceType<typeof FeedbackMessageList> | null>(null)
 const inputDockRef = ref<InstanceType<typeof FeedbackInputDock> | null>(null)
 
-// Elapsed & Countdown Timer management
-function formatTimerDuration(seconds: number): string {
-  if (seconds < 0) seconds = 0
-  const ONE_DAY = 86400
-  const ONE_HOUR = 3600
-
-  if (seconds >= ONE_DAY) {
-    const days = Math.floor(seconds / ONE_DAY)
-    const remainSec = seconds % ONE_DAY
-    const hours = Math.floor(remainSec / ONE_HOUR)
-    const mins = Math.floor((remainSec % ONE_HOUR) / 60)
-    return `${days}d·${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`
-  }
-
-  if (seconds >= ONE_HOUR) {
-    const hours = Math.floor(seconds / ONE_HOUR)
-    const mins = Math.floor((seconds % ONE_HOUR) / 60)
-    const secs = seconds % 60
-    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-  }
-
-  const mins = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-}
-
-const elapsedSeconds = ref(0)
-const mcpActiveElapsedSeconds = ref(0)
-const keepaliveElapsedSeconds = ref(0)
-const executionElapsedSeconds = ref(0)
-let timerId: number | null = null
-
-function updateTimer() {
-  const currentSess = sessionStore.currentSession
-  const activeSess = currentSess || sessionStore.selectedSession
-
-  if (!activeSess) {
-    elapsedSeconds.value = 0
-    mcpActiveElapsedSeconds.value = 0
-    keepaliveElapsedSeconds.value = 0
-    executionElapsedSeconds.value = 0
-    return
-  }
-
-  const now = Date.now()
-
-  // 1. 如果有活跃 pending 交互会话：
-  if (currentSess && currentSess.status === 'pending') {
-    const start = currentSess.created_at ? new Date(currentSess.created_at).getTime() : now
-    elapsedSeconds.value = Math.max(0, Math.floor((now - start) / 1000))
-
-    if (currentSess.is_mcp_active && currentSess.mcp_active_at) {
-      const mcpStart = new Date(currentSess.mcp_active_at).getTime()
-      mcpActiveElapsedSeconds.value = Math.max(0, Math.floor((now - mcpStart) / 1000))
-    } else {
-      mcpActiveElapsedSeconds.value = 0
-    }
-
-    if (currentSess.last_keepalive_at) {
-      const keepaliveStart = new Date(currentSess.last_keepalive_at).getTime()
-      keepaliveElapsedSeconds.value = Math.max(0, Math.floor((now - keepaliveStart) / 1000))
-    } else {
-      keepaliveElapsedSeconds.value = 0
-    }
-    executionElapsedSeconds.value = 0
-  } else {
-    // 2. 无交互/已完成状态 (AI 正在本地执行任务、编码或分析):
-    // 计算自上次反馈提交/会话更新时刻以来的执行耗时
-    const execStartTime = activeSess.updated_at
-      ? new Date(activeSess.updated_at).getTime()
-      : (activeSess.created_at ? new Date(activeSess.created_at).getTime() : now)
-    executionElapsedSeconds.value = Math.max(0, Math.floor((now - execStartTime) / 1000))
-    elapsedSeconds.value = 0
-    mcpActiveElapsedSeconds.value = 0
-    keepaliveElapsedSeconds.value = 0
-  }
-}
+// 统一时钟 Composable 驱动（以用户当前选中的 selectedSession 为真源）
+const activeSessionForTimer = computed(() => sessionStore.selectedSession || sessionStore.currentSession)
+const { timerDisplay: timerDisplayInfo, cleanup: cleanupTimer } = useSessionTimer(
+  () => activeSessionForTimer.value as any,
+  () => settingsStore.settings.defaultWaitCountdownMinutes ?? 2
+)
 
 const formattedElapsed = computed(() => {
-  return formatTimerDuration(elapsedSeconds.value)
-})
-
-const timerDisplayInfo = computed(() => {
-  const currentSess = sessionStore.currentSession
-  const activeSess = currentSess || sessionStore.selectedSession
-
-  if (!activeSess) {
-    return {
-      text: '00:00',
-      prefix: '执行',
-      isCountdown: false
-    }
-  }
-
-  // 1. 若当前会话处于 pending 等待用户确认状态：
-  if (currentSess && currentSess.status === 'pending') {
-    // 1.1 如果 MCP 客户端正在保持活跃长轮询挂起 (is_mcp_active 为 true)：
-    if (currentSess.is_mcp_active) {
-      const targetMinutes = currentSess.wait_countdown_minutes ?? settingsStore.settings.defaultWaitCountdownMinutes ?? 2
-      const targetSec = targetMinutes * 60
-      const elapsed = mcpActiveElapsedSeconds.value
-
-      if (targetSec > 0 && elapsed < targetSec) {
-        const remain = targetSec - elapsed
-        return {
-          text: formatTimerDuration(remain),
-          prefix: '剩余',
-          isCountdown: true
-        }
-      }
-      return {
-        text: formatTimerDuration(elapsed),
-        prefix: '剩余',
-        isCountdown: false
-      }
-    }
-
-    // 1.2 如果已向 AI 返回「=== 等待回执 ===」，AI 处于 sleep 盲等中：
-    const waitDurationSec = currentSess.last_keepalive_at ? keepaliveElapsedSeconds.value : 0
-    return {
-      text: formatTimerDuration(waitDurationSec),
-      prefix: '等待',
-      isCountdown: false
-    }
-  }
-
-  // 2. 无交互状态 (已完成/AI 正在自主执行任务)：显示「执行: MM:SS」
-  return {
-    text: formatTimerDuration(executionElapsedSeconds.value),
-    prefix: '执行',
-    isCountdown: false
-  }
+  return timerDisplayInfo.value.text
 })
 
 // Chronological feedback sessions list for current workflow (Oldest at top -> Newest at bottom)
 const conversationRounds = computed(() => {
+  // 优先从按需加载并带二级缓存的 currentWorkflowSessions 获取完整正文与图片
+  if (sessionStore.currentWorkflowSessions && sessionStore.currentWorkflowSessions.length > 0) {
+    return [...sessionStore.currentWorkflowSessions].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+  }
+
+  // 兜底：若尚未加载完成，回退到 sessions（元数据）提供基础结构
   let list = [...sessionStore.sessions]
   const currentSelected = sessionStore.selectedSession || sessionStore.currentSession
   if (currentSelected) {
@@ -186,19 +71,26 @@ const conversationRounds = computed(() => {
   return list.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
 })
 
-function handleSelectItem(item: UnifiedItem) {
+async function handleSelectItem(item: UnifiedItem) {
   activeItemType.value = item.type
   activeItemId.value = item.id
 
   if (item.type === 'feedback') {
-    sessionStore.selectSession(item.raw as FeedbackSession)
-    nextTick(() => {
-      if (item.status === 'pending') {
-        messageListRef.value?.scrollToBottom(false)
-      } else {
-        messageListRef.value?.scrollToSession(item.id)
-      }
-    })
+    const rawSess = item.raw as FeedbackSession
+    sessionStore.selectSession(rawSess)
+    const targetWId = item.workflow_id || item.id
+    if (targetWId) {
+      await sessionStore.loadWorkflowSessions(targetWId)
+    }
+    await nextTick()
+    if (item.status === 'pending') {
+      // 待回复的 Workflow：跳转到最新待确认会话卡片的开头（头部），便于第一时间阅读 AI 方案
+      const pendingSessionId = rawSess?.session_id || item.id
+      messageListRef.value?.scrollToSession(pendingSessionId)
+    } else {
+      // 已经回复的 Workflow：跳转到会话流的最末尾位置（底部）
+      messageListRef.value?.scrollToBottom(false)
+    }
   } else if (item.type === 'task') {
     taskStore.fetchTaskDetail(item.id)
   }
@@ -221,7 +113,8 @@ function handleOpenArchive() {
 }
 
 async function handleSubmit(data: { text: string; presets: string[]; images: SessionImage[] }) {
-  const targetSession = sessionStore.currentSession || sessionStore.selectedSession
+  // 关键防御：严格以用户当前在主视口选中的 selectedSession 为唯一真源，杜绝后台无关 pending 会话劫持！
+  const targetSession = sessionStore.selectedSession || sessionStore.currentSession
   const targetWorkflowId = targetSession?.workflow_id || targetSession?.session_id || 'default'
 
   let finalMsg = data.text.trim()
@@ -291,7 +184,7 @@ async function handleRevokeSession(sessionId: string) {
 
 async function handleRevokeQueued(queuedId: number) {
   try {
-    const targetSession = sessionStore.currentSession || sessionStore.selectedSession
+    const targetSession = sessionStore.selectedSession || sessionStore.currentSession
     const targetWorkflowId = targetSession?.workflow_id || ''
     const revoked = await sessionStore.revokeQueuedFeedback(queuedId, targetWorkflowId)
     if (revoked) {
@@ -334,18 +227,47 @@ watch(isSidebarCollapsed, () => {
   updateSidebarCssVar()
 }, { immediate: true })
 
-watch(() => [sessionStore.currentSession, sessionStore.selectedSession], () => {
-  updateTimer()
-  const currentWId = sessionStore.selectedSession?.workflow_id || sessionStore.currentSession?.workflow_id
+watch(() => sessionStore.selectedSession, (sess) => {
+  const currentWId = sess?.workflow_id || sess?.session_id
   if (currentWId) {
     sessionStore.fetchQueuedFeedbacks(currentWId)
+    activeItemType.value = 'feedback'
+    activeItemId.value = currentWId
   }
-  if (sessionStore.selectedSession) {
-    activeItemType.value = 'feedback'
-    activeItemId.value = sessionStore.selectedSession.workflow_id || sessionStore.selectedSession.session_id
-  } else if (!activeItemId.value && sessionStore.currentSession) {
-    activeItemType.value = 'feedback'
-    activeItemId.value = sessionStore.currentSession.workflow_id || sessionStore.currentSession.session_id
+}, { immediate: true })
+
+watch(() => sessionStore.currentSession, (curr) => {
+  // 仅在当前未选中任何会话时，跟随 currentSession 赋予默认 ID
+  if (!sessionStore.selectedSession && curr) {
+    const currentWId = curr.workflow_id || curr.session_id
+    if (currentWId) {
+      sessionStore.fetchQueuedFeedbacks(currentWId)
+      activeItemType.value = 'feedback'
+      activeItemId.value = currentWId
+    }
+  }
+})
+
+// 离线告警横条 3 秒防抖（消除短时 1~2s 微闪重连对界面的视觉干扰）
+const showOfflineBanner = ref(false)
+let offlineBannerTimer: number | null = null
+
+watch(() => sessionStore.sseConnected, (connected) => {
+  if (connected) {
+    if (offlineBannerTimer) {
+      window.clearTimeout(offlineBannerTimer)
+      offlineBannerTimer = null
+    }
+    showOfflineBanner.value = false
+  } else {
+    if (!offlineBannerTimer) {
+      offlineBannerTimer = window.setTimeout(() => {
+        if (!sessionStore.sseConnected) {
+          showOfflineBanner.value = true
+        }
+        offlineBannerTimer = null
+      }, 3000)
+    }
   }
 }, { immediate: true })
 
@@ -366,20 +288,19 @@ onMounted(async () => {
     activeItemId.value = taskStore.tasks[0].task_id
     taskStore.fetchTaskDetail(taskStore.tasks[0].task_id)
   }
-  timerId = window.setInterval(updateTimer, 1000)
   updateSidebarCssVar()
   window.addEventListener('resize', updateSidebarCssVar)
   nextTick(() => messageListRef.value?.scrollToBottom(false))
 })
 
 onUnmounted(() => {
-  if (timerId) clearInterval(timerId)
+  cleanupTimer()
   window.removeEventListener('resize', updateSidebarCssVar)
 })
 </script>
 
 <template>
-  <div class="h-screen w-screen flex bg-background text-foreground overflow-hidden">
+  <div class="h-full w-full h-[100dvh] flex bg-background text-foreground overflow-hidden">
     <!-- 1. Top-to-Bottom Piercing Left Sidebar -->
     <AppSidebar
       :active-item-id="activeItemId"
@@ -407,7 +328,37 @@ onUnmounted(() => {
     />
 
     <!-- 2. Right Main Workspace -->
-    <main class="flex-1 min-w-0 h-screen flex flex-col bg-background overflow-hidden relative">
+    <main class="flex-1 min-w-0 h-full flex flex-col bg-background overflow-hidden relative">
+      <!-- 离线告警全局横幅 (Demand 6: SSE 离线可见性指示与主动重连) -->
+      <Transition
+        enter-active-class="transition-all duration-200 ease-out"
+        enter-from-class="-translate-y-full opacity-0"
+        enter-to-class="translate-y-0 opacity-100"
+        leave-active-class="transition-all duration-150 ease-in"
+        leave-from-class="translate-y-0 opacity-100"
+        leave-to-class="-translate-y-full opacity-0"
+      >
+        <div
+          v-if="showOfflineBanner"
+          class="bg-amber-500/15 border-b border-amber-500/30 text-amber-600 dark:text-amber-400 px-3 py-1.5 text-xs font-mono flex items-center justify-between shrink-0 z-50 select-none backdrop-blur-xs"
+        >
+          <div class="flex items-center gap-2 min-w-0">
+            <WifiOff class="w-3.5 h-3.5 shrink-0 animate-pulse text-amber-500" />
+            <span class="truncate">
+              {{ sessionStore.isReconnecting ? '实时流已断开，正在尝试自动重连...' : '实时事件流已离线，数据可能不是最新' }}
+            </span>
+          </div>
+          <button
+            type="button"
+            class="px-2 py-0.5 rounded border border-amber-500/40 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 transition-colors flex items-center gap-1 cursor-pointer shrink-0"
+            @click="sessionStore.manualReconnect()"
+          >
+            <RefreshCw class="w-3 h-3" :class="sessionStore.isReconnecting ? 'animate-spin' : ''" />
+            <span>立即重连</span>
+          </button>
+        </div>
+      </Transition>
+
       <!-- ========================================== -->
       <!-- VIEW A: FEEDBACK INTERACTION CONVERSATION  -->
       <!-- ========================================== -->
@@ -434,6 +385,7 @@ onUnmounted(() => {
         <FeedbackInputDock
           ref="inputDockRef"
           :is-scrolled-up="isChatScrolledUp"
+          :workflow-id="sessionStore.selectedSession?.workflow_id || sessionStore.selectedSession?.session_id || 'default'"
           @submit="handleSubmit"
           @scroll-to-bottom="messageListRef?.scrollToBottom()"
           @open-settings="handleOpenSettings"

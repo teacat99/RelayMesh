@@ -47,7 +47,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="h-screen w-screen flex bg-background text-foreground overflow-hidden selection:bg-primary/20">
+  <div class="h-full w-full h-[100dvh] flex bg-background text-foreground overflow-hidden selection:bg-primary/20">
     <!-- Main Full-Height App Canvas -->
     <slot />
 

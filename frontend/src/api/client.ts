@@ -49,8 +49,13 @@ export const sessionsApi = {
     return res.data
   },
 
-  async list(params?: { project_directory?: string; status?: string; limit?: number }): Promise<{ sessions: FeedbackSession[] }> {
+  async list(params?: { project_directory?: string; status?: string; limit?: number; brief?: boolean; compact?: boolean }): Promise<{ sessions: FeedbackSession[] }> {
     const res = await api.get('/sessions', { params })
+    return res.data
+  },
+
+  async getWorkflowSessions(workflowId: string): Promise<{ sessions: FeedbackSession[] }> {
+    const res = await api.get(`/workflows/${encodeURIComponent(workflowId)}/sessions`)
     return res.data
   },
 
@@ -255,6 +260,7 @@ export interface MCPCredential {
   is_active: boolean
   permissions: MCPPermissions
   note: string
+  is_env?: boolean
   created_at: string
   updated_at: string
 }

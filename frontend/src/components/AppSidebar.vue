@@ -44,10 +44,13 @@ import {
   Check,
   ChevronDown,
   X,
-  PanelLeftClose
+  PanelLeftClose,
+  Hash
 } from 'lucide-vue-next'
 import type { FeedbackSession, TaskSummary } from '../api/types'
 import SidebarItemCard from './sidebar/SidebarItemCard.vue'
+import RenameSessionDialog from './sidebar/RenameSessionDialog.vue'
+import { toast } from 'vue-sonner'
 
 export interface UnifiedItem {
   id: string
@@ -58,6 +61,7 @@ export interface UnifiedItem {
   status: string
   user_presence?: 'online' | 'away' | 'autopilot'
   created_at: string
+  first_created_at?: string
   updated_at?: string
   project_directory?: string
   workflow_id?: string
@@ -180,13 +184,25 @@ function handleContextPin() {
   closeContextMenu()
 }
 
-async function handleContextRename() {
+const renameDialogOpen = ref(false)
+const renamingItem = ref<UnifiedItem | null>(null)
+const copiedNoticeText = ref('Workflow ID 已复制到剪贴板')
+
+function handleContextRename() {
   const item = contextMenu.value.item
   closeContextMenu()
   if (!item || item.type !== 'feedback') return
-  const newTitle = window.prompt('请输入新的名称：', item.title)
-  if (newTitle && newTitle.trim() && newTitle.trim() !== item.title) {
-    await sessionStore.renameSession(item.id, newTitle.trim())
+  renamingItem.value = item
+  renameDialogOpen.value = true
+}
+
+async function handleRenameSubmit(newTitle: string) {
+  if (!renamingItem.value) return
+  try {
+    await sessionStore.renameSession(renamingItem.value.id, newTitle)
+    toast.success('工作流名称已成功修改')
+  } catch (err: any) {
+    toast.error(`重命名失败: ${err?.message || '未知错误'}`)
   }
 }
 
@@ -203,7 +219,9 @@ async function handleContextCopyId() {
   const item = contextMenu.value.item
   closeContextMenu()
   if (!item) return
+  const hasWf = Boolean(item.workflow_id)
   const idToCopy = item.workflow_id || item.id
+  copiedNoticeText.value = hasWf ? 'Workflow ID 已复制到剪贴板' : '会话 ID 已复制到剪贴板'
   try {
     await navigator.clipboard.writeText(idToCopy)
     copiedNotice.value = true
@@ -257,8 +275,9 @@ const allItems = computed<UnifiedItem[]>(() => {
     // 找出该工作流下创建时间最新的 session 作为展示基准
     const sorted = [...group].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
     const latest = sorted[0]
-    // 检查该工作流中是否有 pending 状态的待确认轮次
-    const pendingSession = group.find(s => s.status === 'pending')
+    const earliest = sorted[sorted.length - 1]
+    // 在已按时间倒序排列的 sorted 数组上检索最新 pending 轮次，避免未排序数组检索隐患 (D-142)
+    const pendingSession = sorted.find(s => s.status === 'pending')
 
     // 如果有 pending 轮次，状态直接更新为 pending，且倒计时/在线状态与操作优先绑定 pendingSession
     const activeSess = pendingSession || latest
@@ -272,6 +291,7 @@ const allItems = computed<UnifiedItem[]>(() => {
       status: pendingSession ? 'pending' : latest.status,
       user_presence: activeSess.user_presence,
       created_at: latest.created_at,
+      first_created_at: earliest?.created_at || latest.created_at,
       updated_at: latest.updated_at,
       project_directory: latest.project_directory,
       workflow_id: latest.workflow_id,
@@ -282,6 +302,7 @@ const allItems = computed<UnifiedItem[]>(() => {
 
   // 2. Tasks
   for (const t of taskStore.tasks) {
+    const taskCreatedAt = (t as any).created_at || t.updated_at || new Date().toISOString()
     items.push({
       id: t.task_id,
       type: 'task',
@@ -289,7 +310,8 @@ const allItems = computed<UnifiedItem[]>(() => {
       subtitle: `Rev ${t.revision} · Seq ${t.report_sequence}`,
       summary: t.title ? `托管自驾工单: ${t.title}` : `托管自驾工单 (Rev ${t.revision})`,
       status: t.state,
-      created_at: (t as any).created_at || t.updated_at || new Date().toISOString(),
+      created_at: taskCreatedAt,
+      first_created_at: taskCreatedAt,
       updated_at: t.updated_at,
       unread_count: t.unread_report_count,
       revision: t.revision,
@@ -298,17 +320,35 @@ const allItems = computed<UnifiedItem[]>(() => {
     })
   }
 
-  // Sort: Pinned first, then pending first, then newest first
+  // 排序规则 (D-141)：
+  // 1. 置顶 (Pinned) 绝对优先
+  // 2. 当日会话位置稳定法则：在当天，出现新消息不从下向上跳转顺序，严格以初始创建时间 (first_created_at) 锁定相对排位
   return items.sort((a, b) => {
     const aPin = isPinned(a.id) ? 1 : 0
     const bPin = isPinned(b.id) ? 1 : 0
     if (aPin !== bPin) return bPin - aPin
 
-    const aPending = (a.type === 'feedback' && a.status === 'pending') ? 1 : 0
-    const bPending = (b.type === 'feedback' && b.status === 'pending') ? 1 : 0
-    if (aPending !== bPending) return bPending - aPending
+    const aFirst = new Date(a.first_created_at || a.created_at).getTime()
+    const bFirst = new Date(b.first_created_at || b.created_at).getTime()
 
-    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    const aLatest = new Date(a.created_at).getTime()
+    const bLatest = new Date(b.created_at).getTime()
+
+    // 计算条目的活跃归属日 (以最新轮次为活跃归属日)
+    const aDay = dayjs(a.created_at).startOf('day').valueOf()
+    const bDay = dayjs(b.created_at).startOf('day').valueOf()
+
+    // 跨自然日：较新一天的条目整体排在上方
+    if (aDay !== bDay) {
+      return bDay - aDay
+    }
+
+    // 同一自然日（当日内）：严格按照初次创建时间倒序排定物理排位，新消息/pending 严禁改变相对顺序（不从下向上跳转）
+    if (aFirst !== bFirst) {
+      return bFirst - aFirst
+    }
+
+    return bLatest - aLatest
   })
 })
 
@@ -491,6 +531,7 @@ function isItemActive(item: UnifiedItem): boolean {
     if (item.raw && (item.raw as FeedbackSession).session_id === props.activeItemId) return true
   }
   if (item.type === 'feedback') {
+    // 侧边栏高亮焦点严格以 selectedSession（用户正在查看的条目）为真源，仅在未选定时回退
     const sel = sessionStore.selectedSession || sessionStore.currentSession
     if (!sel) return false
     const selKey = sel.workflow_id || sel.session_id
@@ -538,7 +579,7 @@ onUnmounted(() => {
   </Transition>
 
   <aside
-    class="sidebar-container fixed inset-y-0 left-0 z-50 h-screen flex flex-col bg-card/95 backdrop-blur-md md:static md:z-10 md:bg-muted/15 md:h-screen shrink-0 select-none overflow-hidden border-r border-border/70"
+    class="sidebar-container fixed inset-y-0 left-0 z-50 h-full h-[100dvh] flex flex-col bg-card/95 backdrop-blur-md md:static md:z-10 md:bg-muted/15 md:h-full shrink-0 select-none overflow-hidden border-r border-border/70"
     :class="[
       props.mobileOpen ? 'w-4/5 sm:w-72 translate-x-0 shadow-float' : 'w-4/5 sm:w-72 -translate-x-full md:translate-x-0',
       props.collapsed ? 'is-collapsed' : ''
@@ -715,14 +756,15 @@ onUnmounted(() => {
 
         <div class="h-[1px] bg-border/60 my-1"></div>
 
-        <!-- 4. 复制 Workflow ID -->
+        <!-- 4. 复制 ID（有 workflow_id 则为 Workflow ID，否则为会话 ID） -->
         <button
           type="button"
           class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-sm hover:bg-muted text-left transition-colors cursor-pointer"
           @click="handleContextCopyId"
         >
-          <Workflow class="w-3.5 h-3.5 text-muted-foreground" />
-          <span>复制 Workflow ID</span>
+          <Workflow v-if="contextMenu.item.workflow_id" class="w-3.5 h-3.5 text-muted-foreground" />
+          <Hash v-else class="w-3.5 h-3.5 text-muted-foreground" />
+          <span>{{ contextMenu.item.workflow_id ? '复制 Workflow ID' : '复制会话 ID' }}</span>
         </button>
 
         <!-- 5. 复制工作区路径 (若存在) -->
@@ -745,9 +787,18 @@ onUnmounted(() => {
         class="fixed bottom-4 left-4 z-[9999] bg-foreground text-background text-xs px-3 py-1.5 rounded-sm shadow-float flex items-center gap-1.5 pointer-events-none"
       >
         <Check class="w-3.5 h-3.5" />
-        <span>Workflow ID 已复制到剪贴板</span>
+        <span>{{ copiedNoticeText }}</span>
       </div>
     </Teleport>
+
+    <!-- Controlled Rename Dialog -->
+    <RenameSessionDialog
+      v-model:open="renameDialogOpen"
+      :current-title="renamingItem?.title || ''"
+      :item-id="renamingItem?.id || ''"
+      :is-workflow="Boolean(renamingItem?.workflow_id)"
+      @submit="handleRenameSubmit"
+    />
 
       <!-- 5. Bottom Utility Bar: Settings on left, Utilities + Archive on right -->
       <div class="p-2 border-t border-border/60 flex items-center justify-between bg-card/50">

@@ -18,7 +18,7 @@ function handleBack() {
 </script>
 
 <template>
-  <div class="min-h-screen w-screen bg-background text-foreground flex flex-col">
+  <div class="min-h-full min-h-[100dvh] w-full bg-background text-foreground flex flex-col">
     <!-- Top Header Bar (紧凑适宜高度 h-11，文字靠左) -->
     <header class="h-11 px-3 sm:px-5 border-b border-border/70 flex items-center justify-between bg-card/80 backdrop-blur-md sticky top-0 z-40 shrink-0">
       <div class="flex items-center gap-2">

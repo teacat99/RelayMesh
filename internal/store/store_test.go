@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/teacat99/RelayMesh/internal/model"
+	"gorm.io/gorm"
 )
 
 func setupTestStore(t *testing.T) *Store {
@@ -204,3 +206,109 @@ func TestStore_WorkflowDraft(t *testing.T) {
 		t.Fatalf("expected nil draft after delete, got %+v", afterDel)
 	}
 }
+
+func TestStore_CredentialHostnameCascade(t *testing.T) {
+	st := setupTestStore(t)
+	ctx := context.Background()
+
+	cred := &model.MCPCredential{
+		Name:     "Test WSL Token",
+		HostName: "initial-host",
+		IsActive: true,
+	}
+	if err := st.CreateCredential(ctx, cred); err != nil {
+		t.Fatalf("failed to create credential: %v", err)
+	}
+
+	// 1. 创建绑定该凭据的会话
+	sess1, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:         "wf-cascade-test",
+		CredentialID:       cred.ID,
+		CredentialHostName: cred.HostName,
+		Title:              "Session 1",
+		Summary:            "Summary 1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create session 1: %v", err)
+	}
+	if sess1.CredentialID == nil || *sess1.CredentialID != cred.ID {
+		t.Fatalf("expected CredentialID %d, got %+v", cred.ID, sess1.CredentialID)
+	}
+
+	// 2. 创建未绑定凭据的历史旧会话
+	sess2, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:  "wf-cascade-test-legacy",
+		EnvHostName: "server-default",
+		Title:       "Session Legacy",
+		Summary:     "Summary Legacy",
+	})
+	if err != nil {
+		t.Fatalf("failed to create legacy session: %v", err)
+	}
+
+	// 3. 更新凭据的 host_name 为 "wsl-machine"
+	_, err = st.UpdateCredential(ctx, cred.ID, map[string]any{
+		"host_name": "wsl-machine",
+	})
+	if err != nil {
+		t.Fatalf("failed to update credential: %v", err)
+	}
+
+	// 4. 验证 sess1 和 sess2 的 host_name 均被追溯级联更新为 "wsl-machine"
+	updated1, err := st.GetFeedbackSession(ctx, sess1.ID)
+	if err != nil {
+		t.Fatalf("failed to get session 1: %v", err)
+	}
+	if updated1.HostName != "wsl-machine" {
+		t.Fatalf("expected session 1 HostName to be 'wsl-machine', got %q", updated1.HostName)
+	}
+
+	updated2, err := st.GetFeedbackSession(ctx, sess2.ID)
+	if err != nil {
+		t.Fatalf("failed to get session 2: %v", err)
+	}
+	if updated2.HostName != "wsl-machine" {
+		t.Fatalf("expected legacy session HostName to be 'wsl-machine', got %q", updated2.HostName)
+	}
+	if updated2.CredentialID == nil || *updated2.CredentialID != cred.ID {
+		t.Fatalf("expected legacy session to be associated with credential %d, got %+v", cred.ID, updated2.CredentialID)
+	}
+}
+
+func TestStore_WorkflowIDAutoDerivationAndSelfHealing(t *testing.T) {
+	st := setupTestStore(t)
+	ctx := context.Background()
+
+	// 1. 测试未提供 WorkflowID 时自动派生规范的 wf-YYYYMMDD-xxxx
+	sess, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID: "",
+		Title:      "测试无工作流ID",
+		Summary:    "测试正文内容",
+	})
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	if !strings.HasPrefix(sess.WorkflowID, "wf-") {
+		t.Fatalf("expected auto-derived WorkflowID to start with 'wf-', got: %q", sess.WorkflowID)
+	}
+
+	// 2. 模拟老旧存量数据（强行插入一条空 workflow_id 的记录）
+	legacyID := "sess-legacy-test"
+	st.db.Exec("INSERT INTO feedback_sessions (id, workflow_id, summary, status, created_at, updated_at) VALUES (?, '', '老旧遗留数据', 'completed', datetime('now'), datetime('now'))", legacyID)
+
+	// 3. 模拟 Store 初始化触发自动自愈迁移
+	st.db.Model(&model.FeedbackSession{}).
+		Where("workflow_id IS NULL OR workflow_id = ''").
+		Updates(map[string]interface{}{
+			"workflow_id": gorm.Expr("'wf-' || replace(id, 'sess-', '')"),
+		})
+
+	healedSess, err := st.GetFeedbackSession(ctx, legacyID)
+	if err != nil {
+		t.Fatalf("failed to get legacy session: %v", err)
+	}
+	if healedSess.WorkflowID != "wf-legacy-test" {
+		t.Fatalf("expected healed workflow_id to be 'wf-legacy-test', got: %q", healedSess.WorkflowID)
+	}
+}
+

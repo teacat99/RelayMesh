@@ -80,6 +80,7 @@ function formatSessionProjectDirectory(session: FeedbackSession): string {
 }
 
 const chatScrollContainer = ref<HTMLElement | null>(null)
+const bottomAnchorRef = ref<HTMLElement | null>(null)
 const activeSessionIdInScrubber = ref<string | null>(null)
 const highlightedSessionId = ref<string | null>(null)
 let highlightTimer: any = null
@@ -257,7 +258,7 @@ function scrollToSession(sessionId: string) {
     visibleRoundsCount.value = Math.min(total, neededVisibleCount + 5)
   }
 
-  nextTick(() => {
+  const attemptScroll = () => {
     const el = document.getElementById(`session-${sessionId}`)
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -268,6 +269,13 @@ function scrollToSession(sessionId: string) {
         highlightedSessionId.value = null
       }, 2500)
     }
+  }
+
+  nextTick(() => {
+    attemptScroll()
+    requestAnimationFrame(() => {
+      attemptScroll()
+    })
   })
 }
 
@@ -278,25 +286,32 @@ function scrollToBottom(smooth = true) {
   if (props.conversationRounds.length > 0) {
     activeSessionIdInScrubber.value = props.conversationRounds[props.conversationRounds.length - 1].session_id
   }
-  if (chatScrollContainer.value) {
-    const el = chatScrollContainer.value
-    if (smooth) {
-      el.scrollTo({
-        top: el.scrollHeight,
-        behavior: 'smooth'
-      })
-      setTimeout(() => {
-        if (el) el.scrollTop = el.scrollHeight
-        updateActiveSessionFromScroll()
-      }, 250)
-    } else {
-      // 首次加载/刷新/切换会话：瞬间即时直达底部，无滑动动画
-      el.scrollTop = el.scrollHeight
-      nextTick(() => {
-        if (el) el.scrollTop = el.scrollHeight
-        updateActiveSessionFromScroll()
-      })
+
+  const doScroll = () => {
+    if (bottomAnchorRef.value) {
+      bottomAnchorRef.value.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' })
     }
+    if (chatScrollContainer.value) {
+      chatScrollContainer.value.scrollTop = chatScrollContainer.value.scrollHeight
+    }
+  }
+
+  doScroll()
+
+  if (smooth) {
+    setTimeout(() => {
+      doScroll()
+      updateActiveSessionFromScroll()
+    }, 250)
+  } else {
+    // 首次加载/刷新/切换会话：双帧 rAF 校准，抵抗异步 DOM 展开导致的高度时滞 (D-142)
+    requestAnimationFrame(() => {
+      doScroll()
+      requestAnimationFrame(() => {
+        doScroll()
+        updateActiveSessionFromScroll()
+      })
+    })
   }
 }
 
@@ -432,7 +447,7 @@ defineExpose({
           v-for="session in displayedConversationRounds"
           :key="session.session_id"
           :id="`session-${session.session_id}`"
-          class="space-y-3 sm:space-y-4 pt-2 transition-all p-2 rounded-md"
+          class="space-y-3 sm:space-y-4 pt-2 transition-all p-2 rounded-md scroll-mt-6"
           :class="highlightedSessionId === session.session_id ? 'ring-2 ring-primary bg-primary/5' : ''"
         >
           <!-- Turn Divider & Timestamp Header -->
@@ -547,17 +562,30 @@ defineExpose({
 
               <!-- Attached Screenshots (支持点击放大预览) -->
               <div v-if="session.images && session.images.length > 0" class="pt-2 flex flex-wrap gap-2">
-                <img
+                <div
                   v-for="(img, imgIdx) in session.images"
                   :key="imgIdx"
-                  :src="getImageUrl(img)"
-                  class="rounded-sm border border-border max-h-24 sm:max-h-36 object-cover shadow-2xs cursor-pointer hover:opacity-90 transition-opacity"
-                  :alt="img.name || `attachment-${imgIdx + 1}`"
+                  class="relative group rounded-sm overflow-hidden border border-border shadow-2xs cursor-pointer hover:opacity-90 transition-opacity shrink-0"
                   @click.stop="previewStore.openImagePreview({
                     src: getImageUrl(img),
                     alt: img.name || `第 ${getSessionTurnNumber(session)} 轮用户附件-${imgIdx + 1}`
                   })"
-                />
+                >
+                  <img
+                    :src="getImageUrl(img)"
+                    class="max-h-24 sm:max-h-36 object-cover pointer-events-none block"
+                    :alt="img.name || `attachment-${imgIdx + 1}`"
+                  />
+                  <!-- 底部一体化分区标题栏：左侧嵌入编号，右侧嵌入文件名 -->
+                  <div class="absolute bottom-0 inset-x-0 bg-black/80 backdrop-blur-xs text-white text-[9px] font-mono flex items-stretch h-4.5 select-none pointer-events-none overflow-hidden">
+                    <div class="px-1.5 bg-primary text-primary-foreground font-bold flex items-center justify-center shrink-0 border-r border-white/20">
+                      #{{ imgIdx + 1 }}
+                    </div>
+                    <div class="flex-1 truncate px-1.5 text-center self-center text-white/90">
+                      {{ img.name || `img-${imgIdx + 1}` }}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -610,20 +638,36 @@ defineExpose({
             </p>
 
             <div v-if="q.images && q.images.length > 0" class="pt-2 flex flex-wrap gap-2">
-              <img
+              <div
                 v-for="(img, imgIdx) in q.images"
                 :key="imgIdx"
-                :src="getImageUrl(img)"
-                class="rounded-sm border border-border max-h-24 sm:max-h-36 object-cover shadow-2xs cursor-pointer hover:opacity-90 transition-opacity"
-                :alt="img.name || `queued-attachment-${imgIdx + 1}`"
+                class="relative group rounded-sm overflow-hidden border border-border shadow-2xs cursor-pointer hover:opacity-90 transition-opacity shrink-0"
                 @click.stop="previewStore.openImagePreview({
                   src: getImageUrl(img),
                   alt: img.name || `暂存附件-${imgIdx + 1}`
                 })"
-              />
+              >
+                <img
+                  :src="getImageUrl(img)"
+                  class="max-h-24 sm:max-h-36 object-cover pointer-events-none block"
+                  :alt="img.name || `queued-attachment-${imgIdx + 1}`"
+                />
+                <!-- 底部一体化分区标题栏：左侧嵌入编号，右侧嵌入文件名 -->
+                <div class="absolute bottom-0 inset-x-0 bg-black/80 backdrop-blur-xs text-white text-[9px] font-mono flex items-stretch h-4.5 select-none pointer-events-none overflow-hidden">
+                  <div class="px-1.5 bg-primary text-primary-foreground font-bold flex items-center justify-center shrink-0 border-r border-white/20">
+                    #{{ imgIdx + 1 }}
+                  </div>
+                  <div class="flex-1 truncate px-1.5 text-center self-center text-white/90">
+                    {{ img.name || `img-${imgIdx + 1}` }}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
+
+        <!-- 底部物理定位锚点 (D-142: 确保 100% 直达会话流最新最底部，消灭虚拟高度塌陷和高度时滞导致的半途卡顿) -->
+        <div ref="bottomAnchorRef" class="h-0 w-full pointer-events-none opacity-0"></div>
       </div>
     </div>
 

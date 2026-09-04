@@ -324,6 +324,10 @@ function permSummary(perms: MCPPermissions): string {
           <div class="flex items-center gap-2 flex-wrap">
             <span class="font-mono font-bold text-xs text-foreground">{{ cred.name }}</span>
             <span
+              v-if="cred.is_env"
+              class="text-[9px] px-1.5 py-0.5 rounded-xs bg-primary/10 text-primary border border-primary/20 font-mono font-medium shrink-0"
+            >ENV</span>
+            <span
               v-if="cred.host_name"
               class="text-[9px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 font-mono font-medium"
             >{{ cred.host_name }}</span>
@@ -342,6 +346,7 @@ function permSummary(perms: MCPPermissions): string {
         <!-- Actions -->
         <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
           <button
+            v-if="!cred.is_env"
             type="button"
             class="p-1.5 rounded-sm hover:bg-muted cursor-pointer"
             title="重新生成 Token"
@@ -358,6 +363,7 @@ function permSummary(perms: MCPPermissions): string {
             <Pencil class="w-3 h-3 text-muted-foreground" />
           </button>
           <button
+            v-if="!cred.is_env"
             type="button"
             class="p-1.5 rounded-sm hover:bg-destructive/10 cursor-pointer"
             title="删除"

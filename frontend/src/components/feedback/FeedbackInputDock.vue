@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick, h } from 'vue'
+import { useResizeObserver } from '@vueuse/core'
 import { useSessionStore } from '../../stores/session'
 import { useSettingsStore } from '../../stores/settings'
 import ImageUploader from '../ImageUploader.vue'
@@ -45,11 +46,13 @@ const props = withDefaults(defineProps<{
   isSubmitting?: boolean
   placeholder?: string
   buttonText?: string
+  workflowId?: string
 }>(), {
   isScrolledUp: false,
   isSubmitting: false,
   placeholder: '',
-  buttonText: ''
+  buttonText: '',
+  workflowId: ''
 })
 
 const emit = defineEmits<{
@@ -69,10 +72,16 @@ const images = ref<SessionImage[]>([])
 const selectedPresets = ref<string[]>([])
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
+// 响应式绑定工作流 ID（以传入的 props.workflowId 或用户当前选中的 selectedSession 为真源）
+const currentBindingWorkflowId = computed(() => {
+  if (props.workflowId) return props.workflowId
+  return sessionStore.selectedSession?.workflow_id || sessionStore.selectedSession?.session_id || sessionStore.currentSession?.workflow_id || sessionStore.currentSession?.session_id || 'default'
+})
+
 // ==========================================
 // 会话级在线状态切换
 // ==========================================
-const activeSession = computed(() => sessionStore.currentSession || sessionStore.selectedSession)
+const activeSession = computed(() => sessionStore.selectedSession || sessionStore.currentSession)
 
 const currentSessionPresence = computed(() => {
   return activeSession.value?.user_presence || settingsStore.settings.userPresence || 'online'
@@ -92,7 +101,7 @@ async function handleSessionPresenceChange(presence: 'online' | 'away' | 'autopi
 
 const phaseSliderRef = ref<InstanceType<typeof PhaseSlider> | null>(null)
 const currentWorkflowId = computed(() => {
-  return activeSession.value?.workflow_id || sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id || ''
+  return activeSession.value?.workflow_id || activeSession.value?.session_id || sessionStore.currentSession?.workflow_id || sessionStore.currentSession?.session_id || sessionStore.selectedSession?.workflow_id || sessionStore.selectedSession?.session_id || ''
 })
 
 // Feedback input panel resizing state with LocalStorage persistence
@@ -106,15 +115,28 @@ let dragStartY = 0
 let dragStartHeight = 0
 let lastEmittedHeight = DEFAULT_INPUT_HEIGHT
 
+function getMaxAllowedDockHeight(): number {
+  if (typeof window === 'undefined') return MAX_INPUT_HEIGHT
+  // 在移动端或小视口屏幕（高度小于 650px），输入栏最大高度严禁超出视口的 45%
+  if (window.innerHeight < 650) {
+    return Math.max(MIN_INPUT_HEIGHT, Math.floor(window.innerHeight * 0.45))
+  }
+  return MAX_INPUT_HEIGHT
+}
+
 function loadSavedDockHeight() {
+  const maxAllowed = getMaxAllowedDockHeight()
   try {
     const saved = localStorage.getItem(DOCK_HEIGHT_STORAGE_KEY)
     if (saved) {
       const h = parseInt(saved, 10)
-      if (!isNaN(h) && h >= MIN_INPUT_HEIGHT && h <= MAX_INPUT_HEIGHT) {
-        inputDockHeight.value = h
-        lastEmittedHeight = h
+      if (!isNaN(h)) {
+        inputDockHeight.value = Math.max(MIN_INPUT_HEIGHT, Math.min(maxAllowed, h))
+        lastEmittedHeight = inputDockHeight.value
       }
+    } else {
+      inputDockHeight.value = Math.min(DEFAULT_INPUT_HEIGHT, maxAllowed)
+      lastEmittedHeight = inputDockHeight.value
     }
   } catch (_) {}
   document.documentElement.style.setProperty('--input-dock-height', `${inputDockHeight.value}px`)
@@ -127,21 +149,31 @@ function saveDockHeight(h: number) {
   } catch (_) {}
 }
 
-function startResizeDrag(e: MouseEvent) {
+function startResizeDrag(e: PointerEvent) {
   isDraggingResize.value = true
   dragStartY = e.clientY
   dragStartHeight = inputDockHeight.value
   lastEmittedHeight = dragStartHeight
-  window.addEventListener('mousemove', handleResizeMouseMove)
-  window.addEventListener('mouseup', handleResizeMouseUp)
+
+  const target = e.currentTarget as HTMLElement
+  if (target && target.setPointerCapture) {
+    try {
+      target.setPointerCapture(e.pointerId)
+    } catch (_) {}
+  }
+
+  window.addEventListener('pointermove', handleResizePointerMove)
+  window.addEventListener('pointerup', handleResizePointerUp)
+  window.addEventListener('pointercancel', handleResizePointerUp)
   document.body.style.userSelect = 'none'
   document.body.style.cursor = 'row-resize'
 }
 
-function handleResizeMouseMove(e: MouseEvent) {
+function handleResizePointerMove(e: PointerEvent) {
   if (!isDraggingResize.value) return
   const deltaFromStart = dragStartY - e.clientY
-  const newH = Math.min(MAX_INPUT_HEIGHT, Math.max(MIN_INPUT_HEIGHT, dragStartHeight + deltaFromStart))
+  const maxAllowed = getMaxAllowedDockHeight()
+  const newH = Math.min(maxAllowed, Math.max(MIN_INPUT_HEIGHT, dragStartHeight + deltaFromStart))
   const delta = newH - lastEmittedHeight
   if (delta !== 0) {
     inputDockHeight.value = newH
@@ -150,12 +182,21 @@ function handleResizeMouseMove(e: MouseEvent) {
   }
 }
 
-function handleResizeMouseUp() {
+function handleResizePointerUp(e: PointerEvent) {
   if (!isDraggingResize.value) return
   isDraggingResize.value = false
   saveDockHeight(inputDockHeight.value)
-  window.removeEventListener('mousemove', handleResizeMouseMove)
-  window.removeEventListener('mouseup', handleResizeMouseUp)
+
+  const target = e.currentTarget as HTMLElement
+  if (target && target.releasePointerCapture) {
+    try {
+      target.releasePointerCapture(e.pointerId)
+    } catch (_) {}
+  }
+
+  window.removeEventListener('pointermove', handleResizePointerMove)
+  window.removeEventListener('pointerup', handleResizePointerUp)
+  window.removeEventListener('pointercancel', handleResizePointerUp)
   document.body.style.userSelect = ''
   document.body.style.cursor = ''
 }
@@ -197,7 +238,7 @@ const multiDrafts = ref<MultiDraftState>({
 })
 
 function getDraftStorageKey(workflowId?: string): string {
-  const wId = workflowId || sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id || 'default'
+  const wId = workflowId || currentBindingWorkflowId.value
   return `relaymesh_multidrafts_wf_${wId}`
 }
 
@@ -214,7 +255,7 @@ function triggerDbSave(wId: string) {
 
 function saveDrafts() {
   if (isResetting) return
-  const wId = sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id || 'default'
+  const wId = currentBindingWorkflowId.value
   const wKey = getDraftStorageKey(wId)
   const curIdx = multiDrafts.value.activeIndex
   if (multiDrafts.value.drafts[curIdx]) {
@@ -237,7 +278,7 @@ function saveDrafts() {
 
 async function loadDrafts(forceWorkflowId?: string) {
   if (isResetting) return
-  const wId = forceWorkflowId || sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id || 'default'
+  const wId = forceWorkflowId || currentBindingWorkflowId.value
   const wKey = getDraftStorageKey(wId)
   
   // 彻底清除旧版本遗留的全局污染草稿键，避免跨会话乱恢复
@@ -365,10 +406,61 @@ function createNewDraft() {
   toast.success(`已新建草稿 (第 ${multiDrafts.value.activeIndex + 1}/${multiDrafts.value.drafts.length} 个)`)
 }
 
+// 草稿可逆快照备份（Demand 5: 高风险操作通知提供撤销操作，保留 7000ms 快照）
+let deletedDraftSnapshot: {
+  draft: DraftSlot
+  index: number
+  totalBefore: number
+  workflowId: string
+} | null = null
+
+function restoreDraftSnapshot() {
+  if (!deletedDraftSnapshot) return
+  const { draft, index, totalBefore, workflowId } = deletedDraftSnapshot
+  const wId = workflowId || sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id || 'default'
+
+  if (totalBefore <= 1) {
+    multiDrafts.value.drafts[0] = { ...draft }
+    multiDrafts.value.activeIndex = 0
+  } else {
+    // 恢复插入到原本的位置
+    const targetIdx = Math.min(multiDrafts.value.drafts.length, Math.max(0, index))
+    multiDrafts.value.drafts.splice(targetIdx, 0, { ...draft })
+    multiDrafts.value.activeIndex = targetIdx
+  }
+
+  responseText.value = draft.text || ''
+  selectedPresets.value = draft.presets || []
+  images.value = draft.images || []
+  saveDrafts()
+
+  draftsApi.save(wId, multiDrafts.value.activeIndex, JSON.stringify(multiDrafts.value)).catch(() => {})
+  deletedDraftSnapshot = null
+  toast.success('已成功撤销并恢复草稿')
+}
+
 function deleteCurrentDraft() {
   const wId = sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id || 'default'
+  const curIdx = multiDrafts.value.activeIndex
+  const currentDraft = multiDrafts.value.drafts[curIdx]
+
+  // 保存当前草稿快照
+  if (currentDraft) {
+    deletedDraftSnapshot = {
+      draft: {
+        id: currentDraft.id,
+        text: responseText.value || currentDraft.text || '',
+        presets: [...(selectedPresets.value || currentDraft.presets || [])],
+        images: [...(images.value || currentDraft.images || [])],
+        updated_at: Date.now()
+      },
+      index: curIdx,
+      totalBefore: multiDrafts.value.drafts.length,
+      workflowId: wId
+    }
+  }
+
   if (multiDrafts.value.drafts.length > 1) {
-    const curIdx = multiDrafts.value.activeIndex
     multiDrafts.value.drafts.splice(curIdx, 1)
     const nextIdx = Math.max(0, curIdx - 1)
     multiDrafts.value.activeIndex = nextIdx
@@ -377,7 +469,13 @@ function deleteCurrentDraft() {
     selectedPresets.value = target.presets || []
     images.value = target.images || []
     saveDrafts()
-    toast.success('已删除该草稿')
+    toast.info('已删除该草稿', {
+      duration: 7000,
+      action: {
+        label: '↺',
+        onClick: () => restoreDraftSnapshot()
+      }
+    })
   } else {
     responseText.value = ''
     selectedPresets.value = []
@@ -390,7 +488,13 @@ function deleteCurrentDraft() {
       updated_at: Date.now()
     }
     saveDrafts()
-    toast.success('已清空当前草稿')
+    toast.info('已清空当前草稿', {
+      duration: 7000,
+      action: {
+        label: '↺',
+        onClick: () => restoreDraftSnapshot()
+      }
+    })
   }
   draftsApi.save(wId, multiDrafts.value.activeIndex, JSON.stringify(multiDrafts.value)).catch(() => {})
 }
@@ -482,8 +586,8 @@ watch([responseText, selectedPresets, images], () => {
   saveDrafts()
 }, { deep: true })
 
-// 仅当用户切换到不同的 workflow_id 时才做草稿切换；在同一工作流下产生新轮次 session_id 时绝不清空输入
-watch(() => (sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id), (newWId, oldWId) => {
+// 仅当用户切换到不同的 workflow_id 时才做草稿切换；以 currentBindingWorkflowId 为唯一真源
+watch(currentBindingWorkflowId, (newWId, oldWId) => {
   if (newWId !== oldWId) {
     if (oldWId) {
       saveDrafts()
@@ -496,7 +600,7 @@ watch(() => (sessionStore.currentSession?.workflow_id || sessionStore.selectedSe
 // 快捷预设 Pills (支持右键编辑、自动追加规则勾选)
 // ==========================================
 const activeQuickPresets = computed<QuickPresetItem[]>(() => {
-  const targetSession = sessionStore.currentSession || sessionStore.selectedSession
+  const targetSession = sessionStore.selectedSession || sessionStore.currentSession
   const presence = targetSession?.user_presence || settingsStore.settings.userPresence || 'online'
   return settingsStore.getNormalizedStatusPresets(presence)
 })
@@ -558,6 +662,48 @@ function togglePreset(preset: QuickPresetItem) {
   } else if (!responseText.value.includes(textToInsert)) {
     responseText.value = `${responseText.value}\n${textToInsert}`
   }
+}
+
+const draggedImageIndex = ref<number | null>(null)
+const dragOverImageIndex = ref<number | null>(null)
+
+function onImageDragStart(idx: number, e: DragEvent) {
+  draggedImageIndex.value = idx
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', String(idx))
+  }
+}
+
+function onImageDragOver(idx: number, e: DragEvent) {
+  e.preventDefault()
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'move'
+  }
+  dragOverImageIndex.value = idx
+}
+
+function onImageDragLeave(idx: number) {
+  if (dragOverImageIndex.value === idx) {
+    dragOverImageIndex.value = null
+  }
+}
+
+function onImageDrop(idx: number, e: DragEvent) {
+  e.preventDefault()
+  const from = draggedImageIndex.value
+  draggedImageIndex.value = null
+  dragOverImageIndex.value = null
+  if (from === null || from === idx) return
+
+  const item = images.value.splice(from, 1)[0]
+  images.value.splice(idx, 0, item)
+  saveDrafts()
+}
+
+function onImageDragEnd() {
+  draggedImageIndex.value = null
+  dragOverImageIndex.value = null
 }
 
 function triggerImageUpload() {
@@ -646,7 +792,7 @@ function handleKeydown(e: KeyboardEvent) {
 
 // 动态提交按钮文本与状态
 const submitButtonInfo = computed(() => {
-  const sess = sessionStore.currentSession || sessionStore.selectedSession
+  const sess = sessionStore.selectedSession || sessionStore.currentSession
   if (sess?.status === 'pending') {
     return {
       label: '提交反馈',
@@ -877,22 +1023,57 @@ async function stopVoiceRecognition() {
   }
 }
 
+function handleWindowResize() {
+  const maxAllowed = getMaxAllowedDockHeight()
+  if (inputDockHeight.value > maxAllowed) {
+    inputDockHeight.value = maxAllowed
+    lastEmittedHeight = maxAllowed
+    saveDockHeight(maxAllowed)
+  }
+}
+
 onMounted(() => {
   loadSavedDockHeight()
   loadDrafts()
   window.addEventListener('paste', handlePaste)
+  window.addEventListener('resize', handleWindowResize)
 })
 
 onUnmounted(() => {
   stopVoiceRecognition()
   window.removeEventListener('paste', handlePaste)
+  window.removeEventListener('resize', handleWindowResize)
 })
 
-  watch(() => images.value.length, (count) => {
-    // 若有悬浮图片，悬浮区域高度增加 70px
-    const floatingOffset = count > 0 ? 116 : 46
-    document.documentElement.style.setProperty('--input-dock-floating-offset', `${floatingOffset}px`)
-  }, { immediate: true })
+  // 悬浮区真实尺寸感知与几何自适应拓扑（Demand 3 & Demand 2）
+  const floatingActionBarRef = ref<HTMLElement | null>(null)
+  const quickActionsRowRef = ref<HTMLElement | null>(null)
+  const hasInlineScrollSpace = ref(true)
+
+  useResizeObserver(floatingActionBarRef, (entries) => {
+    const entry = entries[0]
+    if (entry) {
+      const h = entry.contentRect.height
+      // 真实 DOM 高度 + 8px 安全间距
+      document.documentElement.style.setProperty('--input-dock-floating-offset', `${Math.ceil(h + 8)}px`)
+    }
+  })
+
+  useResizeObserver(quickActionsRowRef, (entries) => {
+    const entry = entries[0]
+    if (entry) {
+      const containerWidth = entry.contentRect.width
+      const leftPillsEl = quickActionsRowRef.value?.querySelector('.quick-presets-container') as HTMLElement | null
+      if (leftPillsEl) {
+        const leftWidth = leftPillsEl.offsetWidth
+        const isMultiLine = leftPillsEl.offsetHeight > 34
+        // 当单行且右侧剩余空间 >= 90px 时判定为有空间
+        hasInlineScrollSpace.value = !isMultiLine && (containerWidth - leftWidth >= 90)
+      } else {
+        hasInlineScrollSpace.value = containerWidth >= 480
+      }
+    }
+  })
 
   function clearDraft() {
     resetForm()
@@ -909,17 +1090,20 @@ onUnmounted(() => {
 <template>
   <!-- Full-Width Bottom-Flush Feedback Submission Dock (支持顶部横线拖拽与双击重置高度) -->
   <div
-    class="relative w-full bg-background/95 backdrop-blur-xs px-3 sm:px-6 pt-3 pb-3 shrink-0 z-30 flex flex-col justify-between"
+    class="relative w-full bg-background/95 backdrop-blur-xs px-3 sm:px-6 pt-3 shrink-0 z-30 flex flex-col justify-between"
     :class="isDraggingResize
       ? 'select-none transition-none border-t-2 border-primary/80 shadow-[0_-4px_20px_rgba(0,0,0,0.15)] dark:shadow-[0_-4px_25px_rgba(0,0,0,0.4)]'
       : 'border-t border-border/70 transition-[height] duration-150'"
-    :style="{ height: `${inputDockHeight}px` }"
+    :style="{
+      height: `${inputDockHeight}px`,
+      paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))'
+    }"
   >
-    <!-- Top Border Drag Handle Bar (按下拖拽时呈现高质感活动线与浮动 HUD 指示徽章，双击重置) -->
+    <!-- Top Border Drag Handle Bar (全面适配 Pointer Events 触控/鼠标统一，24px 触控热区 + 4px 居中指示条，双击重置) -->
     <div
-      class="absolute top-0 left-0 right-0 h-3 -translate-y-1/2 cursor-row-resize flex items-center justify-center z-50 transition-colors group/drag"
+      class="absolute top-0 left-0 right-0 h-6 -translate-y-1/2 cursor-row-resize flex items-center justify-center z-50 transition-colors group/drag touch-none select-none"
       title="按住拖拽调节输入框高度，双击重置默认高度"
-      @mousedown="startResizeDrag"
+      @pointerdown="startResizeDrag"
       @dblclick="resetInputHeight"
     >
       <div
@@ -954,17 +1138,29 @@ onUnmounted(() => {
       </Transition>
     </div>
 
-    <!-- Floating Actions & Presets Row with Smart Upward Responsive Wrapping -->
+    <!-- Floating Actions & Presets Row with Smart Upward Responsive Wrapping (挂载尺寸感知 ref) -->
     <div
+      ref="floatingActionBarRef"
       class="absolute bottom-full left-3 sm:left-6 right-3 sm:right-6 mb-2 flex flex-col gap-1.5 z-40 transition-opacity duration-150"
       :class="isDraggingResize ? 'opacity-25 pointer-events-none' : 'opacity-100 pointer-events-auto'"
     >
-      <!-- Row 1: Floating Image Previews (当有图片时悬浮在操作按钮上方，依次横向排开) -->
+      <!-- Row 1: Floating Image Previews (当有图片时悬浮在操作按钮上方，依次横向排开，支持拖拽调序) -->
       <div v-if="images.length > 0" class="flex flex-wrap items-center gap-2 max-w-full">
         <div
           v-for="(img, idx) in images"
-          :key="idx"
-          class="relative group rounded-md overflow-hidden border border-border/80 bg-card/95 backdrop-blur-xs w-14 h-14 sm:w-16 sm:h-16 flex items-center justify-center shadow-md shrink-0 transition-transform hover:scale-105 cursor-pointer"
+          :key="img.name + '-' + idx"
+          draggable="true"
+          class="relative group rounded-md overflow-hidden border border-border/80 bg-card/95 backdrop-blur-xs w-14 h-14 sm:w-16 sm:h-16 flex items-center justify-center shadow-md shrink-0 transition-all cursor-move select-none"
+          :class="{
+            'ring-2 ring-primary scale-105 shadow-lg border-primary': dragOverImageIndex === idx,
+            'opacity-40': draggedImageIndex === idx
+          }"
+          :title="`【图 ${idx + 1}】长按可左右拖拽调序`"
+          @dragstart="onImageDragStart(idx, $event)"
+          @dragover="onImageDragOver(idx, $event)"
+          @dragleave="onImageDragLeave(idx)"
+          @drop="onImageDrop(idx, $event)"
+          @dragend="onImageDragEnd"
           @click.stop="previewStore.openImagePreview({
             src: getImageUrl(img),
             alt: img.name || `草稿附件-${idx + 1}`
@@ -983,16 +1179,22 @@ onUnmounted(() => {
           >
             <X class="w-3 h-3" />
           </button>
-          <div class="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-2xs text-white text-[9px] font-mono px-1 truncate text-center select-none pointer-events-none">
-            {{ img.name || `img-${idx + 1}` }}
+          <!-- 底部一体化分区标题栏：左侧嵌入编号，右侧嵌入文件名 -->
+          <div class="absolute bottom-0 inset-x-0 bg-black/80 backdrop-blur-xs text-white text-[9px] font-mono flex items-stretch h-4.5 select-none pointer-events-none overflow-hidden">
+            <div class="px-1.5 bg-primary text-primary-foreground font-bold flex items-center justify-center shrink-0 border-r border-white/20">
+              #{{ idx + 1 }}
+            </div>
+            <div class="flex-1 truncate px-1 text-center self-center text-white/90">
+              {{ img.name || `img-${idx + 1}` }}
+            </div>
           </div>
         </div>
       </div>
 
-      <!-- Row 2: Floating Actions, Presence & Presets -->
-      <div class="flex flex-wrap items-center justify-between gap-1.5 w-full">
+      <!-- Row 2: Floating Actions, Presence & Presets (带空间感知与回到底部自适应排布) -->
+      <div ref="quickActionsRowRef" class="relative flex items-center justify-between gap-1.5 w-full">
         <!-- Left Side: Presence & Upload & Presets & Tag Settings -->
-        <div class="flex flex-wrap items-center gap-1.5 max-w-full min-w-0">
+        <div class="quick-presets-container flex flex-wrap items-center gap-1.5 max-w-full min-w-0">
         <!-- 0. 用户在线状态切换下拉按钮 -->
         <DropdownMenu v-if="activeSession">
           <DropdownMenuTrigger as-child>
@@ -1109,7 +1311,7 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <!-- Right Side: 回到底部最新 -->
+      <!-- Right Side: 回到底部最新（Demand 2: 空间感知自适应居右/居上跃迁） -->
       <Transition
         enter-active-class="transition duration-150 ease-out"
         enter-from-class="opacity-0 translate-y-1 scale-95"
@@ -1121,7 +1323,10 @@ onUnmounted(() => {
         <button
           v-if="props.isScrolledUp"
           type="button"
-          class="ml-auto text-[11px] sm:text-xs px-2.5 py-1 rounded-sm border border-primary/40 bg-card/95 hover:bg-muted text-foreground backdrop-blur-xs shadow-2xs flex items-center gap-1.5 font-mono cursor-pointer transition-all shrink-0 select-none hover:border-primary/80 group"
+          class="text-[11px] sm:text-xs px-2.5 py-1 rounded-sm border border-primary/40 bg-card/95 hover:bg-muted text-foreground backdrop-blur-xs shadow-2xs flex items-center gap-1.5 font-mono cursor-pointer transition-all shrink-0 select-none hover:border-primary/80 group z-50"
+          :class="hasInlineScrollSpace
+            ? 'ml-auto'
+            : 'absolute bottom-[calc(100%+6px)] right-0 shadow-md'"
           @click="emit('scroll-to-bottom')"
           title="回到底部最新消息"
         >
@@ -1148,13 +1353,13 @@ onUnmounted(() => {
       </Transition>
     </div>
 
-    <!-- Bottom Action Row -->
-    <div class="flex items-center justify-between pt-1.5 border-t border-border/40 text-xs text-muted-foreground shrink-0">
-      <div class="flex items-center gap-2">
-        <!-- 多草稿箱轮播切换控件 -->
-        <div class="h-7 flex items-center gap-1.5 bg-card/90 border border-border/80 px-2 rounded-sm shadow-2xs font-mono text-xs select-none">
+    <!-- Bottom Action Row (Demand 8: 窄屏自适应与优雅降级响应式重构) -->
+    <div class="flex flex-wrap items-center justify-between gap-y-1.5 gap-x-2 pt-1.5 border-t border-border/40 text-xs text-muted-foreground shrink-0">
+      <div class="flex items-center gap-1.5 sm:gap-2 min-w-0">
+        <!-- 多草稿箱轮播切换控件 (在极窄宽度隐藏「草稿」二字，由 140px 优雅压缩至 90px) -->
+        <div class="h-7 flex items-center gap-1 sm:gap-1.5 bg-card/90 border border-border/80 px-1.5 sm:px-2 rounded-sm shadow-2xs font-mono text-xs select-none shrink-0">
           <FileText class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-          <span class="text-muted-foreground font-medium">草稿</span>
+          <span class="text-muted-foreground font-medium hidden sm:inline">草稿</span>
           <span class="font-bold text-foreground">{{ multiDrafts.activeIndex + 1 }}</span>
           <span class="text-muted-foreground">/</span>
           <span class="text-muted-foreground">{{ multiDrafts.drafts.length }}</span>
@@ -1198,20 +1403,20 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <span class="hidden md:inline text-muted-foreground/80">按 <kbd class="px-1.5 py-0.5 rounded-xs bg-muted border border-border font-mono text-[10px]">Ctrl + Enter</kbd> 发送</span>
+        <span class="hidden lg:inline text-muted-foreground/80 text-[11px]">按 <kbd class="px-1.5 py-0.5 rounded-xs bg-muted border border-border font-mono text-[10px]">Ctrl + Enter</kbd> 发送</span>
 
         <!-- 语音识别实时转录中指示 -->
-        <span v-if="isRecordingVoice || isTranscribingVoice" class="flex items-center gap-1.5 font-mono font-medium text-xs" :class="isRecordingVoice ? 'text-destructive animate-pulse' : 'text-primary animate-pulse'">
-          <span class="w-1.5 h-1.5 rounded-full" :class="isRecordingVoice ? 'bg-destructive' : 'bg-primary'"></span>
-          <span>{{ voiceInterimText || (isRecordingVoice ? '正在录音...' : 'MIMO 流式转写中...') }}</span>
+        <span v-if="isRecordingVoice || isTranscribingVoice" class="flex items-center gap-1.5 font-mono font-medium text-xs truncate max-w-[140px] sm:max-w-[200px]" :class="isRecordingVoice ? 'text-destructive animate-pulse' : 'text-primary animate-pulse'">
+          <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="isRecordingVoice ? 'bg-destructive' : 'bg-primary'"></span>
+          <span class="truncate">{{ voiceInterimText || (isRecordingVoice ? '正在录音...' : 'MIMO 流式转写中...') }}</span>
         </span>
       </div>
 
-      <div class="flex items-center gap-2">
-        <!-- 上传截图 -->
+      <div class="flex items-center gap-1.5 sm:gap-2 ml-auto shrink-0">
+        <!-- 上传截图（窄屏自适应降级为仅图标模式） -->
         <button
           type="button"
-          class="h-7 px-2.5 rounded-sm border transition-all text-xs font-mono flex items-center gap-1.5 cursor-pointer select-none"
+          class="h-7 px-2 sm:px-2.5 rounded-sm border transition-all text-xs font-mono flex items-center justify-center gap-1.5 cursor-pointer select-none"
           :class="images.length > 0
             ? 'border-primary text-primary bg-primary/10 font-medium shadow-2xs'
             : 'border-border/70 bg-card/80 hover:bg-muted text-muted-foreground hover:text-foreground'"
@@ -1219,7 +1424,8 @@ onUnmounted(() => {
           title="上传屏幕截图附件（亦支持直接 Ctrl + V 粘贴）"
         >
           <ImagePlus class="w-3.5 h-3.5" />
-          <span>{{ images.length > 0 ? `${images.length} 张截图` : '上传截图' }}</span>
+          <span class="hidden sm:inline">{{ images.length > 0 ? `${images.length} 张截图` : '上传截图' }}</span>
+          <span v-if="images.length > 0" class="sm:hidden text-[10px] font-bold">{{ images.length }}</span>
         </button>
         <input
           ref="fileInputRef"
@@ -1230,10 +1436,10 @@ onUnmounted(() => {
           @change="handleFileSelect"
         />
 
-        <!-- 语音识别快捷按钮 -->
+        <!-- 语音识别快捷按钮（窄屏自适应降级为仅图标模式） -->
         <button
           type="button"
-          class="h-7 px-2.5 rounded-sm border transition-all text-xs font-mono flex items-center gap-1.5 cursor-pointer select-none"
+          class="h-7 px-2 sm:px-2.5 rounded-sm border transition-all text-xs font-mono flex items-center justify-center gap-1.5 cursor-pointer select-none"
           :class="isRecordingVoice
             ? 'border-destructive text-destructive bg-destructive/10 animate-pulse font-medium shadow-2xs'
             : isTranscribingVoice
@@ -1245,13 +1451,14 @@ onUnmounted(() => {
           <Mic v-if="!isRecordingVoice && !isTranscribingVoice" class="w-3.5 h-3.5 text-muted-foreground" />
           <RotateCcw v-else-if="isTranscribingVoice" class="w-3.5 h-3.5 text-primary animate-spin" />
           <MicOff v-else class="w-3.5 h-3.5 text-destructive animate-bounce" />
-          <span>{{ isRecordingVoice ? '停止录音' : isTranscribingVoice ? 'MIMO转写中' : '语音输入' }}</span>
+          <span class="hidden sm:inline">{{ isRecordingVoice ? '停止录音' : isTranscribingVoice ? 'MIMO转写中' : '语音输入' }}</span>
         </button>
 
+        <!-- 发送主按钮（最高优先级，在窄屏始终完整呈现） -->
         <Button
           variant="default"
           :disabled="sessionStore.submitting"
-          class="h-7 px-3 sm:px-3.5 text-xs rounded-sm gap-1 bg-primary text-primary-foreground hover:opacity-90 font-medium cursor-pointer"
+          class="h-7 px-3 sm:px-3.5 text-xs rounded-sm gap-1 bg-primary text-primary-foreground hover:opacity-90 font-medium cursor-pointer shrink-0"
           :title="submitButtonInfo.description"
           @click="handleSubmit"
         >

@@ -9,6 +9,7 @@ export interface AuthStatusResponse {
   host_name?: string
   current_username?: string
   is_customized?: boolean
+  version?: string
 }
 
 export interface LoginResponse {
@@ -27,6 +28,7 @@ export const useAuthStore = defineStore('auth', () => {
   const hostName = ref<string>('')
   const currentUsername = ref<string>('admin')
   const isCustomized = ref<boolean>(false)
+  const version = ref<string>('')
   const isAuthenticated = ref<boolean>(false)
   const showLoginModal = ref<boolean>(false)
   const loginLoading = ref<boolean>(false)
@@ -60,6 +62,7 @@ export const useAuthStore = defineStore('auth', () => {
       hostName.value = res.data.host_name || ''
       currentUsername.value = res.data.current_username || 'admin'
       isCustomized.value = !!res.data.is_customized
+      version.value = res.data.version || ''
 
       if (!authRequired.value) {
         // 免密模式
@@ -193,6 +196,7 @@ export const useAuthStore = defineStore('auth', () => {
     hostName,
     currentUsername,
     isCustomized,
+    version,
     isAuthenticated,
     showLoginModal,
     loginLoading,

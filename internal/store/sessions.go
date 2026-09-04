@@ -14,6 +14,7 @@ import (
 type CreateSessionInput struct {
 	SessionID          string `json:"session_id,omitempty"`
 	WorkflowID         string `json:"workflow_id,omitempty"`
+	CredentialID       uint   `json:"credential_id,omitempty"`
 	EnvHostName        string `json:"env_host_name,omitempty"`
 	CredentialHostName string `json:"credential_host_name,omitempty"`
 	ProjectDirectory   string `json:"project_directory"`
@@ -47,6 +48,16 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 
 	now := time.Now()
 	deadline := now.Add(time.Duration(timeoutSec) * time.Second)
+
+	// 严守设计规范：任何 Session 必须且只能隶属于唯一的 Workflow。
+	// 若调用方未显式提供 workflow_id，系统自动根据当前日期与短 ID 派生标准工作流标识（例：wf-20260904-e61b8709），
+	// 并在回执与后续交互中回传，保证工作流聚合、阶段流转、状态继承等机制 100% 闭环。
+	workflowID := strings.TrimSpace(input.WorkflowID)
+	if workflowID == "" {
+		cleanSessID := strings.TrimPrefix(sessionID, "sess-")
+		workflowID = fmt.Sprintf("wf-%s-%s", now.Format("20060102"), cleanSessID)
+	}
+	input.WorkflowID = workflowID
 
 	var session model.FeedbackSession
 
@@ -97,13 +108,13 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 			}
 		}
 		// host_name 优先级链（服务端自主决定，防止 AI 伪装）:
-		// P1: Web UI 设置 > P2: 凭据绑定 > P3: 环境变量 > P4: Workflow 继承 > P5: 默认 "hosts"
+		// P1: 客户端专属/凭据绑定 > P2: Web UI 全局设置 > P3: 环境变量 > P4: Workflow 继承 > P5: 默认 "hosts"
 		hostName := ""
-		if globalSettings != nil && globalSettings.HostName != "" {
-			hostName = globalSettings.HostName
-		}
-		if hostName == "" && input.CredentialHostName != "" {
+		if input.CredentialHostName != "" {
 			hostName = input.CredentialHostName
+		}
+		if hostName == "" && globalSettings != nil && globalSettings.HostName != "" {
+			hostName = globalSettings.HostName
 		}
 		if hostName == "" && input.EnvHostName != "" {
 			hostName = input.EnvHostName
@@ -123,12 +134,20 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 			}
 		}
 
+		var credIDPtr *uint
+		if input.CredentialID > 0 {
+			credIDPtr = &input.CredentialID
+		}
+
 		// 若指定了 WorkflowID，检查是否存在历史轮次以继承用户此前调整的配置
 		if input.WorkflowID != "" {
 			var lastSess model.FeedbackSession
 			if err := tx.Where("workflow_id = ?", input.WorkflowID).Order("created_at DESC").First(&lastSess).Error; err == nil {
 				if input.UserPresence == "" && lastSess.UserPresence != "" {
 					presence = lastSess.UserPresence
+				}
+				if credIDPtr == nil && lastSess.CredentialID != nil {
+					credIDPtr = lastSess.CredentialID
 				}
 				// P4: Workflow 继承（仅当 P1-P3 均为空时）
 				if hostName == "" && lastSess.HostName != "" {
@@ -179,6 +198,7 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 		session = model.FeedbackSession{
 			ID:                   sessionID,
 			WorkflowID:           input.WorkflowID,
+			CredentialID:         credIDPtr,
 			HostName:             hostName,
 			ProjectDirectory:     input.ProjectDirectory,
 			Title:                effectiveTitle,
@@ -552,6 +572,71 @@ func (s *Store) ListFeedbackSessions(ctx context.Context, projectDir, status str
 			if cTitle, ok := titleMap[wId]; ok && cTitle != "" {
 				sessions[i].Title = cTitle
 			}
+		}
+	}
+
+	return sessions, nil
+}
+
+// ListFeedbackSessionsBrief 获取轻量会话列表（通过字段投影排除大体积正文 summary、response_text、user_messages 和 images，专供小带宽场景下的列表加载）
+func (s *Store) ListFeedbackSessionsBrief(ctx context.Context, projectDir, status string, limit int) ([]model.FeedbackSession, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+
+	var sessions []model.FeedbackSession
+	query := s.db.WithContext(ctx).Model(&model.FeedbackSession{}).
+		Select("id", "workflow_id", "host_name", "project_directory", "title", "status", "user_presence", "consumed_by_ai", "timeout_seconds", "no_feedback_checks", "max_no_feedback_checks", "prompt_wait_minutes", "wait_countdown_minutes", "deadline_at", "created_at", "updated_at")
+
+	if projectDir != "" && projectDir != "." {
+		query = query.Where("project_directory = ?", projectDir)
+	}
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	if err := query.Order("created_at DESC").Limit(limit).Find(&sessions).Error; err != nil {
+		return nil, err
+	}
+
+	// 注入工作流自定义锁定的固定标题，确保展示名称始终一致
+	var customTitleSettings []model.SystemSetting
+	if err := s.db.WithContext(ctx).Where("key LIKE 'wf_custom_title:%'").Find(&customTitleSettings).Error; err == nil && len(customTitleSettings) > 0 {
+		titleMap := make(map[string]string)
+		for _, set := range customTitleSettings {
+			wId := strings.TrimPrefix(set.Key, "wf_custom_title:")
+			titleMap[wId] = set.Value
+		}
+		for i := range sessions {
+			wId := sessions[i].WorkflowID
+			if wId == "" {
+				wId = sessions[i].ID
+			}
+			if cTitle, ok := titleMap[wId]; ok && cTitle != "" {
+				sessions[i].Title = cTitle
+			}
+		}
+	}
+
+	return sessions, nil
+}
+
+// ListWorkflowFeedbackSessions 获取指定工作流的所有完整会话（按 created_at ASC 升序，包含完整图文正文，按需呈现对话流）
+func (s *Store) ListWorkflowFeedbackSessions(ctx context.Context, workflowID string) ([]model.FeedbackSession, error) {
+	var sessions []model.FeedbackSession
+	err := s.db.WithContext(ctx).Model(&model.FeedbackSession{}).
+		Where("workflow_id = ? OR id = ?", workflowID, workflowID).
+		Order("created_at ASC").
+		Find(&sessions).Error
+	if err != nil {
+		return nil, err
+	}
+
+	// 注入工作流自定义标题
+	var customTitle model.SystemSetting
+	if err := s.db.WithContext(ctx).Where("key = ?", "wf_custom_title:"+workflowID).First(&customTitle).Error; err == nil && customTitle.Value != "" {
+		for i := range sessions {
+			sessions[i].Title = customTitle.Value
 		}
 	}
 

@@ -37,7 +37,7 @@ RelayMesh 基于 **Go 1.25** 与 **Vue 3.5** 纯原生重构，支持 **原生 s
 
 ### 🤖 1. 标准 Streamable HTTP MCP 协议中枢
 - **双角色无缝支持**：
-  - **人机交互角色 (Human Feedback)**：`interactive_feedback`、`continue_feedback_session`、`get_session_history`、`list_sessions`；
+  - **人机交互角色 (Human Feedback)**：`interactive_feedback`、`continue_feedback_session`、`get_session_image`（新增：协议级原生图片看图与提取工具）、`get_session_history`、`list_sessions`；
   - **任务编排与执行角色 (Task Orchestrator)**：`configure_task`、`report_progress`（支持增量同步 `sync`、结构化报告 `report` 与非阻塞检查 `check_feedback`）。
 - **根治客户端超时机制**：服务端精细化 Long-Polling（40s 挂起上限）配合单调递增因果游标，彻底告别 `-32001 Request timed out`。
 - **秒回直取与提前暂存**：用户可在 AI 运行期间随时提前追加意见或暂存留言，AI 再次接入时 **0ms 毫秒级直取**。
@@ -271,7 +271,7 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/relaymesh ./cmd/relaymesh
 }
 ```
 
-*方式 B：单二进制直启（开箱即用，零运行环境依赖）：*
+*方式 B：单二进制直启（开箱即用，零运行环境依赖，支持自定义主机名辨识）：*
 ```json
 {
   "mcpServers": {
@@ -280,7 +280,10 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/relaymesh ./cmd/relaymesh
       "args": [
         "mcp",
         "stdio"
-      ]
+      ],
+      "env": {
+        "RELAYMESH_HOST_NAME": "wsl"
+      }
     }
   }
 }
@@ -297,16 +300,19 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/relaymesh ./cmd/relaymesh
 }
 ```
 
-**公网 URL 鉴权模式（推荐，配置最极简）：**
+**公网 URL 鉴权与主机名自报模式（推荐，多主机协同防混淆）：**
 ```json
 {
   "mcpServers": {
     "relaymesh": {
-      "url": "https://relaymesh.yourdomain.com/mcp?token=rmk_prod_secret_token_8888"
+      "url": "https://relaymesh.yourdomain.com/mcp?token=rmk_prod_secret_token_8888&hostname=wsl"
     }
   }
 }
 ```
+> 💡 **多主机辨识（Multi-host Recognition）**：
+> - **HTTP 模式**：在 URL 后追加 `&hostname=wsl`（或 `?host_name=macbook`），客户端自报主机名享有最高优先级，Web 控制台将直观显示为 `wsl:/path/to/project`；
+> - **stdio 模式**：在 `env` 属性中配置 `"RELAYMESH_HOST_NAME": "wsl"` 即可原生生效。
 
 **公网 Header 鉴权模式（企业标准）：**
 ```json

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -60,14 +61,26 @@ func (b *SSEBroker) HandleSSE(c *gin.Context) {
 		b.clientsMu.Unlock()
 	}()
 
-	// Send initial connected event
+	// Send initial client reconnection instruction and connected event
+	c.Writer.Write([]byte("retry: 3000\n\n"))
 	c.SSEvent("connected", map[string]string{"status": "ok"})
 	c.Writer.Flush()
+
+	// 15 seconds periodic heartbeat ticker to keep alive through reverse proxies
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 
 	c.Stream(func(w io.Writer) bool {
 		select {
 		case <-c.Request.Context().Done():
 			return false
+		case <-heartbeat.C:
+			// 双通道心跳保障：
+			// 1. 标准 SSE 注释行（: ping\n\n），维持反向代理与网关 TCP 长连接活跃
+			w.Write([]byte(": ping\n\n"))
+			// 2. 具名标准事件（event: ping\ndata: keepalive\n\n），被浏览器 EventSource 监听切实刷新前端看门狗
+			c.SSEvent("ping", "keepalive")
+			return true
 		case msg, ok := <-ch:
 			if !ok {
 				return false

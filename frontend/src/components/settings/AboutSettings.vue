@@ -13,9 +13,15 @@ import {
   Workflow,
   CheckCircle2
 } from 'lucide-vue-next'
+import { computed } from 'vue'
+import { useAuthStore } from '@/stores/auth'
 import Badge from '../ui/badge/Badge.vue'
 import Button from '../ui/button/Button.vue'
 import RelayMeshLogo from '../icons/RelayMeshLogo.vue'
+
+const authStore = useAuthStore()
+const displayVersion = computed(() => authStore.version || 'v1.2.0')
+const isDev = computed(() => displayVersion.value.includes('dev'))
 </script>
 
 <template>
@@ -30,8 +36,11 @@ import RelayMeshLogo from '../icons/RelayMeshLogo.vue'
         <Badge variant="outline" class="text-[9px] px-1.5 py-0 font-normal rounded-2xs bg-muted/60">
           Apache 2.0
         </Badge>
+        <Badge v-if="isDev" variant="outline" class="text-[9px] px-1.5 py-0 font-medium rounded-2xs font-mono bg-amber-500/10 text-amber-500 border-amber-500/30">
+          DEV
+        </Badge>
         <Badge variant="default" class="text-[9px] px-1.5 py-0 font-normal rounded-2xs font-mono">
-          v1.0.0
+          {{ displayVersion }}
         </Badge>
       </div>
     </div>

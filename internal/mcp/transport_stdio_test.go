@@ -93,8 +93,8 @@ func TestStdioTransport_EndToEnd(t *testing.T) {
 	}
 	resMap2 := resp2.Result.(map[string]any)
 	toolsList := resMap2["tools"].([]any)
-	if len(toolsList) != 9 {
-		t.Fatalf("expected 9 tools in tools/list, got %d", len(toolsList))
+	if len(toolsList) != 10 {
+		t.Fatalf("expected 10 tools in tools/list, got %d", len(toolsList))
 	}
 
 	// Check response 3 (tools/call get_system_info)

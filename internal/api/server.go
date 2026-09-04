@@ -48,6 +48,9 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		c.Next()
 	})
 
+	// Gzip 动态传输压缩中间件（大幅缩减弱网/小带宽下的 JSON 传输体积，跳过 SSE 实时流）
+	engine.Use(GzipMiddleware())
+
 	// MCP Streamable HTTP Endpoint (支持 /mcp, /mcp/, /mcp/token/:token, /mcp/:token)
 	engine.Any("/mcp", gin.WrapH(mcpServer))
 	engine.Any("/mcp/*path", gin.WrapH(mcpServer))
@@ -71,6 +74,7 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		v1.GET("/sessions/current", handler.GetCurrentSession)
 		v1.GET("/sessions", handler.ListSessions)
 		v1.GET("/sessions/:id", handler.GetSession)
+		v1.GET("/sessions/:id/images/:index", handler.GetSessionImage)
 		v1.POST("/sessions/:id/submit", handler.SubmitFeedback)
 		v1.POST("/sessions/:id/revoke", handler.RevokeSession)
 		v1.POST("/sessions/:id/cancel", handler.CancelSession)
@@ -84,6 +88,7 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		v1.POST("/sessions/:id/user_presence", handler.UpdateSessionUserPresence)
 
 		// Queued & Appended Feedback (支持无交互期间提前追加留言与秒回直取)
+		v1.GET("/workflows/:workflow_id/sessions", handler.GetWorkflowSessions)
 		v1.POST("/workflows/:workflow_id/append", handler.AppendWorkflowFeedback)
 		v1.GET("/workflows/:workflow_id/queued", handler.ListQueuedFeedbacks)
 		v1.POST("/feedbacks/queued/:id/revoke", handler.RevokeQueuedFeedback)
