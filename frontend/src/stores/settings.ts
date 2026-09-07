@@ -96,9 +96,47 @@ export interface PhaseTemplateItem {
   prompt?: string
 }
 
+export const DEFAULT_SERVER_INSTRUCTIONS = `【RelayMesh 智能体协同中枢内生治理指引】
+RelayMesh 是本工作区唯一的权威人机交互、多智能体协同与研发生命周期中枢。当连接到 RelayMesh 时，请严格遵循以下行为指引：
+
+1. 简体中文自然表达规范：
+   - 涉及中文的一切输出（对话、提问、方案、代码变更总结、文档、提交信息与会话记录）默认保持语义流畅、自然通顺、结构清晰，杜绝电报式省略与生硬符号串堆砌。
+
+2. 工程思维与推理纪律（C-PLAN / C-RT）：
+   - 目标是系统整体质量与长期可维护性，杜绝以「改动最少/最快」为由采取局部最优或临时打补丁方案；
+   - 触发门槛：面对「多步 / 跨模块 / 不可逆 / 新建系统 / 影响面大」的任务，编码前必须进行系统性方案推演：
+     • C-PLAN：决策确认 → 问题拆解 → 数据流与状态 → 不变量 → 边界与异常 → 影响面 → 备选方案(≥2) → 验收标准；
+     • C-RT：反向自检反驳（哪最幼稚？什么输入会崩溃？漏了哪个边界？是否属于局部最优？），命中立即修正；
+   - 改前先读代码与架构规范，改动接口与类型时全量检查所有引用方。
+
+3. RelayMesh 交互与沟通主载体契约：
+   - 方案提出、提问请示、歧义澄清、阶段汇报与任务最终总结，必须统一通过 RelayMesh 的 interactive_feedback 工具（summary 字段）进行，严禁直接在普通 chat 正文提问或等待确认；
+   - 收到 === 等待回执 === 时，严格按回执指令调用 AwaitShell 等待并随后调用 continue_feedback_session 轮询，等待期间严禁输出 chat 正文、严禁调用其他工具、严禁擅自总结；
+   - 收到 === 用户反馈 === 时，方可作为用户的权威输入继续推进。
+
+4. 阶段流转（Phase Progression）与行为约束：
+   - 严格遵循 MCP 回执中 current_phase 与 phase_prompt 注入的阶段约束：
+     • 评估 (assess) 与 方案 (plan) 阶段：⚠️ 严禁创建、修改或删除任何源代码文件，仅可只读分析验证，必须通过 feedback 获得确认并切换至开发阶段方可编码；
+     • 开发 (dev) 阶段：增量验证（lint/type-check → build），每完成独立模块通过 feedback 汇报；
+     • 验证 (verify) 阶段：完成标准 = 功能 + 类型 + 编译 + 校验 + 文档同步，每条须有可验证证据；
+     • 完成 (done) 阶段：通过 feedback 提交最终汇报，环境收尾清理。
+
+5. 全模式不可逆操作底线：
+   - 生产部署、数据库迁移、删除业务数据、执行破坏性命令、git push 远端、发布 release/tag 等不可逆或高风险操作，必须通过 interactive_feedback 获得用户显式二次确认。
+
+6. 场景模式与内置规范（agent-modes）：
+   - 系统内置 agent-modes 场景模式规范（online 在线值守 / away 安全兜底 / autopilot 外部编排）；可通过 manage_skills(action: "get", name: "agent-modes") 获取完整行为准则。
+
+7. 会话状态与文档自适应策略（Workflow Sheet）：
+   - 为避免上下文压缩丢失目标与关键决策，根据工作区环境自适应选择存储载体：
+     • 场景 A：若项目根目录存在 .cursor/sessions/ 规范，按该规范维护本地会话文档；
+     • 场景 B：遵守当前项目文档规范（如项目自有 docs/ 规范体系）；
+     • 场景 C：若项目无本地会话文档体系，统一调用 RelayMesh 内置 workflow_context(action: "session_doc_save", workflow_id: "...", content: "...") 将会话文档与关键决策持久化至中枢工作表（Workflow Sheet），并可通过 workflow_context(action: "session_doc_get") 检索恢复。`
+
 export interface AppSettings {
   hostName: string
   defaultTimeoutSeconds: number
+  serverInstructions?: string
   quickPresets: PresetEntry[]
   statusPresets: StatusPresetConfig
   statusStrategies: StatusStrategyConfig
@@ -128,6 +166,7 @@ const STORAGE_KEY = 'relaymesh.settings'
 const DEFAULT_SETTINGS: AppSettings = {
   hostName: '',
   defaultTimeoutSeconds: 120, // 2 minutes
+  serverInstructions: DEFAULT_SERVER_INSTRUCTIONS,
   phaseTemplate: [
     { id: 'assess', label: '评估', description: '需求接入与理解确认', prompt: '当前处于需求评估阶段。通过 feedback 收集用户描述，逐条记录到会话文档，保留用户原话。对每条需求复述自己的理解：真实场景、根因推测、期望行为、验收标准。等待用户确认后再进入方案阶段。不急于敲定方案选型，先听完并理解真实需求，并引导用户完善需求，汇报不同方案的利弊，对每个需求列出推荐方案、风险、改动范围与备选。方向敲定后可调整到方案阶段。⚠️ 本阶段禁止修改代码。可以读取代码验证可行性，但不得创建、修改或删除任何源代码文件。如确需修改代码，必须先通过 feedback 获得用户二次确认并切换到开发阶段。' },
     { id: 'plan', label: '方案', description: '方案设计与评审拍板', prompt: '当前处于方案设计阶段。决策确认→问题拆解→数据流→不变量→边界→影响面→备选→验收。阅读代码和文档，注意核对方案可行性，确保实施阶段的逻辑闭环；通过 feedback 与用户逐项确认，将每条决策写入会话文档「关键决策」。决策全部锁定后等待用户确认再进入开发。⚠️ 本阶段禁止修改代码。可以读取代码验证可行性，但不得创建、修改或删除任何源代码文件。如确需修改代码，必须先通过 feedback 获得用户二次确认并切换到开发阶段。' },
@@ -253,6 +292,7 @@ function loadSettings(): AppSettings {
       return {
         ...DEFAULT_SETTINGS,
         ...parsed,
+        serverInstructions: parsed.serverInstructions ?? DEFAULT_SETTINGS.serverInstructions,
         security: {
           ...DEFAULT_SETTINGS.security,
           ...(parsed.security || {})
@@ -511,6 +551,11 @@ export const useSettingsStore = defineStore('settings', () => {
     save(true)
   }
 
+  function resetServerInstructions() {
+    settings.value.serverInstructions = DEFAULT_SERVER_INSTRUCTIONS
+    save(true)
+  }
+
   function resetToDefault() {
     settings.value = { ...DEFAULT_SETTINGS }
     save(true)
@@ -523,6 +568,7 @@ export const useSettingsStore = defineStore('settings', () => {
         settings.value = {
           ...settings.value,
           ...res.settings,
+          serverInstructions: res.settings.serverInstructions ?? settings.value.serverInstructions ?? DEFAULT_SETTINGS.serverInstructions,
           flowPrompts: {
             online: {
               ...DEFAULT_SETTINGS.flowPrompts.online,
@@ -615,6 +661,7 @@ export const useSettingsStore = defineStore('settings', () => {
     resetStatusPresets,
     updateFlowPrompt,
     resetFlowPrompts,
+    resetServerInstructions,
     resetToDefault
   }
 })

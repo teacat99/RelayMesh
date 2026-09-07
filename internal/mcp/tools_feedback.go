@@ -266,8 +266,30 @@ func (s *Server) markConsumedAndBroadcast(ctx context.Context, sess *model.Feedb
 	if sess == nil {
 		return
 	}
-	_ = s.store.MarkSessionConsumedByAI(ctx, sess.ID)
+	now := time.Now()
+	_ = s.store.MarkSessionConsumedByAI(ctx, sess.ID, now)
 	sess.ConsumedByAI = true
+	sess.ConsumedAt = &now
+
+	// Phase reset guard (D-107): when workflow is in "done" phase, now that AI has actually consumed
+	// the human's feedback, automatically transition back to "assess" (or preferred phase) to begin the next cycle.
+	if sess.WorkflowID != "" {
+		currentPhase, _, _ := s.store.GetWorkflowPhaseWithDefaults(ctx, sess.WorkflowID)
+		if currentPhase == "done" {
+			preferred, _ := s.store.GetHumanPreferredPhase(ctx, sess.WorkflowID)
+			if preferred == "" {
+				preferred = "assess"
+			}
+			if currentPhase != preferred {
+				if e := s.store.SetWorkflowPhase(ctx, sess.WorkflowID, preferred, false); e == nil {
+					if s.onUpdate != nil {
+						s.onUpdate("phase_changed", map[string]any{"workflow_id": sess.WorkflowID, "phase": preferred})
+					}
+				}
+			}
+		}
+	}
+
 	if s.onUpdate != nil {
 		s.onUpdate("session_updated", sess)
 	}

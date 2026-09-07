@@ -44,7 +44,13 @@ function getStatusBadge(item: UnifiedItem) {
   }
 
   switch (item.status) {
-    case 'completed': return { label: '已完成', variant: 'default' }
+    case 'completed': {
+      const raw = item.raw as any
+      if (raw && !raw.consumed_by_ai) {
+        return { label: '待提取', variant: 'secondary' }
+      }
+      return { label: '已完成', variant: 'default' }
+    }
     case 'pending': return { label: '等待确认', variant: 'secondary' }
     case 'cancelled': return { label: '已取消', variant: 'outline' }
     case 'timeout': return { label: '已超时', variant: 'destructive' }
@@ -154,9 +160,9 @@ function formatItemProjectDirectory(item: UnifiedItem): string {
         <span
           v-if="item.type === 'feedback' && item.status === 'completed' && getItemTimerInfo(item).text"
           class="text-[9px] px-1 py-0 rounded-2xs bg-muted/70 text-muted-foreground font-mono"
-          :title="`AI 任务执行耗时`"
+          :title="getItemTimerInfo(item).prefix === '待提取' ? '等待 AI 接入收取反馈' : 'AI 任务执行耗时'"
         >
-          执行: {{ getItemTimerInfo(item).text }}
+          {{ getItemTimerInfo(item).prefix }}: {{ getItemTimerInfo(item).text }}
         </span>
         <span
           v-if="item.type === 'feedback' && item.rounds_count && item.rounds_count > 1"

@@ -17,6 +17,7 @@ export const useSessionStore = defineStore('session', () => {
   const sseConnected = ref(false)
   const isReconnecting = ref(false)
   const lastPhaseEvent = ref<{ workflow_id: string; phase: string } | null>(null)
+  const lastSheetEvent = ref<{ workflow_id: string; timestamp: number } | null>(null)
   let eventSource: EventSource | null = null
   let watchdogTimer: number | null = null
   let reconnectTimer: number | null = null
@@ -611,6 +612,13 @@ export const useSessionStore = defineStore('session', () => {
         lastPhaseEvent.value = { workflow_id: payload.workflow_id, phase: payload.phase || '' }
       }
     })
+    eventSource.addEventListener('workflow_sheet_updated', (e: MessageEvent) => {
+      kickWatchdog()
+      const payload = parseSSEEventData(e)
+      if (payload?.workflow_id) {
+        lastSheetEvent.value = { workflow_id: payload.workflow_id, timestamp: Date.now() }
+      }
+    })
   }
 
   function manualReconnect() {
@@ -674,6 +682,7 @@ export const useSessionStore = defineStore('session', () => {
     sseConnected,
     isReconnecting,
     lastPhaseEvent,
+    lastSheetEvent,
     currentWorkflowSessions,
     loadingWorkflowSessions,
     loadWorkflowSessions,

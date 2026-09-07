@@ -49,6 +49,25 @@ func (s *Server) handleWorkflowContext(ctx context.Context, raw json.RawMessage)
 		return s.handleNoteUpdate(ctx, args)
 	case "note_delete":
 		return s.handleNoteDelete(ctx, args)
+	case "session_doc_save":
+		if args.WorkflowID == "" {
+			return nil, fmt.Errorf("workflow_id is required for session_doc_save")
+		}
+		if args.Content == "" {
+			return nil, fmt.Errorf("content is required for session_doc_save")
+		}
+		args.NoteKey = "session_doc"
+		res, err := s.handleNoteSave(ctx, args)
+		if err == nil && s.onUpdate != nil {
+			s.onUpdate("workflow_sheet_updated", map[string]any{"workflow_id": args.WorkflowID})
+		}
+		return res, err
+	case "session_doc_get":
+		if args.WorkflowID == "" {
+			return nil, fmt.Errorf("workflow_id is required for session_doc_get")
+		}
+		args.NoteKey = "session_doc"
+		return s.handleNoteGet(ctx, args)
 	case "list_workflows":
 		return s.handleListWorkflows(ctx, args)
 	case "set_phase":

@@ -247,6 +247,7 @@ type FeedbackSession struct {
 	UserMessages         StringArray   `gorm:"type:text" json:"user_messages"`
 	Images               SessionImages `gorm:"type:text" json:"images"`
 	ConsumedByAI         bool          `gorm:"default:false" json:"consumed_by_ai"`
+	ConsumedAt           *time.Time    `json:"consumed_at,omitempty"`
 	TimeoutSeconds       int           `gorm:"default:600" json:"timeout_seconds"`
 	NoFeedbackChecks     int           `gorm:"default:0" json:"no_feedback_checks"`
 	MaxNoFeedbackChecks  int           `gorm:"default:24" json:"max_no_feedback_checks"`
@@ -348,6 +349,8 @@ func (p Permissions) AllowsTool(toolName string) bool {
 		return p.Configure
 	case "report_progress":
 		return p.Execute
+	case "workflow_context":
+		return p.Feedback || p.Sessions
 	default:
 		return false
 	}

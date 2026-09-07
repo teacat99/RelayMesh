@@ -231,7 +231,7 @@ var (
 		"properties": {
 			"action": {
 				"type": "string",
-				"enum": ["checkpoint_save", "checkpoint_get", "checkpoint_list", "checkpoint_verify", "note_save", "note_get", "note_list", "note_update", "note_delete", "list_workflows", "set_phase"],
+				"enum": ["checkpoint_save", "checkpoint_get", "checkpoint_list", "checkpoint_verify", "note_save", "note_get", "note_list", "note_update", "note_delete", "list_workflows", "set_phase", "session_doc_save", "session_doc_get"],
 				"description": "Action to perform on the workflow context store."
 			},
 			"workflow_id": {
@@ -418,7 +418,8 @@ When to call:
 
 Summary rules:
 - MUST be substantive Markdown (headings, lists, code fences). Empty strings and placeholder phrases are rejected.
-- Write in the user's language (Chinese for Chinese-speaking users).
+- Use natural, fluent, and well-structured Simplified Chinese (简体中文). Avoid telegraphic abbreviations or rigid symbol stacking.
+- For complex/multi-step/irreversible tasks, enforce C-PLAN (decisions, decomposition, state flow, invariants, boundaries, alternatives, acceptance) and C-RT self-verification before coding.
 - Include: what you did/plan to do, file paths touched, explicit questions for the user.
 
 Workflow_id:
@@ -536,6 +537,10 @@ Limits: name max 128 chars, summary max 500 chars, content max 20000 chars, max 
 
 ## Phase Control
 - "set_phase": Update the current workflow phase without triggering a full feedback interaction. Requires workflow_id and phase_id. The phase change is broadcast via SSE and injected into subsequent MCP response headers as current_phase + phase_prompt.
+
+## Workflow Sheet Actions (Unified Session Markdown Document)
+- "session_doc_save": Save or update the workflow's human-readable session document (Workflow Sheet). Requires workflow_id and content (Markdown). Stored persistently with note_key="session_doc" and viewable in the Web UI drawer.
+- "session_doc_get": Retrieve the workflow's session document (Workflow Sheet). Requires workflow_id.
 
 ## Key Principles
 - Checkpoints are append-only (never overwrite history); original records are preserved.

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { useSessionStore } from '../../stores/session'
 import { useSettingsStore } from '../../stores/settings'
 import Badge from '../ui/badge/Badge.vue'
+import WorkflowSheetDrawer from './WorkflowSheetDrawer.vue'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -17,7 +18,8 @@ import {
   Check,
   Menu,
   Copy,
-  PanelLeftOpen
+  PanelLeftOpen,
+  FileText
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 
@@ -37,6 +39,8 @@ const emit = defineEmits<{
 
 const sessionStore = useSessionStore()
 const settingsStore = useSettingsStore()
+
+const isSheetDrawerOpen = ref(false)
 
 async function copyText(text: string, label: string) {
   if (!text) return
@@ -203,6 +207,18 @@ function getStatusBadge(status: string) {
 
     <!-- Session Status Controls & Time Display (执行/等待/剩余时间 · 空回执次数 · 提示词等待时长) -->
     <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
+      <!-- 工作表 (Workflow Sheet) 抽屉触发按钮 -->
+      <button
+        v-if="sessionStore.selectedSession?.workflow_id || sessionStore.currentSession?.workflow_id"
+        type="button"
+        class="inline-flex items-center gap-1 px-2.5 py-1 rounded-sm border text-[10px] sm:text-xs font-mono shrink-0 shadow-xs transition-colors cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-ring bg-muted/40 hover:bg-muted/80 hover:text-primary border-border/80"
+        title="打开会话工作表 (Workflow Sheet Drawer)"
+        @click="isSheetDrawerOpen = true"
+      >
+        <FileText class="w-3 sm:w-3.5 h-3 sm:h-3.5 text-primary" />
+        <span class="hidden sm:inline font-medium">工作表</span>
+      </button>
+
       <!-- 统一计时与倒计时时长选择控件 (无论 pending 还是 completed/执行中状态，均保持同一可交互 DropdownMenu 组件) -->
       <DropdownMenu v-if="activeSession">
         <DropdownMenuTrigger as-child>
@@ -218,7 +234,9 @@ function getStatusBadge(status: string) {
             <span class="text-muted-foreground hidden sm:inline">{{ props.timerDisplayInfo.prefix }}:</span>
             <span
               class="font-medium"
-              :class="props.timerDisplayInfo.isCountdown ? 'text-destructive' : 'text-foreground'"
+              :class="props.timerDisplayInfo.isCountdown
+                ? 'text-destructive'
+                : (props.timerDisplayInfo.prefix === '待提取' ? 'text-amber-600 dark:text-amber-400' : 'text-foreground')"
             >
               {{ props.timerDisplayInfo.text }}
             </span>
@@ -303,4 +321,10 @@ function getStatusBadge(status: string) {
       </DropdownMenu>
     </div>
   </header>
+
+  <!-- Workflow Sheet Drawer (会话工作表看板) -->
+  <WorkflowSheetDrawer
+    v-model:open="isSheetDrawerOpen"
+    :workflow-id="sessionStore.selectedSession?.workflow_id || sessionStore.currentSession?.workflow_id"
+  />
 </template>

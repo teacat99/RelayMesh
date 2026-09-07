@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useSettingsStore, type FlowPromptsConfig } from '../stores/settings'
+import { useSettingsStore, DEFAULT_SERVER_INSTRUCTIONS, type FlowPromptsConfig } from '../stores/settings'
 import {
   RotateCcw,
   Clock,
@@ -11,7 +11,8 @@ import {
   Sparkles,
   HelpCircle,
   ChevronDown,
-  ChevronRight
+  ChevronRight,
+  ShieldCheck
 } from 'lucide-vue-next'
 import Button from './ui/button/Button.vue'
 
@@ -23,6 +24,15 @@ const PLACEHOLDER_HINTS: Record<string, string> = {
   'online.exhaustedPrompt': '留空使用系统默认：终端盘点清理 → 汇总进度 → 通过 interactive_feedback 汇报最终状态',
   'away.immediatePrompt': '留空使用系统默认：人工暂离模式 — 继续已授权工作、已授权不可逆按计划执行、未授权暂缓',
   'autopilot.immediatePrompt': '留空使用系统默认：外部编排模式 — 通过 report_progress 汇报、按 segments 执行、不可逆上报等待',
+}
+
+function handleServerInstructionsChange(value: string) {
+  settingsStore.settings.serverInstructions = value
+  settingsStore.triggerSaveStatus()
+}
+
+function handleResetServerInstructions() {
+  settingsStore.resetServerInstructions()
 }
 
 function handlePromptChange(section: 'online' | 'away' | 'autopilot', key: string, value: string) {
@@ -51,6 +61,7 @@ function handleResetAllPrompts() {
     away: { immediatePrompt: '' },
     autopilot: { immediatePrompt: '' }
   }
+  settingsStore.settings.serverInstructions = DEFAULT_SERVER_INSTRUCTIONS
   settingsStore.triggerSaveStatus()
 }
 
@@ -60,7 +71,7 @@ function getPlaceholder(section: string, key: string): string {
 
 const DEFAULT_FLOW_PROMPTS: Record<string, string> = {
   'online.waitPollPrompt': '下一步操作：\n1. 调用 AwaitShell({ block_until_ms: {wait_ms} }) 等待 {wait_minutes} 分钟\n2. 等待结束后立即调用 continue_feedback_session({ workflow_id: "{workflow_id}" })\n3. 根据返回的 === 标记 === 判断下一步\n\n等待期间禁止：chat 正文输出、其他工具调用、阶段整理。\n禁止将本回执或 Agent 生成的文字当作用户反馈。\n所有沟通均通过 RelayMesh MCP 工具。',
-  'online.exhaustedPrompt': '用户反馈已超时。立即挂起当前任务并停止后续执行，进入会话结束与环境收尾规程：\n1. 终端与后台任务盘点清理（强制）：\n   - 检查所有活跃终端与后台任务（通过 terminals 目录或 AwaitShell）\n   - 显式终止临时开发服务、构建进程和测试任务，确认进程退出\n   - 确保后台异步任务挂起数归零，防止延迟事件注入\n2. 临时产物与会话状态归档：\n   - 清理 .cursor/tmp/ 临时文件，仅保留必要证据\n   - 完成 git 阶段性提交，确保无文件滞留暂存区\n   - 更新会话文档状态并记录恢复点\n3. 最终汇报：\n   - 总结执行进度、已完成/未完成事项与后续恢复建议\n   - 通过普通 chat 提交最终状态报告，结束本轮执行',
+  'online.exhaustedPrompt': '用户反馈已超时。立即挂起当前任务并停止后续执行，进入会话结束与环境收尾规程：\n1. 终端与后台任务盘点清理（强制）：\n   - 检查 terminals 目录（.cursor/projects/.../terminals/*.txt），提取除 1.txt 外最近生成的数字 ID（即 shell_id/task_id）\n   - 对包含存活 pid 且无 exit_code 的进程执行 kill -9 终止\n   - 无论 status 为何，对所有数字任务 ID 必须调用 AwaitShell({ shell_id: "<ID>", block_until_ms: 0 }) 显式 ACK 消费，清空 Harness 未决队列\n   - 确保后台异步任务严格归零，防止轮次切换时注入 Finished background tasks 通知\n2. 临时产物与会话状态归档：\n   - 清理 .cursor/tmp/ 临时文件，仅保留必要证据\n   - 完成 git 阶段性提交，确保无文件滞留暂存区\n   - 更新会话文档状态并记录恢复点\n3. 最终汇报：\n   - 总结执行进度、已完成/未完成事项与后续恢复建议\n   - 通过普通 chat 提交最终状态报告，结束本轮执行',
   'away.immediatePrompt': '【系统回执·人工暂离】用户已确认当前推进目标并主动暂离，请继续执行已授权范围内的工作。\n行为约束：\n- 按会话文档「当前任务」和「关键决策」已锁定的方向继续推进\n- 遇到非阻塞性问题记入会话文档「待用户拍板」，不阻塞进度\n- 不可逆动作：已授权的按计划执行，未授权的记录待确认并暂缓\n- 每完成一个逻辑单元执行增量验证（lint/type-check→build）\n- 阶段完成或遇到阻塞时，通过 interactive_feedback 提交阶段简报\n- 用户回来后按会话文档记录对齐进度',
   'autopilot.immediatePrompt': '【系统回执·外部编排】当前处于 autopilot 外部编排模式，由外部系统通过 Task API 驱动。\n行为约束：\n- 通过 report_progress 汇报进度和检查反馈\n- 按 task segments 定义的范围执行，不越界\n- 不通过 interactive_feedback 向用户直接提问\n- 遇不可逆动作以 question 类型上报并等待\n- 遇 MCP 通信错误降级为 away 模式',
 }
@@ -101,6 +112,44 @@ function isPromptEmpty(section: 'online' | 'away' | 'autopilot', key: string): b
     </button>
 
     <div v-show="isOpen" class="space-y-4 px-4 pb-4 border-t border-border/70 pt-3">
+      <!-- 0. MCP 协议层系统治理指令 (Server Instructions) -->
+      <div class="space-y-3 pb-3 border-b border-border/60">
+        <div class="flex items-center justify-between gap-1.5 text-xs font-bold text-foreground">
+          <div class="flex items-center gap-1.5">
+            <ShieldCheck class="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+            <span>00 · MCP 协议层系统治理指令 (Server Instructions)</span>
+          </div>
+          <button
+            type="button"
+            class="text-[10px] font-mono px-2 py-0.5 rounded-2xs bg-muted/80 text-foreground border border-border/80 hover:bg-muted cursor-pointer flex items-center gap-1 transition-colors"
+            @click="handleResetServerInstructions"
+            title="恢复官方推荐默认治理指令"
+          >
+            <RotateCcw class="w-2.5 h-2.5" />
+            <span>恢复默认</span>
+          </button>
+        </div>
+
+        <div class="p-3 rounded-xs border border-border/80 bg-background space-y-2">
+          <div class="text-[11px] text-muted-foreground leading-relaxed">
+            AI 智能体连接 RelayMesh 时通过 MCP 协议握手（<code class="text-primary font-mono text-[10px] bg-muted/60 px-1 py-0.5 rounded-2xs">initialize.instructions</code>）自动注入的全局最高行为准则。涵盖自然中文表达、C-PLAN/C-RT 工程纪律、反馈交互契约、阶段行为约束与高危操作硬停底线。
+          </div>
+
+          <textarea
+            :value="settingsStore.settings.serverInstructions"
+            class="w-full text-xs font-mono p-2.5 rounded-xs bg-card border border-border/80 focus:border-primary focus:outline-none transition-colors resize-y min-h-[140px] leading-relaxed text-foreground placeholder:text-muted-foreground/50"
+            rows="8"
+            placeholder="留空则自动回退官方默认指令。保存后将在智能体下次连接握手时生效。"
+            @input="e => handleServerInstructionsChange((e.target as HTMLTextAreaElement).value)"
+          ></textarea>
+
+          <div class="flex items-center justify-between text-[10px] text-muted-foreground">
+            <span>留空自动使用官方推荐指令；修改后无需重启，MCP 客户端重新握手时热更新生效。</span>
+            <span class="font-mono">{{ (settingsStore.settings.serverInstructions || '').length }} 字符</span>
+          </div>
+        </div>
+      </div>
+
     <!-- 1. 在线交互模式提示词 (Online Mode) -->
     <div class="space-y-3">
       <div class="flex items-center gap-1.5 text-xs font-bold text-foreground">

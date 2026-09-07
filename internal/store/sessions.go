@@ -373,6 +373,7 @@ func (s *Store) RevokeSessionFeedback(ctx context.Context, sessionID string) (*R
 
 		session.Status = "pending"
 		session.ConsumedByAI = false
+		session.ConsumedAt = nil
 		session.ResponseText = ""
 		session.UserMessages = model.StringArray{}
 		session.Images = model.SessionImages{}
@@ -387,9 +388,16 @@ func (s *Store) RevokeSessionFeedback(ctx context.Context, sessionID string) (*R
 	return &res, &session, nil
 }
 
-func (s *Store) MarkSessionConsumedByAI(ctx context.Context, sessionID string) error {
+func (s *Store) MarkSessionConsumedByAI(ctx context.Context, sessionID string, consumedAt ...time.Time) error {
+	t := time.Now()
+	if len(consumedAt) > 0 && !consumedAt[0].IsZero() {
+		t = consumedAt[0]
+	}
 	return s.WithTx(ctx, func(tx *gorm.DB) error {
-		return tx.Model(&model.FeedbackSession{}).Where("id = ?", sessionID).Update("consumed_by_ai", true).Error
+		return tx.Model(&model.FeedbackSession{}).Where("id = ?", sessionID).Updates(map[string]any{
+			"consumed_by_ai": true,
+			"consumed_at":    t,
+		}).Error
 	})
 }
 

@@ -72,7 +72,10 @@ func New(dbPath string) (*Store, error) {
 			"workflow_id": gorm.Expr("'wf-' || replace(id, 'sess-', '')"),
 		}).Error
 
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	_ = s.SeedBuiltinNorms(context.Background())
+
+	return s, nil
 }
 
 func (s *Store) DB() *gorm.DB {

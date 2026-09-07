@@ -568,3 +568,291 @@ func TestMCPServer_InteractiveFeedbackContentPriority(t *testing.T) {
 	}
 }
 
+func TestMCPServer_ConsumedAtAndPhaseGuard(t *testing.T) {
+	srv := setupTestMCPServer(t)
+	ctx := context.Background()
+
+	// 1. 创建会话并在 dev 阶段
+	sess, err := srv.store.CreateFeedbackSession(ctx, store.CreateSessionInput{
+		WorkflowID:       "wf-phase-guard-test",
+		ProjectDirectory: "/test",
+		Title:            "Phase Guard Test",
+		Summary:          "Checking phase guard",
+	})
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	_ = srv.store.SetWorkflowPhase(ctx, "wf-phase-guard-test", "dev", false)
+
+	// 提交反馈
+	_, err = srv.store.SubmitFeedback(ctx, store.SubmitFeedbackInput{
+		SessionID:    sess.ID,
+		ResponseText: "User says ok",
+	})
+	if err != nil {
+		t.Fatalf("failed to submit feedback: %v", err)
+	}
+
+	// 此时 MCP 消费反馈
+	updatedSess, err := srv.store.GetFeedbackSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	srv.markConsumedAndBroadcast(ctx, updatedSess)
+
+	// 验证 ConsumedAt 与 ConsumedByAI
+	if !updatedSess.ConsumedByAI {
+		t.Fatalf("expected ConsumedByAI to be true")
+	}
+	if updatedSess.ConsumedAt == nil {
+		t.Fatalf("expected ConsumedAt to be non-nil")
+	}
+
+	// 验证处于 dev 阶段时不应该被重置为 assess
+	currentPhase, _, _ := srv.store.GetWorkflowPhaseWithDefaults(ctx, "wf-phase-guard-test")
+	if currentPhase != "dev" {
+		t.Fatalf("expected phase to remain 'dev', got %q", currentPhase)
+	}
+
+	// 2. 将阶段设为 done 并再次消费新轮次
+	_ = srv.store.SetWorkflowPhase(ctx, "wf-phase-guard-test", "done", false)
+	sess2, _ := srv.store.CreateFeedbackSession(ctx, store.CreateSessionInput{
+		WorkflowID:       "wf-phase-guard-test",
+		ProjectDirectory: "/test",
+		Title:            "Phase Guard Test 2",
+		Summary:          "Checking done to assess transition",
+	})
+	_, _ = srv.store.SubmitFeedback(ctx, store.SubmitFeedbackInput{
+		SessionID:    sess2.ID,
+		ResponseText: "Cycle 2 user input",
+	})
+	updatedSess2, _ := srv.store.GetFeedbackSession(ctx, sess2.ID)
+	srv.markConsumedAndBroadcast(ctx, updatedSess2)
+
+	// 处于 done 阶段时，消费后应该自动流转回 assess
+	currentPhase2, _, _ := srv.store.GetWorkflowPhaseWithDefaults(ctx, "wf-phase-guard-test")
+	if currentPhase2 != "assess" {
+		t.Fatalf("expected phase to reset to 'assess' from 'done', got %q", currentPhase2)
+	}
+}
+
+func TestMCPServer_WorkflowContextPermission(t *testing.T) {
+	srv := setupTestMCPServer(t)
+	ctx := context.Background()
+
+	// 创建带 feedback 权限的 credential
+	cred := &model.MCPCredential{
+		Name:     "test-agent",
+		Token:    "test-token-12345",
+		IsActive: true,
+		Permissions: model.Permissions{
+			Feedback: true,
+		},
+	}
+	if err := srv.store.CreateCredential(ctx, cred); err != nil {
+		t.Fatalf("failed to create credential: %v", err)
+	}
+
+	callReq := `{
+		"jsonrpc": "2.0",
+		"id": 101,
+		"method": "tools/call",
+		"params": {
+			"name": "workflow_context",
+			"arguments": {
+				"action": "list_workflows"
+			}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(callReq))
+	req.Header.Set("Authorization", "Bearer "+cred.Token)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+}
+
+// TestMCPServer_AgentModesBuiltinNorm verifies that agent-modes is seeded automatically
+// and accessible via manage_skills(action: "get", name: "agent-modes").
+func TestMCPServer_AgentModesBuiltinNorm(t *testing.T) {
+	srv := setupTestMCPServer(t)
+	ctx := context.Background()
+
+	cred := &model.MCPCredential{
+		Name:     "test-agent-skills",
+		Token:    "test-token-skills-12345",
+		IsActive: true,
+		Permissions: model.Permissions{
+			Skills:   true,
+			Feedback: true,
+		},
+	}
+	if err := srv.store.CreateCredential(ctx, cred); err != nil {
+		t.Fatalf("failed to create credential: %v", err)
+	}
+
+	callReq := `{
+		"jsonrpc": "2.0",
+		"id": 201,
+		"method": "tools/call",
+		"params": {
+			"name": "manage_skills",
+			"arguments": {
+				"action": "get",
+				"name": "agent-modes"
+			}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(callReq))
+	req.Header.Set("Authorization", "Bearer "+cred.Token)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	resultMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", resp.Result)
+	}
+	contentList, ok := resultMap["content"].([]any)
+	if !ok || len(contentList) == 0 {
+		t.Fatalf("expected non-empty content in result, got: %+v", resultMap)
+	}
+	firstItem := contentList[0].(map[string]any)
+	resultStr := firstItem["text"].(string)
+
+	var normData map[string]any
+	if err := json.Unmarshal([]byte(resultStr), &normData); err != nil {
+		t.Fatalf("failed to parse normData JSON: %v", err)
+	}
+	if normData["name"] != "agent-modes" {
+		t.Fatalf("expected norm name 'agent-modes', got %v", normData["name"])
+	}
+	contentStr, _ := normData["content"].(string)
+	if !strings.Contains(contentStr, "agent-modes · 会话场景模式") {
+		t.Fatalf("expected content to contain agent-modes header, got: %s", contentStr)
+	}
+}
+
+// TestMCPServer_WorkflowSheet_SessionDocSaveAndGet verifies saving and getting session_doc
+// via workflow_context tool.
+func TestMCPServer_WorkflowSheet_SessionDocSaveAndGet(t *testing.T) {
+	srv := setupTestMCPServer(t)
+	ctx := context.Background()
+
+	cred := &model.MCPCredential{
+		Name:     "test-agent-context",
+		Token:    "test-token-context-12345",
+		IsActive: true,
+		Permissions: model.Permissions{
+			Feedback: true,
+		},
+	}
+	if err := srv.store.CreateCredential(ctx, cred); err != nil {
+		t.Fatalf("failed to create credential: %v", err)
+	}
+
+	// 1. Save session_doc
+	saveReqStr := `{
+		"jsonrpc": "2.0",
+		"id": 301,
+		"method": "tools/call",
+		"params": {
+			"name": "workflow_context",
+			"arguments": {
+				"action": "session_doc_save",
+				"workflow_id": "wf-sheet-mcp-test",
+				"content": "# MCP Test Sheet\n- Goal: test session_doc_save"
+			}
+		}
+	}`
+	reqSave := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(saveReqStr))
+	reqSave.Header.Set("Authorization", "Bearer "+cred.Token)
+	wSave := httptest.NewRecorder()
+	srv.ServeHTTP(wSave, reqSave)
+
+	var respSave jsonRPCResponse
+	if err := json.Unmarshal(wSave.Body.Bytes(), &respSave); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if respSave.Error != nil {
+		t.Fatalf("unexpected error on session_doc_save: %v", respSave.Error)
+	}
+
+	// 2. Get session_doc
+	getReqStr := `{
+		"jsonrpc": "2.0",
+		"id": 302,
+		"method": "tools/call",
+		"params": {
+			"name": "workflow_context",
+			"arguments": {
+				"action": "session_doc_get",
+				"workflow_id": "wf-sheet-mcp-test"
+			}
+		}
+	}`
+	reqGet := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(getReqStr))
+	reqGet.Header.Set("Authorization", "Bearer "+cred.Token)
+	wGet := httptest.NewRecorder()
+	srv.ServeHTTP(wGet, reqGet)
+
+	var respGet jsonRPCResponse
+	if err := json.Unmarshal(wGet.Body.Bytes(), &respGet); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if respGet.Error != nil {
+		t.Fatalf("unexpected error on session_doc_get: %v", respGet.Error)
+	}
+	resultMapGet, ok := respGet.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", respGet.Result)
+	}
+	contentListGet, ok := resultMapGet["content"].([]any)
+	if !ok || len(contentListGet) == 0 {
+		t.Fatalf("expected non-empty content in get result, got: %+v", resultMapGet)
+	}
+	firstItemGet := contentListGet[0].(map[string]any)
+	resultStrGet := firstItemGet["text"].(string)
+
+	var getMap map[string]any
+	if err := json.Unmarshal([]byte(resultStrGet), &getMap); err != nil {
+		t.Fatalf("failed to parse get result JSON: %v", err)
+	}
+	noteMap, ok := getMap["note"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected note object, got %v", getMap["note"])
+	}
+	if noteMap["note_key"] != "session_doc" {
+		t.Fatalf("expected note_key 'session_doc', got %v", noteMap["note_key"])
+	}
+	if !strings.Contains(noteMap["content"].(string), "MCP Test Sheet") {
+		t.Fatalf("unexpected content: %v", noteMap["content"])
+	}
+}
+
+// TestMCPServer_ServerInstructions_ContentCheck verifies that DefaultServerInstructions
+// contains agent-modes norm notice and workflow sheet adaptive policy.
+func TestMCPServer_ServerInstructions_ContentCheck(t *testing.T) {
+	if !strings.Contains(store.DefaultServerInstructions, "agent-modes") {
+		t.Fatalf("expected DefaultServerInstructions to contain agent-modes reference")
+	}
+	if !strings.Contains(store.DefaultServerInstructions, "Workflow Sheet") {
+		t.Fatalf("expected DefaultServerInstructions to contain Workflow Sheet reference")
+	}
+	if !strings.Contains(store.DefaultServerInstructions, "session_doc_save") {
+		t.Fatalf("expected DefaultServerInstructions to contain session_doc_save reference")
+	}
+}
+

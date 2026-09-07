@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { marked } from 'marked'
 import { usePreviewStore } from '@/stores/preview'
+import { toast } from 'vue-sonner'
 
 const props = defineProps<{
   content: string
@@ -59,7 +60,22 @@ renderer.code = function(token: any, lang?: string) {
   }
   const formatted = formatMonospaceCode(codeText)
   const langClass = language ? ` class="language-${language}"` : ''
-  return `<div class="my-3 rounded-xs border border-border/80 bg-card overflow-hidden shadow-2xs"><pre class="p-3 m-0"><code${langClass}>${formatted}</code></pre></div>`
+  return `<div class="code-block-wrapper my-3 rounded-xs border border-border/80 bg-card overflow-hidden shadow-2xs relative group">
+    <button
+      type="button"
+      class="copy-code-button absolute top-2 right-2 p-1.5 rounded-sm bg-muted/70 hover:bg-muted text-muted-foreground hover:text-foreground cursor-pointer transition-all border border-border/60 shadow-2xs opacity-75 hover:opacity-100 group-hover:opacity-100 z-10"
+      title="复制代码"
+    >
+      <svg class="copy-icon-idle w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+      </svg>
+      <svg class="copy-icon-success w-3.5 h-3.5 hidden text-green-600 dark:text-green-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 6 9 17l-5-5"/>
+      </svg>
+    </button>
+    <pre class="p-3 m-0 overflow-x-auto"><code${langClass}>${formatted}</code></pre>
+  </div>`
 }
 
 // 处理 Markdown 中的图片渲染：支持点击大图预览
@@ -93,7 +109,44 @@ function handleContainerClick(event: MouseEvent) {
   const target = event.target as HTMLElement
   if (!target) return
 
-  // 点击正文中的图片触发全屏纯手势灯箱预览
+  // 1. 点击代码块复制按钮
+  const copyBtn = target.closest('.copy-code-button') as HTMLElement | null
+  if (copyBtn) {
+    const wrapper = copyBtn.closest('.code-block-wrapper')
+    const codeEl = wrapper?.querySelector('code')
+    if (codeEl) {
+      const rawText = codeEl.innerText || codeEl.textContent || ''
+      const idleIcon = copyBtn.querySelector('.copy-icon-idle')
+      const successIcon = copyBtn.querySelector('.copy-icon-success')
+
+      const showSuccess = () => {
+        if (idleIcon) idleIcon.classList.add('hidden')
+        if (successIcon) successIcon.classList.remove('hidden')
+        copyBtn.classList.add('border-green-500/50', 'bg-green-500/10')
+        toast.success('代码已复制到剪贴板')
+        setTimeout(() => {
+          if (idleIcon) idleIcon.classList.remove('hidden')
+          if (successIcon) successIcon.classList.add('hidden')
+          copyBtn.classList.remove('border-green-500/50', 'bg-green-500/10')
+        }, 1800)
+      }
+
+      navigator.clipboard.writeText(rawText).then(() => {
+        showSuccess()
+      }).catch(() => {
+        const ta = document.createElement('textarea')
+        ta.value = rawText
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+        showSuccess()
+      })
+    }
+    return
+  }
+
+  // 2. 点击正文中的图片触发全屏纯手势灯箱预览
   if (target.tagName === 'IMG' && target.classList.contains('markdown-previewable-image')) {
     const img = target as HTMLImageElement
     previewStore.openImagePreview({

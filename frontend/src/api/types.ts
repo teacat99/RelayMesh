@@ -18,6 +18,7 @@ export interface FeedbackSession {
   user_messages?: string[]
   images?: SessionImage[]
   consumed_by_ai?: boolean
+  consumed_at?: string
   timeout_seconds?: number
   no_feedback_checks?: number
   max_no_feedback_checks?: number

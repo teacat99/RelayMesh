@@ -62,6 +62,21 @@ func TestProtocol_NotificationHandling(t *testing.T) {
 	if initRes.Response.Error != nil {
 		t.Fatalf("unexpected error: %v", initRes.Response.Error)
 	}
+	initResultMap, ok := initRes.Response.Result.(map[string]any)
+	if !ok || initResultMap["instructions"] == nil {
+		t.Fatalf("expected non-nil instructions in initialize response, got: %+v", initRes.Response.Result)
+	}
+
+	// 2.1 Test custom ServerInstructions dynamic retrieval
+	customInstructions := "CUSTOM_TEST_INSTRUCTIONS"
+	_ = st.SaveSettings(context.Background(), map[string]any{
+		"serverInstructions": customInstructions,
+	})
+	initResCustom := srv.HandleRPCRequest(context.Background(), credCtx, &initReq)
+	customMap := initResCustom.Response.Result.(map[string]any)
+	if customMap["instructions"] != customInstructions {
+		t.Fatalf("expected custom instructions %q, got: %v", customInstructions, customMap["instructions"])
+	}
 
 	// 3. Tools list via LocalStdioCredential
 	toolsJSON := []byte(`{"jsonrpc":"2.0","id":100,"method":"tools/list"}`)

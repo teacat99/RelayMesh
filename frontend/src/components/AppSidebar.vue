@@ -394,7 +394,13 @@ function getStatusBadge(item: UnifiedItem) {
   }
 
   switch (item.status) {
-    case 'completed': return { label: '已完成', variant: 'default' }
+    case 'completed': {
+      const raw = item.raw as any
+      if (raw && !raw.consumed_by_ai) {
+        return { label: '待提取', variant: 'secondary' }
+      }
+      return { label: '已完成', variant: 'default' }
+    }
     case 'pending': return { label: '等待确认', variant: 'secondary' }
     case 'cancelled': return { label: '已取消', variant: 'outline' }
     case 'timeout': return { label: '已超时', variant: 'destructive' }

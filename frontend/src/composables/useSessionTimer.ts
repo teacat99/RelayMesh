@@ -8,6 +8,8 @@ export interface SessionTimerRaw {
   last_keepalive_at?: string
   created_at?: string
   updated_at?: string
+  consumed_by_ai?: boolean
+  consumed_at?: string
 }
 
 export interface SessionTimerResult {
@@ -100,11 +102,25 @@ export function computeSessionTimer(
     }
   }
 
-  // 2. 无交互/已完成/AI 正在自主执行任务
+  // 2. 会话已由用户回复提交 (completed)
   if (session.status === 'completed') {
-    const execStartTime = session.updated_at
-      ? new Date(session.updated_at).getTime()
-      : (session.created_at ? new Date(session.created_at).getTime() : now)
+    // 2.1 用户已提交但 AI 尚未提取消费 (待提取状态，AI 仍可能在本地 sleep 或轮询间歇)
+    if (!session.consumed_by_ai) {
+      const waitExtractStart = session.updated_at
+        ? new Date(session.updated_at).getTime()
+        : (session.created_at ? new Date(session.created_at).getTime() : now)
+      const elapsed = Math.max(0, Math.floor((now - waitExtractStart) / 1000))
+      return {
+        text: formatTimerDuration(elapsed),
+        prefix: '待提取',
+        isCountdown: false
+      }
+    }
+
+    // 2.2 AI 已确认收取消费，真正进入执行阶段
+    const execStartTime = session.consumed_at
+      ? new Date(session.consumed_at).getTime()
+      : (session.updated_at ? new Date(session.updated_at).getTime() : (session.created_at ? new Date(session.created_at).getTime() : now))
     const execElapsed = Math.max(0, Math.floor((now - execStartTime) / 1000))
     return {
       text: formatTimerDuration(execElapsed),

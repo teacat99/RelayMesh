@@ -457,3 +457,51 @@ func TestAPI_SessionImageAndCredentials(t *testing.T) {
 		t.Fatalf("expected non-empty image body")
 	}
 }
+
+func TestAPI_WorkflowSheet(t *testing.T) {
+	srv, _ := setupTestAPIServer(t)
+
+	// 1. Get empty sheet
+	reqGetEmpty := httptest.NewRequest(http.MethodGet, "/api/v1/workflows/wf-sheet-api-test/sheet", nil)
+	wGetEmpty := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wGetEmpty, reqGetEmpty)
+	if wGetEmpty.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", wGetEmpty.Code)
+	}
+	var emptyResp struct {
+		WorkflowID string `json:"workflow_id"`
+		Content    string `json:"content"`
+	}
+	_ = json.Unmarshal(wGetEmpty.Body.Bytes(), &emptyResp)
+	if emptyResp.Content != "" {
+		t.Fatalf("expected empty content, got %q", emptyResp.Content)
+	}
+
+	// 2. Save sheet
+	docContent := "# Test Workflow Sheet\n- Goal: Verify REST API"
+	saveBody, _ := json.Marshal(map[string]string{"content": docContent})
+	reqSave := httptest.NewRequest(http.MethodPut, "/api/v1/workflows/wf-sheet-api-test/sheet", bytes.NewBuffer(saveBody))
+	reqSave.Header.Set("Content-Type", "application/json")
+	wSave := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wSave, reqSave)
+	if wSave.Code != http.StatusOK {
+		t.Fatalf("expected 200 on save, got %d: %s", wSave.Code, wSave.Body.String())
+	}
+
+	// 3. Get updated sheet
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/v1/workflows/wf-sheet-api-test/sheet", nil)
+	wGet := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wGet, reqGet)
+	if wGet.Code != http.StatusOK {
+		t.Fatalf("expected 200 on get, got %d", wGet.Code)
+	}
+	var getResp struct {
+		WorkflowID string `json:"workflow_id"`
+		Content    string `json:"content"`
+		UpdatedAt  string `json:"updated_at"`
+	}
+	_ = json.Unmarshal(wGet.Body.Bytes(), &getResp)
+	if getResp.Content != docContent {
+		t.Fatalf("expected content %q, got %q", docContent, getResp.Content)
+	}
+}

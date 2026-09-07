@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/internal/store"
 )
 
 // Raw JSON-RPC 2.0 structures
@@ -100,6 +101,9 @@ type RPCExecutionResult struct {
 	IsNotification bool
 }
 
+// ServerInstructions is the fallback constant pointing to store.DefaultServerInstructions
+const ServerInstructions = store.DefaultServerInstructions
+
 // HandleRPCRequest processes a parsed JSON-RPC request in a transport-neutral manner.
 func (s *Server) HandleRPCRequest(ctx context.Context, credCtx *CredentialContext, req *jsonRPCRequest) RPCExecutionResult {
 	// Notifications (no ID or explicit notifications/ method) MUST NOT produce responses in stdio
@@ -130,6 +134,13 @@ func (s *Server) HandleRPCRequest(ctx context.Context, credCtx *CredentialContex
 
 	switch req.Method {
 	case "initialize":
+		instructions := store.DefaultServerInstructions
+		if s.store != nil {
+			if appSettings, err := s.store.GetGlobalAppSettings(ctx); err == nil && strings.TrimSpace(appSettings.ServerInstructions) != "" {
+				instructions = appSettings.ServerInstructions
+			}
+		}
+
 		resp.Result = map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities": map[string]any{
@@ -144,6 +155,7 @@ func (s *Server) HandleRPCRequest(ctx context.Context, credCtx *CredentialContex
 				"name":    "RelayMesh",
 				"version": s.cfg.Version,
 			},
+			"instructions": instructions,
 		}
 
 	case "tools/list":

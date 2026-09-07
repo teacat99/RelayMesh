@@ -355,6 +355,24 @@ export const phasesApi = {
   }
 }
 
+export interface WorkflowSheetData {
+  workflow_id: string
+  content: string
+  updated_at?: string
+}
+
+export const workflowSheetApi = {
+  async get(workflowId: string): Promise<WorkflowSheetData> {
+    const res = await api.get(`/workflows/${encodeURIComponent(workflowId)}/sheet`)
+    return res.data
+  },
+
+  async save(workflowId: string, content: string): Promise<{ status: string; workflow_id: string }> {
+    const res = await api.put(`/workflows/${encodeURIComponent(workflowId)}/sheet`, { content })
+    return res.data
+  }
+}
+
 export interface BlockedIPInfo {
   ip: string
   failed_count: number

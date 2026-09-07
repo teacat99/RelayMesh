@@ -90,12 +90,12 @@ func (s *Store) ListWorkflowSummaries(ctx context.Context, limit int) ([]map[str
 	var results []struct {
 		WorkflowID string
 		Sessions   int64
-		LastActive time.Time
+		LastActive string
 	}
 
 	err := s.db.WithContext(ctx).
 		Model(&model.FeedbackSession{}).
-		Select("workflow_id, COUNT(DISTINCT session_id) as sessions, MAX(updated_at) as last_active").
+		Select("workflow_id, COUNT(DISTINCT id) as sessions, MAX(updated_at) as last_active").
 		Where("workflow_id != ''").
 		Group("workflow_id").
 		Order("last_active DESC").

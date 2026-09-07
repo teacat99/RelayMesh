@@ -124,6 +124,10 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		v1.GET("/workflows/:workflow_id/phase", handler.GetWorkflowPhase)
 		v1.PUT("/workflows/:workflow_id/phase", handler.SetWorkflowPhase)
 
+		// Workflow Sheet (会话工作表 / 文档)
+		v1.GET("/workflows/:workflow_id/sheet", handler.GetWorkflowSheet)
+		v1.PUT("/workflows/:workflow_id/sheet", handler.SaveWorkflowSheet)
+
 		// Security & Rate Limiting & Credentials
 		v1.GET("/auth/blocked_ips", auth.GetBlockedIPs)
 		v1.POST("/auth/unblock_ip", auth.UnblockIP)

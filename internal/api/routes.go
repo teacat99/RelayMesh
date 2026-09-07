@@ -210,10 +210,6 @@ func (h *APIHandler) SubmitFeedback(c *gin.Context) {
 	h.mcpServer.NotifySessionCompleted(session)
 	h.broker.Broadcast("session_completed", session)
 
-	if session.WorkflowID != "" {
-		h.autoResetToHumanPreferred(c.Request.Context(), session.WorkflowID)
-	}
-
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 
@@ -258,9 +254,6 @@ func (h *APIHandler) AppendWorkflowFeedback(c *gin.Context) {
 		}
 		h.mcpServer.NotifySessionCompleted(sess)
 		h.broker.Broadcast("session_completed", sess)
-		if workflowID != "" {
-			h.autoResetToHumanPreferred(c.Request.Context(), workflowID)
-		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "type": "session", "session": sess})
 		return
 	}
@@ -1237,17 +1230,78 @@ func (h *APIHandler) SetWorkflowPhase(c *gin.Context) {
 	})
 }
 
-// autoResetToHumanPreferred resets current_phase_id to the human's preferred phase after feedback submission.
+// autoResetToHumanPreferred resets current_phase_id to the human's preferred phase after feedback is consumed by AI,
+// ONLY when the workflow is currently in the "done" phase.
 func (h *APIHandler) autoResetToHumanPreferred(ctx context.Context, workflowID string) {
-	preferred, err := h.store.GetHumanPreferredPhase(ctx, workflowID)
-	if err != nil || preferred == "" {
+	currentPhase, _, err := h.store.GetWorkflowPhaseWithDefaults(ctx, workflowID)
+	if err != nil || currentPhase != "done" {
 		return
 	}
-	currentPhase, _, err := h.store.GetWorkflowPhaseWithDefaults(ctx, workflowID)
-	if err != nil || currentPhase == preferred {
+	preferred, err := h.store.GetHumanPreferredPhase(ctx, workflowID)
+	if err != nil || preferred == "" {
+		preferred = "assess"
+	}
+	if currentPhase == preferred {
 		return
 	}
 	if e := h.store.SetWorkflowPhase(ctx, workflowID, preferred, false); e == nil {
 		h.broker.Broadcast("phase_changed", gin.H{"workflow_id": workflowID, "phase": preferred})
 	}
 }
+
+func (h *APIHandler) GetWorkflowSheet(c *gin.Context) {
+	workflowID := c.Param("workflow_id")
+	if workflowID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workflow_id is required"})
+		return
+	}
+	note, err := h.store.GetNoteByKey(c.Request.Context(), workflowID, "session_doc")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if note == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"workflow_id": workflowID,
+			"content":     "",
+			"updated_at":  nil,
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"workflow_id": workflowID,
+		"content":     note.Content,
+		"updated_at":  note.UpdatedAt,
+	})
+}
+
+type SaveWorkflowSheetRequest struct {
+	Content string `json:"content"`
+}
+
+func (h *APIHandler) SaveWorkflowSheet(c *gin.Context) {
+	workflowID := c.Param("workflow_id")
+	if workflowID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workflow_id is required"})
+		return
+	}
+	var req SaveWorkflowSheetRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	note := &model.WorkflowNote{
+		WorkflowID: workflowID,
+		NoteKey:    "session_doc",
+		Content:    req.Content,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	if err := h.store.SaveNote(c.Request.Context(), note); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	h.broker.Broadcast("workflow_sheet_updated", gin.H{"workflow_id": workflowID})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "workflow_id": workflowID})
+}
+
