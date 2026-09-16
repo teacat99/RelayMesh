@@ -303,12 +303,127 @@ func TestStore_WorkflowIDAutoDerivationAndSelfHealing(t *testing.T) {
 			"workflow_id": gorm.Expr("'wf-' || replace(id, 'sess-', '')"),
 		})
 
-	healedSess, err := st.GetFeedbackSession(ctx, legacyID)
+	// 4. 测试 D-153 同项目目录自愈继承能力：当后续调用遗漏 workflow_id 时，自动继承同项目目录活跃工作流
+	initialWorkflow := "relaymesh-continuation"
+	projAlpha := "/home/teacat/projects/alpha"
+	firstSess, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       initialWorkflow,
+		ProjectDirectory: projAlpha,
+		Title:            "初始主会话",
+		Summary:          "阶段一工作进行中",
+	})
 	if err != nil {
-		t.Fatalf("failed to get legacy session: %v", err)
+		t.Fatalf("failed to create first session: %v", err)
 	}
-	if healedSess.WorkflowID != "wf-legacy-test" {
-		t.Fatalf("expected healed workflow_id to be 'wf-legacy-test', got: %q", healedSess.WorkflowID)
+	if firstSess.WorkflowID != initialWorkflow {
+		t.Fatalf("expected WorkflowID %q, got %q", initialWorkflow, firstSess.WorkflowID)
+	}
+
+	// 模拟后续调用因上下文压缩遗漏了 WorkflowID 参数，但携带了相同的项目目录
+	healedTurn, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       "", // 遗漏传参
+		ProjectDirectory: projAlpha,
+		Title:            "后续汇报（未传工作流ID）",
+		Summary:          "汇报最新阶段进展",
+	})
+	if err != nil {
+		t.Fatalf("failed to create healed session: %v", err)
+	}
+	if healedTurn.WorkflowID != initialWorkflow {
+		t.Fatalf("expected auto-healed WorkflowID to inherit %q, but got %q", initialWorkflow, healedTurn.WorkflowID)
+	}
+
+	// 模拟全新未曾见过的独立项目目录，无历史记录时应派生全新的 wf-YYYYMMDD-xxxx
+	projBeta := "/home/teacat/projects/beta-brand-new"
+	brandNewSess, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       "",
+		ProjectDirectory: projBeta,
+		Title:            "全新项目第一轮",
+		Summary:          "全新项目初始化",
+	})
+	if err != nil {
+		t.Fatalf("failed to create brand new session: %v", err)
+	}
+	if !strings.HasPrefix(brandNewSess.WorkflowID, "wf-") || brandNewSess.WorkflowID == initialWorkflow {
+		t.Fatalf("expected brand new WorkflowID to start with 'wf-' and not equal initialWorkflow, got %q", brandNewSess.WorkflowID)
+	}
+}
+
+func TestStore_D159_D161_Protections(t *testing.T) {
+	st := setupTestStore(t)
+	ctx := context.Background()
+
+	projA := "/workspace/project-alpha"
+	projB := "/workspace/project-beta"
+	wfID := "wf-shared-test"
+
+	// 1. 项目 A 创建第一轮会话 (pending)
+	sess1, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       wfID,
+		ProjectDirectory: projA,
+		Title:            "项目 A 会话 1",
+		Summary:          "项目 A 第一次汇报",
+	})
+	if err != nil {
+		t.Fatalf("failed to create sess1: %v", err)
+	}
+
+	// 2. 项目 B 误用相同 workflow_id，应被 D-161 Fast-Fail 拦截拒绝跨项目覆写
+	_, err = st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       wfID,
+		ProjectDirectory: projB,
+		Title:            "项目 B 误用工作流",
+		Summary:          "试图覆盖项目 A 的汇报",
+	})
+	if err == nil {
+		t.Fatalf("expected conflict error when project B tries to use workflow of project A, got nil")
+	}
+
+	// 3. 用户在项目 A 上提交反馈，进入 completed 状态（待 AI 提取）
+	_, err = st.SubmitFeedback(ctx, SubmitFeedbackInput{
+		SessionID:    sess1.ID,
+		ResponseText: "用户确认通过",
+	})
+	if err != nil {
+		t.Fatalf("failed to submit feedback: %v", err)
+	}
+
+	// 检查此时 sess1.ConsumedByAI 应该是 false
+	checkSess1, _ := st.GetFeedbackSession(ctx, sess1.ID)
+	if checkSess1.ConsumedByAI {
+		t.Fatalf("expected sess1 not yet consumed by AI")
+	}
+
+	// 4. 项目 A AI 发起第二轮交互，应该自动级联将第一轮打标为已消费 (D-159)
+	sess2, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       wfID,
+		ProjectDirectory: projA,
+		Title:            "项目 A 会话 2",
+		Summary:          "项目 A 第二次汇报",
+	})
+	if err != nil {
+		t.Fatalf("failed to create sess2: %v", err)
+	}
+
+	checkSess1After, _ := st.GetFeedbackSession(ctx, sess1.ID)
+	if !checkSess1After.ConsumedByAI {
+		t.Fatalf("expected sess1 to be auto-marked as consumed by AI after sess2 created")
+	}
+
+	// 5. 试图对历史非最新轮次 sess1 执行 Keepalive，应被 D-159 冻结拦截
+	_, err = st.KeepaliveFeedbackSession(ctx, sess1.ID, 120)
+	if err == nil {
+		t.Fatalf("expected keepalive on historical sess1 to be rejected, got nil")
+	}
+
+	// 6. 测试删除会话 DeleteFeedbackSession
+	_, err = st.DeleteFeedbackSession(ctx, sess2.ID)
+	if err != nil {
+		t.Fatalf("failed to delete sess2: %v", err)
+	}
+	_, err = st.GetFeedbackSession(ctx, sess2.ID)
+	if err == nil {
+		t.Fatalf("expected sess2 to be deleted")
 	}
 }
 

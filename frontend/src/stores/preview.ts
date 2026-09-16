@@ -5,6 +5,8 @@ export interface PreviewImageInfo {
   src: string
   alt?: string
   title?: string
+  width?: number
+  height?: number
 }
 
 export const usePreviewStore = defineStore('preview', () => {

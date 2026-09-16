@@ -105,30 +105,28 @@ var (
 
 	interactiveFeedbackSchema = json.RawMessage(`{
 		"type": "object",
+		"required": ["workflow_id", "summary"],
 		"properties": {
-			"project_directory": {
+			"workflow_id": {
 				"type": "string",
-				"default": ".",
-				"description": "Project directory path."
-			},
-			"summary": {
-				"type": "string",
-				"default": "",
-				"description": "Main markdown content / summary of the AI's current work, proposal, or question, rendered in the Web UI."
-			},
-			"content": {
-				"type": "string",
-				"description": "Alternative alias for summary (accepted for backward/multimodal compatibility)."
+				"description": "[CRITICAL 1/3: THREAD IDENTIFIER] Required. Unique workflow identifier to group multiple interaction turns under a single sidebar thread (e.g. 'relaymesh-continuation'). In multi-turn chat, you MUST retain the existing workflow_id from previous turns and context. Never omit this parameter!"
 			},
 			"title": {
 				"type": "string",
 				"default": "",
-				"description": "Optional short headline (max ~30 chars) for this feedback round."
+				"description": "[CRITICAL 2/3: SHORT HEADLINE ONLY] Concise 5-15 word one-line title for this feedback round (e.g. '图片加载优化方案确认'). Do NOT put full markdown report or body content here!"
 			},
-			"workflow_id": {
+			"summary": {
 				"type": "string",
-				"default": "",
-				"description": "Unique workflow identifier to group multiple interaction turns under a single sidebar thread (e.g. 'wf-20260827-auth-refactor' or 'relaymesh-optimization'). Providing a new workflow_id automatically creates a new workflow topic in the sidebar; providing an existing workflow_id appends a new conversational turn into that workflow topic. If unknown after context compression, call list_sessions with project_directory and group_by='workflow' to discover recent workflows."
+				"description": "[CRITICAL 3/3: FULL MARKDOWN BODY] Required. The comprehensive markdown content (C-PLAN analysis, architecture proposals, code change summaries, verification results, or questions). Must be substantive markdown. Do NOT put just a short title here!"
+			},
+			"content": {
+				"type": "string",
+				"description": "Alternative alias for summary (accepted for backward compatibility)."
+			},
+			"project_directory": {
+				"type": "string",
+				"description": "[REQUIRED ABSOLUTE PATH] The exact absolute workspace directory of the client project where the agent is running (e.g. '/home/teacat/CatFile.Docker/RelayMesh'). Do NOT use relative path '.' as the server may be hosted on a different remote machine."
 			},
 			"phase": {
 				"type": "string",
@@ -409,6 +407,11 @@ On MCP errors: If report_progress calls fail repeatedly, degrade to away mode (s
 		tools = append(tools, ToolDefinition{
 			Name: "interactive_feedback",
 			Description: `PRIMARY communication channel with the user via Web UI. All substantive content (analysis, plans, code change summaries, questions) MUST go through this tool's summary parameter.
+
+CORE PARAMETER CONTRACT (CRITICAL):
+1. workflow_id (REQUIRED): MUST be provided. In multi-turn chat, ALWAYS retain and pass the workflow_id from previous turns (e.g. 'relaymesh-continuation'). Never omit it.
+2. title (ONE LINE): Short headline (5-15 words). Do NOT put long markdown body in title.
+3. summary (FULL MARKDOWN): The actual detailed markdown content. Do NOT put a simple title here.
 
 When to call:
 - Before starting new work (understanding/plan/risks)

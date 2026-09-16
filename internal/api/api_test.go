@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/teacat99/RelayMesh/internal/config"
 	"github.com/teacat99/RelayMesh/internal/mcp"
 	"github.com/teacat99/RelayMesh/internal/model"
@@ -453,8 +456,48 @@ func TestAPI_SessionImageAndCredentials(t *testing.T) {
 	if ct := wImg.Header().Get("Content-Type"); ct != "image/png" {
 		t.Fatalf("expected image/png content type, got %s", ct)
 	}
+	if cc := wImg.Header().Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+		t.Fatalf("expected immutable cache control header, got %s", cc)
+	}
+	etag := wImg.Header().Get("ETag")
+	if etag == "" {
+		t.Fatalf("expected ETag header on image response")
+	}
 	if wImg.Body.Len() == 0 {
 		t.Fatalf("expected non-empty image body")
+	}
+
+	// 5. 测试 If-None-Match 304 快速协商
+	req304 := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/sessions/%s/images/0", sess.ID), nil)
+	req304.Header.Set("If-None-Match", etag)
+	w304 := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(w304, req304)
+	if w304.Code != http.StatusNotModified {
+		t.Fatalf("expected 304 Not Modified when ETag matches, got %d", w304.Code)
+	}
+
+	// 6. 测试 GetWorkflowSessions 轻量化投影：Data 剥离，URL 注入
+	reqWF := httptest.NewRequest(http.MethodGet, "/api/v1/workflows/wf-img-test/sessions", nil)
+	wWF := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wWF, reqWF)
+	if wWF.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for workflow sessions, got %d", wWF.Code)
+	}
+	var wfResp struct {
+		Sessions []model.FeedbackSession `json:"sessions"`
+	}
+	if err := json.Unmarshal(wWF.Body.Bytes(), &wfResp); err != nil {
+		t.Fatalf("failed to parse workflow sessions response: %v", err)
+	}
+	if len(wfResp.Sessions) == 0 || len(wfResp.Sessions[0].Images) == 0 {
+		t.Fatalf("expected sessions with images in workflow response")
+	}
+	retImg := wfResp.Sessions[0].Images[0]
+	if retImg.Data != "" {
+		t.Fatalf("expected img.Data to be stripped in workflow sessions response, got length %d", len(retImg.Data))
+	}
+	if retImg.URL == "" || !strings.Contains(retImg.URL, "/images/0?hash=") {
+		t.Fatalf("expected img.URL to be populated with hash, got %s", retImg.URL)
 	}
 }
 
@@ -503,5 +546,113 @@ func TestAPI_WorkflowSheet(t *testing.T) {
 	_ = json.Unmarshal(wGet.Body.Bytes(), &getResp)
 	if getResp.Content != docContent {
 		t.Fatalf("expected content %q, got %q", docContent, getResp.Content)
+	}
+}
+
+func TestAPI_ImageRateLimit(t *testing.T) {
+	srv, st := setupTestAPIServer(t)
+
+	// 配置限速 128 KB/s
+	_ = st.SaveSettings(context.Background(), map[string]any{
+		"image_rate_limit_kb": 128,
+	})
+
+	samplePNG := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+	sess, err := st.CreateFeedbackSession(context.Background(), store.CreateSessionInput{
+		WorkflowID: "wf-ratelimit-test",
+		Title:      "Rate Limit Test",
+		Summary:    "Testing rate limit",
+	})
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	_, err = st.SubmitFeedback(context.Background(), store.SubmitFeedbackInput{
+		SessionID:    sess.ID,
+		ResponseText: "Testing image rate limit",
+		Images: []model.SessionImage{
+			{
+				Name:   "rate-test.png",
+				Format: "png",
+				Data:   samplePNG,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to submit feedback: %v", err)
+	}
+
+	reqImg := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/sessions/%s/images/0", sess.ID), nil)
+	wImg := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wImg, reqImg)
+	if wImg.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK with rate limit, got %d", wImg.Code)
+	}
+	if wImg.Body.Len() == 0 {
+		t.Fatalf("expected non-empty body with rate limit")
+	}
+}
+
+func TestAPI_DeleteSession_And_TokenRenewal(t *testing.T) {
+	cfg := &config.Config{
+		ProjectID:   "test-proj",
+		WebUsername: "admin",
+		WebPassword: "strong_password_999",
+		JWTSecret:   "test-jwt-secret-123456",
+	}
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	srv := NewServer(cfg, st, nil)
+
+	// 1. 创建会话并通过 DELETE 路由删除
+	sess, err := st.CreateFeedbackSession(context.Background(), store.CreateSessionInput{
+		WorkflowID:       "wf-delete-test",
+		ProjectDirectory: "/test/dir",
+		Title:            "To Delete",
+		Summary:          "Delete Summary",
+	})
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	reqDel := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/sessions/%s", sess.ID), nil)
+	// 携带有效 Token
+	adminToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":  "admin",
+		"role": "admin",
+		"exp":  time.Now().Add(7 * 24 * time.Hour).Unix(),
+		"iat":  time.Now().Unix(),
+	})
+	adminTokenStr, _ := adminToken.SignedString([]byte(cfg.JWTSecret))
+	reqDel.Header.Set("Authorization", "Bearer "+adminTokenStr)
+
+	wDel := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wDel, reqDel)
+	if wDel.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for delete session, got %d", wDel.Code)
+	}
+
+	// 2. 测试 Token 滑动续期：签发一个还有 1 天过期的 Token，请求后应当带有 X-Renewed-Token 响应头
+	oldToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":  "admin",
+		"role": "admin",
+		"exp":  time.Now().Add(24 * time.Hour).Unix(), // 剩余 1 天（< 3 天）
+		"iat":  time.Now().Unix(),
+	})
+	oldTokenStr, err := oldToken.SignedString([]byte(cfg.JWTSecret))
+	if err != nil {
+		t.Fatalf("failed to sign token: %v", err)
+	}
+
+	reqRenewal := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	reqRenewal.Header.Set("Authorization", "Bearer "+oldTokenStr)
+	wRenewal := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(wRenewal, reqRenewal)
+
+	renewed := wRenewal.Header().Get("X-Renewed-Token")
+	if renewed == "" {
+		t.Fatalf("expected X-Renewed-Token header to be present for expiring token")
 	}
 }

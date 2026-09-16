@@ -80,8 +80,8 @@ const settingsStore = useSettingsStore()
 const router = useRouter()
 
 function handleOpenSettings() {
+  emit('closeMobile')
   if (window.innerWidth < 768) {
-    emit('closeMobile')
     router.push('/settings')
   } else {
     settingsStore.openSettings()
@@ -89,8 +89,8 @@ function handleOpenSettings() {
 }
 
 function handleOpenArchive() {
+  emit('closeMobile')
   if (window.innerWidth < 768) {
-    emit('closeMobile')
     router.push('/archive')
   } else {
     emit('openArchive')

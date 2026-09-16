@@ -44,6 +44,16 @@ func (s *Server) handleInteractiveFeedback(ctx context.Context, raw json.RawMess
 	if len(strings.TrimSpace(args.Detail)) > len(chosen) {
 		chosen = strings.TrimSpace(args.Detail)
 	}
+
+	// 智能防御：如果大模型在极端情况下将长篇 Markdown 正文填入了 title，而 summary 仅填了一句话或为空
+	trimmedTitle := strings.TrimSpace(args.Title)
+	if len(trimmedTitle) > len(chosen) && len(trimmedTitle) > 100 {
+		// 调换交换：长内容作为正文 summary，短内容作为标题 title
+		newTitle := chosen
+		chosen = trimmedTitle
+		args.Title = newTitle
+	}
+
 	args.Summary = chosen
 
 	if strings.TrimSpace(args.Summary) == "" {
@@ -138,6 +148,15 @@ func (s *Server) handleContinueFeedbackSession(ctx context.Context, raw json.Raw
 	sess, err := s.store.GetFeedbackSession(ctx, targetSessionID)
 	if err != nil {
 		return nil, err
+	}
+
+	// D-159: 检查 targetSession 是否为历史非最新轮次，若有更新轮次，自动纠偏至最新轮次
+	if sess.WorkflowID != "" {
+		latestSess, lErr := s.store.GetLatestWorkflowFeedbackSession(ctx, sess.WorkflowID)
+		if lErr == nil && latestSess != nil && latestSess.ID != sess.ID {
+			sess = latestSess
+			targetSessionID = latestSess.ID
+		}
 	}
 	if sess.Status == "completed" {
 		if sess.ConsumedByAI {
@@ -536,17 +555,21 @@ func (s *Server) formatSessionImagesBlock(sess *model.FeedbackSession, credCtx *
 			}
 		}
 
-		if isStdio || (savedPath != "" && credCtx == nil) {
-			// CLI / stdio 模式或已成功落盘本地工程目录
-			if savedPath != "" {
-				sb.WriteString(fmt.Sprintf("  本地文件路径: %s (请使用 Read 工具直接读取查看)\n", savedPath))
-			} else {
-				sb.WriteString(fmt.Sprintf("  提示: 图片未能保存到本地工程目录，可检查 %s 写入权限\n", localImgDir))
-			}
+		if savedPath != "" {
+			// D-160: 只要本地文件已落盘成功（无论 stdio 还是本地 HTTP 服务），直接输出本地文件路径指引 Cursor Read 工具秒级内嵌直读（体验最优）
+			sb.WriteString(fmt.Sprintf("  本地文件路径: %s (请使用 Read 工具直接读取查看)\n", savedPath))
 		} else {
-			// URL / HTTP 远程模式：默认优先指引专属 MCP 原生取图，备选提供下载直链
-			downloadURL := fmt.Sprintf("%s/api/v1/sessions/%s/images/%d%s", baseURL, sess.ID, i, tokenQuery)
-			sb.WriteString(fmt.Sprintf("  优先MCP看图: get_session_image(session_id: \"%s\", image_index: %d)\n", sess.ID, i))
+			// URL / HTTP 远程无本地落盘模式：回执明确提供标准规范 MCP 调用语法，备选提供下载直链
+			relURL := model.BuildSessionImageRelativeURL(sess.ID, i, img.Hash)
+			if tokenQuery != "" {
+				if strings.Contains(relURL, "?") {
+					relURL += "&" + strings.TrimPrefix(tokenQuery, "?")
+				} else {
+					relURL += tokenQuery
+				}
+			}
+			downloadURL := baseURL + relURL
+			sb.WriteString(fmt.Sprintf("  优先MCP看图: CallDynamicTool({ namespace: \"user-relaymesh\", toolName: \"get_session_image\", arguments: { session_id: \"%s\", image_index: %d } })\n", sess.ID, i))
 			sb.WriteString(fmt.Sprintf("  备用下载直链: %s\n", downloadURL))
 		}
 	}
@@ -563,7 +586,7 @@ func (s *Server) formatKeepaliveResult(ctx context.Context, sess *model.Feedback
 	header := s.formatSessionHeaderWithContext(ctx, sess)
 	waitMin := sess.PromptWaitMinutes
 	if waitMin <= 0 {
-		waitMin = 2
+		waitMin = 3
 	}
 	checks := sess.NoFeedbackChecks
 	maxChecks := sess.MaxNoFeedbackChecks

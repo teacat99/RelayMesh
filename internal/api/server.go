@@ -41,6 +41,7 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, Accept, X-Requested-With")
+		c.Header("Access-Control-Expose-Headers", "X-Renewed-Token")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
@@ -66,6 +67,13 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		authGroup.GET("/status", auth.Status)
 	}
 
+	// Public / Unauthenticated APIs
+	publicV1 := engine.Group("/api/v1")
+	{
+		// 图片静态只读资源：内容寻址哈希不可变强缓存，支持直接匿名访问与外链展示
+		publicV1.GET("/sessions/:id/images/:index", handler.GetSessionImage)
+	}
+
 	// Protected / Business APIs
 	v1 := engine.Group("/api/v1")
 	v1.Use(auth.Middleware())
@@ -74,7 +82,8 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		v1.GET("/sessions/current", handler.GetCurrentSession)
 		v1.GET("/sessions", handler.ListSessions)
 		v1.GET("/sessions/:id", handler.GetSession)
-		v1.GET("/sessions/:id/images/:index", handler.GetSessionImage)
+		v1.DELETE("/sessions/:id", handler.DeleteSession)
+		v1.POST("/sessions/restore", handler.RestoreSession)
 		v1.POST("/sessions/:id/submit", handler.SubmitFeedback)
 		v1.POST("/sessions/:id/revoke", handler.RevokeSession)
 		v1.POST("/sessions/:id/cancel", handler.CancelSession)

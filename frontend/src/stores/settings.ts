@@ -159,6 +159,7 @@ export interface AppSettings {
   soundEnabled: boolean
   desktopNotifyEnabled: boolean
   autoScrollToBottom: boolean
+  imageRateLimitKB: number
 }
 
 const STORAGE_KEY = 'relaymesh.settings'
@@ -166,6 +167,7 @@ const STORAGE_KEY = 'relaymesh.settings'
 const DEFAULT_SETTINGS: AppSettings = {
   hostName: '',
   defaultTimeoutSeconds: 120, // 2 minutes
+  imageRateLimitKB: 0, // 默认 0 (不限速)
   serverInstructions: DEFAULT_SERVER_INSTRUCTIONS,
   phaseTemplate: [
     { id: 'assess', label: '评估', description: '需求接入与理解确认', prompt: '当前处于需求评估阶段。通过 feedback 收集用户描述，逐条记录到会话文档，保留用户原话。对每条需求复述自己的理解：真实场景、根因推测、期望行为、验收标准。等待用户确认后再进入方案阶段。不急于敲定方案选型，先听完并理解真实需求，并引导用户完善需求，汇报不同方案的利弊，对每个需求列出推荐方案、风险、改动范围与备选。方向敲定后可调整到方案阶段。⚠️ 本阶段禁止修改代码。可以读取代码验证可行性，但不得创建、修改或删除任何源代码文件。如确需修改代码，必须先通过 feedback 获得用户二次确认并切换到开发阶段。' },

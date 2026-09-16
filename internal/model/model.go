@@ -4,6 +4,8 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -200,8 +202,21 @@ func (s *StringArray) Scan(value interface{}) error {
 type SessionImage struct {
 	Name     string `json:"name,omitempty"`
 	Format   string `json:"format,omitempty"`
-	Data     string `json:"data"` // base64
+	Data     string `json:"data,omitempty"` // base64 (轻量传输时可省略)
 	DataType string `json:"data_type,omitempty"`
+	Hash     string `json:"hash,omitempty"`
+	Width    int    `json:"width,omitempty"`
+	Height   int    `json:"height,omitempty"`
+	URL      string `json:"url,omitempty"`
+}
+
+// BuildSessionImageRelativeURL 统一定义图片标准相对访问路径（带不可变内容哈希）
+func BuildSessionImageRelativeURL(sessionID string, index int, hash string) string {
+	hashQuery := ""
+	if strings.TrimSpace(hash) != "" {
+		hashQuery = "?hash=" + strings.TrimSpace(hash)
+	}
+	return fmt.Sprintf("/api/v1/sessions/%s/images/%d%s", sessionID, index, hashQuery)
 }
 
 type SessionImages []SessionImage

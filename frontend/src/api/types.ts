@@ -1,8 +1,12 @@
 export interface SessionImage {
   name?: string
   format?: string
-  data: string
+  data?: string
   data_type?: string
+  hash?: string
+  width?: number
+  height?: number
+  url?: string
 }
 
 export interface FeedbackSession {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import dayjs from 'dayjs'
-import type { FeedbackSession } from '../../api/types'
+import type { FeedbackSession, SessionImage } from '../../api/types'
 import { useSessionStore } from '../../stores/session'
 import { useSettingsStore } from '../../stores/settings'
 import { usePreviewStore } from '../../stores/preview'
@@ -19,9 +19,12 @@ import {
   Copy,
   Undo2,
   Clock,
-  CheckCheck
+  CheckCheck,
+  Loader2,
+  Trash2
 } from 'lucide-vue-next'
-import { toast } from 'vue-sonner'
+import { useImageLoader, formatBytes } from '../../composables/useImageLoader'
+import { toast, toastDestructive } from '@/components/ui/sonner'
 
 async function copyText(text: string, label: string) {
   if (!text) return
@@ -55,18 +58,127 @@ const emit = defineEmits<{
   (e: 'scroll-state-change', isScrolledUp: boolean): void
   (e: 'revoke-session', sessionId: string): void
   (e: 'revoke-queued', queuedId: number): void
+  (e: 'delete-session', sessionId: string): void
 }>()
 
 const sessionStore = useSessionStore()
 const previewStore = usePreviewStore()
+const imageLoader = useImageLoader()
 
-function getImageUrl(img: { data?: string; format?: string } | null | undefined): string {
-  if (!img || !img.data) return ''
-  if (img.data.startsWith('data:') || img.data.startsWith('http://') || img.data.startsWith('https://')) {
-    return img.data
+const confirmDeleteSessionId = ref<string | null>(null)
+let confirmDeleteTimer: number | null = null
+let deletedSessionSnapshot: FeedbackSession | null = null
+
+async function handleDeleteSession(session: FeedbackSession) {
+  const sessionId = session.session_id
+  // 第一击：进入激活确认状态（3.5 秒倒计时自动还原）
+  if (confirmDeleteSessionId.value !== sessionId) {
+    confirmDeleteSessionId.value = sessionId
+    if (confirmDeleteTimer) window.clearTimeout(confirmDeleteTimer)
+    confirmDeleteTimer = window.setTimeout(() => {
+      if (confirmDeleteSessionId.value === sessionId) {
+        confirmDeleteSessionId.value = null
+      }
+    }, 3500)
+    return
   }
-  const format = img.format || 'png'
-  return `data:image/${format};base64,${img.data}`
+
+  // 第二击：确认执行删除
+  if (confirmDeleteTimer) {
+    window.clearTimeout(confirmDeleteTimer)
+    confirmDeleteTimer = null
+  }
+  confirmDeleteSessionId.value = null
+
+  // 保存可逆快照备份（Demand 5: 高风险操作通知提供撤销操作，保留 7000ms）
+  deletedSessionSnapshot = { ...session }
+  const turnNum = getSessionTurnNumber(session)
+
+  try {
+    await sessionStore.deleteSession(sessionId)
+    toastDestructive(`已删除第 ${turnNum} 轮会话`, () => restoreDeletedSession())
+  } catch (e: any) {
+    toast.error('删除会话失败: ' + (e?.response?.data?.error || e?.message || e))
+  }
+}
+
+async function restoreDeletedSession() {
+  if (!deletedSessionSnapshot) return
+  const snapshot = deletedSessionSnapshot
+  deletedSessionSnapshot = null
+  try {
+    await sessionStore.restoreSession(snapshot)
+    toast.success('已成功恢复该轮会话')
+  } catch (e: any) {
+    toast.error('恢复会话失败: ' + (e?.response?.data?.error || e?.message || e))
+  }
+}
+
+function openImagePreviewModal(img: SessionImage, alt: string) {
+  const url = getImageUrl(img)
+  imageLoader.prioritize(url)
+  previewStore.openImagePreview({
+    src: url,
+    alt: alt,
+    width: img.width,
+    height: img.height
+  })
+}
+
+// 自动将当前会话流中的图片按从上到下、组内从左到右的阅读顺序加入串行下载队列
+watch(() => props.conversationRounds, (rounds) => {
+  if (!rounds || rounds.length === 0) return
+  for (const r of rounds) {
+    if (r.images && r.images.length > 0) {
+      for (const img of r.images) {
+        const url = getImageUrl(img)
+        if (url && !url.startsWith('data:')) {
+          imageLoader.enqueue(url)
+        }
+      }
+    }
+  }
+}, { immediate: true, deep: true })
+
+const loadedImageKeys = ref<Set<string>>(new Set())
+
+function getImageKey(img: SessionImage | null | undefined, index: number, prefix: string): string {
+  if (!img) return `${prefix}_${index}`
+  if (img.hash) return `${prefix}_${img.hash}`
+  if (img.url) return `${prefix}_${img.url}`
+  return `${prefix}_${index}`
+}
+
+function isImageLoaded(key: string): boolean {
+  return loadedImageKeys.value.has(key)
+}
+
+function handleImageLoad(key: string) {
+  loadedImageKeys.value.add(key)
+}
+
+function getImageStyle(img: SessionImage | null | undefined) {
+  if (img && img.width && img.height && img.width > 0 && img.height > 0) {
+    return {
+      aspectRatio: `${img.width} / ${img.height}`
+    }
+  }
+  return {
+    aspectRatio: '16 / 10'
+  }
+}
+
+function getImageUrl(img: SessionImage | null | undefined): string {
+  if (!img) return ''
+  if (img.url) return img.url
+  if (img.data) {
+    if (img.data.startsWith('data:') || img.data.startsWith('http://') || img.data.startsWith('https://')) {
+      return img.data
+    }
+    const format = img.format || 'png'
+    return `data:image/${format};base64,${img.data}`
+  }
+  return ''
 }
 const settingsStore = useSettingsStore()
 
@@ -486,14 +598,29 @@ defineExpose({
                   ({{ session.workflow_id }})
                 </span>
               </div>
-              <div
-                v-if="session.project_directory"
-                class="text-[10px] sm:text-[11px] font-mono text-muted-foreground hidden sm:flex items-center gap-1 hover:text-foreground hover:bg-muted/70 px-1.5 py-0.5 rounded cursor-pointer transition-colors max-w-xs md:max-w-md lg:max-w-lg truncate group"
-                :title="`点击复制工作区路径: ${formatSessionProjectDirectory(session)}`"
-                @click="copyText(formatSessionProjectDirectory(session), '工作区路径')"
-              >
-                <FolderGit2 class="w-3 h-3 shrink-0 group-hover:text-primary transition-colors" />
-                <span class="truncate">{{ formatSessionProjectDirectory(session) }}</span>
+              <div class="flex items-center gap-1.5 sm:gap-2">
+                <div
+                  v-if="session.project_directory"
+                  class="text-[10px] sm:text-[11px] font-mono text-muted-foreground hidden sm:flex items-center gap-1 hover:text-foreground hover:bg-muted/70 px-1.5 py-0.5 rounded cursor-pointer transition-colors max-w-xs md:max-w-md lg:max-w-lg truncate group"
+                  :title="`点击复制工作区路径: ${formatSessionProjectDirectory(session)}`"
+                  @click="copyText(formatSessionProjectDirectory(session), '工作区路径')"
+                >
+                  <FolderGit2 class="w-3 h-3 shrink-0 group-hover:text-primary transition-colors" />
+                  <span class="truncate">{{ formatSessionProjectDirectory(session) }}</span>
+                </div>
+                <!-- 删除此轮按钮 (带两段式确认与快照撤销 D-159) -->
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-mono px-1.5 py-0.5 rounded cursor-pointer transition-all select-none border"
+                  :class="confirmDeleteSessionId === session.session_id 
+                    ? 'bg-destructive text-destructive-foreground border-destructive shadow-xs' 
+                    : 'text-muted-foreground/80 hover:text-destructive hover:bg-destructive/10 border-border/60 hover:border-destructive/40'"
+                  :title="confirmDeleteSessionId === session.session_id ? '再次点击确认删除（3.5秒内有效）' : '删除本轮会话（清理模型发错的脏数据）'"
+                  @click.stop="handleDeleteSession(session)"
+                >
+                  <Trash2 class="w-3 h-3" />
+                  <span>{{ confirmDeleteSessionId === session.session_id ? '确定删除？' : '删除此轮' }}</span>
+                </button>
               </div>
             </div>
 
@@ -560,24 +687,69 @@ defineExpose({
                 {{ session.response_text || '（已确认，未附加文字）' }}
               </p>
 
-              <!-- Attached Screenshots (支持点击放大预览) -->
-              <div v-if="session.images && session.images.length > 0" class="pt-2 flex flex-wrap gap-2">
+              <!-- Attached Screenshots (支持点击放大预览、阅读顺序流式进度条与固定宽高比骨架防抖) -->
+              <div v-if="session.images && session.images.length > 0" class="pt-2 flex flex-wrap gap-2 max-w-full overflow-hidden">
                 <div
                   v-for="(img, imgIdx) in session.images"
-                  :key="imgIdx"
-                  class="relative group rounded-sm overflow-hidden border border-border shadow-2xs cursor-pointer hover:opacity-90 transition-opacity shrink-0"
-                  @click.stop="previewStore.openImagePreview({
-                    src: getImageUrl(img),
-                    alt: img.name || `第 ${getSessionTurnNumber(session)} 轮用户附件-${imgIdx + 1}`
-                  })"
+                  :key="img.hash || imgIdx"
+                  class="relative group rounded-xs overflow-hidden border border-border/80 bg-muted/40 shadow-2xs cursor-pointer hover:border-primary/60 transition-all shrink-0 h-24 sm:h-36 max-w-full"
+                  :style="getImageStyle(img)"
+                  @click.stop="openImagePreviewModal(img, img.name || `第 ${getSessionTurnNumber(session)} 轮用户附件-${imgIdx + 1}`)"
                 >
+                  <!-- 骨架占位防抖与实时流式下载进度条 (CLS = 0) -->
+                  <div
+                    v-if="!isImageLoaded(getImageKey(img, imgIdx, session.session_id))"
+                    class="absolute inset-0 flex flex-col items-center justify-center bg-muted/70 select-none p-2 z-5"
+                  >
+                    <!-- 正在流式下载中：展示百分比与已传大小 -->
+                    <div
+                      v-if="imageLoader.getTask(getImageUrl(img))?.status === 'loading'"
+                      class="flex flex-col items-center gap-1.5 w-full max-w-[130px]"
+                    >
+                      <div class="flex items-center justify-between w-full text-[10px] font-mono text-muted-foreground font-semibold">
+                        <span class="text-primary flex items-center gap-1">
+                          <Loader2 class="w-3 h-3 animate-spin" />
+                          {{ imageLoader.getTask(getImageUrl(img))?.percent }}%
+                        </span>
+                        <span>{{ formatBytes(imageLoader.getTask(getImageUrl(img))?.receivedBytes || 0) }}</span>
+                      </div>
+                      <div class="w-full h-1.5 rounded-full bg-muted/90 overflow-hidden border border-border/60">
+                        <div
+                          class="h-full bg-primary transition-all duration-150 rounded-full"
+                          :style="{ width: `${imageLoader.getTask(getImageUrl(img))?.percent || 0}%` }"
+                        ></div>
+                      </div>
+                    </div>
+
+                    <!-- 下载失败重试 -->
+                    <div
+                      v-else-if="imageLoader.getTask(getImageUrl(img))?.status === 'error'"
+                      class="flex flex-col items-center gap-1 text-[10px] font-mono text-destructive cursor-pointer hover:underline"
+                      @click.stop="imageLoader.retry(getImageUrl(img))"
+                      title="点击重试下载"
+                    >
+                      <AlertCircle class="w-3.5 h-3.5" />
+                      <span>重试</span>
+                    </div>
+
+                    <!-- 队列排队等待中 -->
+                    <div v-else class="px-2 py-1 rounded-xs border border-muted-foreground/20 flex items-center gap-1 text-muted-foreground/60 animate-pulse">
+                      <span class="text-[9px] font-mono">排队加载</span>
+                    </div>
+                  </div>
+
+                  <!-- 实际图片：懒加载 + 异步解码 + 就绪平滑淡入 -->
                   <img
-                    :src="getImageUrl(img)"
-                    class="max-h-24 sm:max-h-36 object-cover pointer-events-none block"
+                    :src="imageLoader.getDisplaySrc(getImageUrl(img))"
+                    loading="lazy"
+                    decoding="async"
+                    class="w-full h-full object-cover pointer-events-none block transition-opacity duration-300"
+                    :class="isImageLoaded(getImageKey(img, imgIdx, session.session_id)) ? 'opacity-100' : 'opacity-0'"
                     :alt="img.name || `attachment-${imgIdx + 1}`"
+                    @load="handleImageLoad(getImageKey(img, imgIdx, session.session_id))"
                   />
                   <!-- 底部一体化分区标题栏：左侧嵌入编号，右侧嵌入文件名 -->
-                  <div class="absolute bottom-0 inset-x-0 bg-black/80 backdrop-blur-xs text-white text-[9px] font-mono flex items-stretch h-4.5 select-none pointer-events-none overflow-hidden">
+                  <div class="absolute bottom-0 inset-x-0 bg-black/80 backdrop-blur-xs text-white text-[9px] font-mono flex items-stretch h-4.5 select-none pointer-events-none overflow-hidden z-10">
                     <div class="px-1.5 bg-primary text-primary-foreground font-bold flex items-center justify-center shrink-0 border-r border-white/20">
                       #{{ imgIdx + 1 }}
                     </div>
@@ -637,23 +809,69 @@ defineExpose({
               {{ q.response_text || '（已确认）' }}
             </p>
 
-            <div v-if="q.images && q.images.length > 0" class="pt-2 flex flex-wrap gap-2">
+            <!-- Attached Screenshots (支持点击放大预览、阅读顺序流式进度条与固定宽高比骨架防抖) -->
+            <div v-if="q.images && q.images.length > 0" class="pt-2 flex flex-wrap gap-2 max-w-full overflow-hidden">
               <div
                 v-for="(img, imgIdx) in q.images"
-                :key="imgIdx"
-                class="relative group rounded-sm overflow-hidden border border-border shadow-2xs cursor-pointer hover:opacity-90 transition-opacity shrink-0"
-                @click.stop="previewStore.openImagePreview({
-                  src: getImageUrl(img),
-                  alt: img.name || `暂存附件-${imgIdx + 1}`
-                })"
+                :key="img.hash || imgIdx"
+                class="relative group rounded-xs overflow-hidden border border-border/80 bg-muted/40 shadow-2xs cursor-pointer hover:border-primary/60 transition-all shrink-0 h-24 sm:h-36 max-w-full"
+                :style="getImageStyle(img)"
+                @click.stop="openImagePreviewModal(img, img.name || `暂存附件-${imgIdx + 1}`)"
               >
+                <!-- 骨架占位防抖与实时流式下载进度条 (CLS = 0) -->
+                <div
+                  v-if="!isImageLoaded(getImageKey(img, imgIdx, q.id))"
+                  class="absolute inset-0 flex flex-col items-center justify-center bg-muted/70 select-none p-2 z-5"
+                >
+                  <!-- 正在流式下载中：展示百分比与已传大小 -->
+                  <div
+                    v-if="imageLoader.getTask(getImageUrl(img))?.status === 'loading'"
+                    class="flex flex-col items-center gap-1.5 w-full max-w-[130px]"
+                  >
+                    <div class="flex items-center justify-between w-full text-[10px] font-mono text-muted-foreground font-semibold">
+                      <span class="text-primary flex items-center gap-1">
+                        <Loader2 class="w-3 h-3 animate-spin" />
+                        {{ imageLoader.getTask(getImageUrl(img))?.percent }}%
+                      </span>
+                      <span>{{ formatBytes(imageLoader.getTask(getImageUrl(img))?.receivedBytes || 0) }}</span>
+                    </div>
+                    <div class="w-full h-1.5 rounded-full bg-muted/90 overflow-hidden border border-border/60">
+                      <div
+                        class="h-full bg-primary transition-all duration-150 rounded-full"
+                        :style="{ width: `${imageLoader.getTask(getImageUrl(img))?.percent || 0}%` }"
+                      ></div>
+                    </div>
+                  </div>
+
+                  <!-- 下载失败重试 -->
+                  <div
+                    v-else-if="imageLoader.getTask(getImageUrl(img))?.status === 'error'"
+                    class="flex flex-col items-center gap-1 text-[10px] font-mono text-destructive cursor-pointer hover:underline"
+                    @click.stop="imageLoader.retry(getImageUrl(img))"
+                    title="点击重试下载"
+                  >
+                    <AlertCircle class="w-3.5 h-3.5" />
+                    <span>重试</span>
+                  </div>
+
+                  <!-- 队列排队等待中 -->
+                  <div v-else class="px-2 py-1 rounded-xs border border-muted-foreground/20 flex items-center gap-1 text-muted-foreground/60 animate-pulse">
+                    <span class="text-[9px] font-mono">排队加载</span>
+                  </div>
+                </div>
+
+                <!-- 实际图片：懒加载 + 异步解码 + 就绪平滑淡入 -->
                 <img
-                  :src="getImageUrl(img)"
-                  class="max-h-24 sm:max-h-36 object-cover pointer-events-none block"
+                  :src="imageLoader.getDisplaySrc(getImageUrl(img))"
+                  loading="lazy"
+                  decoding="async"
+                  class="w-full h-full object-cover pointer-events-none block transition-opacity duration-300"
+                  :class="isImageLoaded(getImageKey(img, imgIdx, q.id)) ? 'opacity-100' : 'opacity-0'"
                   :alt="img.name || `queued-attachment-${imgIdx + 1}`"
+                  @load="handleImageLoad(getImageKey(img, imgIdx, q.id))"
                 />
                 <!-- 底部一体化分区标题栏：左侧嵌入编号，右侧嵌入文件名 -->
-                <div class="absolute bottom-0 inset-x-0 bg-black/80 backdrop-blur-xs text-white text-[9px] font-mono flex items-stretch h-4.5 select-none pointer-events-none overflow-hidden">
+                <div class="absolute bottom-0 inset-x-0 bg-black/80 backdrop-blur-xs text-white text-[9px] font-mono flex items-stretch h-4.5 select-none pointer-events-none overflow-hidden z-10">
                   <div class="px-1.5 bg-primary text-primary-foreground font-bold flex items-center justify-center shrink-0 border-r border-white/20">
                     #{{ imgIdx + 1 }}
                   </div>

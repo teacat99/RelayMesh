@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,6 +55,7 @@ func (h *APIHandler) GetCurrentSession(c *gin.Context) {
 		session.MCPTimeoutSec = timeoutSec
 	}
 	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
+	projectSessionImages(session)
 	c.JSON(http.StatusOK, gin.H{"has_session": true, "session": session})
 }
 
@@ -80,6 +83,9 @@ func (h *APIHandler) ListSessions(c *gin.Context) {
 			sessions[i].MCPTimeoutSec = timeoutSec
 		}
 		sessions[i].LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(sessions[i].ID)
+		if !brief {
+			projectSessionImages(&sessions[i])
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"sessions": sessions})
 }
@@ -107,6 +113,7 @@ func (h *APIHandler) GetWorkflowSessions(c *gin.Context) {
 			sessions[i].MCPTimeoutSec = timeoutSec
 		}
 		sessions[i].LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(sessions[i].ID)
+		projectSessionImages(&sessions[i])
 	}
 
 	c.JSON(http.StatusOK, gin.H{"sessions": sessions})
@@ -125,7 +132,111 @@ func (h *APIHandler) GetSession(c *gin.Context) {
 		session.MCPTimeoutSec = timeoutSec
 	}
 	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
+	projectSessionImages(session)
 	c.JSON(http.StatusOK, gin.H{"session": session})
+}
+
+// RateLimitedWriter 实现带上下文感知与平滑分块输出的流式限速器，为核心 SSE 与 API 预留生存带宽
+type RateLimitedWriter struct {
+	w         io.Writer
+	ctx       context.Context
+	limitKBps int
+}
+
+func NewRateLimitedWriter(w io.Writer, ctx context.Context, limitKBps int) *RateLimitedWriter {
+	return &RateLimitedWriter{
+		w:         w,
+		ctx:       ctx,
+		limitKBps: limitKBps,
+	}
+}
+
+func (rw *RateLimitedWriter) Write(p []byte) (int, error) {
+	if rw.limitKBps <= 0 {
+		return rw.w.Write(p)
+	}
+
+	chunkSize := 16 * 1024 // 16KB 分片
+	interval := time.Duration(float64(chunkSize) / float64(rw.limitKBps*1024) * float64(time.Second))
+	n := 0
+
+	for n < len(p) {
+		select {
+		case <-rw.ctx.Done():
+			return n, rw.ctx.Err()
+		default:
+		}
+
+		end := n + chunkSize
+		if end > len(p) {
+			end = len(p)
+		}
+
+		nw, err := rw.w.Write(p[n:end])
+		n += nw
+		if err != nil {
+			return n, err
+		}
+
+		if n < len(p) && interval > 0 {
+			select {
+			case <-rw.ctx.Done():
+				return n, rw.ctx.Err()
+			case <-time.After(interval):
+			}
+		}
+	}
+
+	return n, nil
+}
+
+func (h *APIHandler) getImageRateLimit(ctx context.Context) int {
+	settings, err := h.store.GetSettings(ctx)
+	if err != nil || settings == nil {
+		return 0
+	}
+	valAny, ok := settings["image_rate_limit_kb"]
+	if !ok {
+		valAny, ok = settings["imageRateLimitKB"]
+	}
+	if ok {
+		switch val := valAny.(type) {
+		case float64:
+			return int(val)
+		case int:
+			return val
+		case string:
+			if i, err := strconv.Atoi(val); err == nil {
+				return i
+			}
+		}
+	}
+	return 0
+}
+
+// projectSessionImages 为会话中的图片生成不可变哈希访问 URL 并剥离超大 Base64，大幅降低列表 JSON 体积
+func projectSessionImages(session *model.FeedbackSession) {
+	if session == nil || len(session.Images) == 0 {
+		return
+	}
+	for i := range session.Images {
+		img := &session.Images[i]
+		hash := img.Hash
+		if hash == "" && img.Data != "" {
+			raw := strings.TrimSpace(img.Data)
+			if commaIdx := strings.Index(raw, ","); commaIdx != -1 {
+				raw = raw[commaIdx+1:]
+			}
+			sum := sha256.Sum256([]byte(raw))
+			hash = hex.EncodeToString(sum[:8])
+			img.Hash = hash
+		}
+		if img.URL == "" {
+			img.URL = model.BuildSessionImageRelativeURL(session.ID, i, hash)
+		}
+		// 剥离 Base64 字符串，避免前端多轮历史接口传输几十兆 JSON
+		img.Data = ""
+	}
 }
 
 func (h *APIHandler) GetSessionImage(c *gin.Context) {
@@ -154,6 +265,25 @@ func (h *APIHandler) GetSessionImage(c *gin.Context) {
 		raw = raw[commaIdx+1:]
 	}
 
+	if raw == "" {
+		// 如果内存中或极端情况下已被置空，重新从数据库直接读取该行原始记录以保证绝对可用
+		var rawSession model.FeedbackSession
+		if err := h.store.DB().WithContext(c.Request.Context()).Where("id = ?", id).First(&rawSession).Error; err == nil {
+			if idx < len(rawSession.Images) {
+				img = rawSession.Images[idx]
+				raw = strings.TrimSpace(img.Data)
+				if commaIdx := strings.Index(raw, ","); commaIdx != -1 {
+					raw = raw[commaIdx+1:]
+				}
+			}
+		}
+	}
+
+	if raw == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "image data not available"})
+		return
+	}
+
 	decoded, err := base64.StdEncoding.DecodeString(raw)
 	if err != nil {
 		decoded, err = base64.RawStdEncoding.DecodeString(raw)
@@ -176,9 +306,32 @@ func (h *APIHandler) GetSessionImage(c *gin.Context) {
 		contentType = "image/svg+xml"
 	}
 
+	// 1. 计算不可变哈希并处理 ETag 快速协商
+	hash := img.Hash
+	if hash == "" {
+		sum := sha256.Sum256(decoded)
+		hash = hex.EncodeToString(sum[:8])
+	}
+	eTag := fmt.Sprintf("%q", hash)
+	c.Header("ETag", eTag)
+	if match := c.GetHeader("If-None-Match"); match == eTag {
+		c.Status(http.StatusNotModified)
+		return
+	}
+
+	// 2. 注入标准不可变强缓存头，浏览器后续 100% 走磁盘缓存 (from disk cache)
 	c.Header("Content-Type", contentType)
-	c.Header("Cache-Control", "public, max-age=86400")
-	c.Data(http.StatusOK, contentType, decoded)
+	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	c.Header("Content-Length", strconv.Itoa(len(decoded)))
+
+	// 3. 检查流式限速 (默认 0 不限速，支持 128/256/512 等档位)
+	limitKB := h.getImageRateLimit(c.Request.Context())
+	if limitKB > 0 {
+		writer := NewRateLimitedWriter(c.Writer, c.Request.Context(), limitKB)
+		_, _ = writer.Write(decoded)
+	} else {
+		c.Data(http.StatusOK, contentType, decoded)
+	}
 }
 
 type SubmitFeedbackRequest struct {
@@ -195,6 +348,18 @@ func (h *APIHandler) SubmitFeedback(c *gin.Context) {
 		return
 	}
 
+	for i := range req.Images {
+		img := &req.Images[i]
+		if img.Hash == "" && img.Data != "" {
+			raw := strings.TrimSpace(img.Data)
+			if commaIdx := strings.Index(raw, ","); commaIdx != -1 {
+				raw = raw[commaIdx+1:]
+			}
+			sum := sha256.Sum256([]byte(raw))
+			img.Hash = hex.EncodeToString(sum[:8])
+		}
+	}
+
 	session, err := h.store.SubmitFeedback(c.Request.Context(), store.SubmitFeedbackInput{
 		SessionID:    id,
 		ResponseText: req.ResponseText,
@@ -208,9 +373,13 @@ func (h *APIHandler) SubmitFeedback(c *gin.Context) {
 
 	// Wake up MCP waiter & broadcast SSE
 	h.mcpServer.NotifySessionCompleted(session)
-	h.broker.Broadcast("session_completed", session)
+	broadcastSess := *session
+	broadcastSess.Images = make(model.SessionImages, len(session.Images))
+	copy(broadcastSess.Images, session.Images)
+	projectSessionImages(&broadcastSess)
+	h.broker.Broadcast("session_completed", &broadcastSess)
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": &broadcastSess})
 }
 
 func (h *APIHandler) RevokeSession(c *gin.Context) {
@@ -239,6 +408,18 @@ func (h *APIHandler) AppendWorkflowFeedback(c *gin.Context) {
 		return
 	}
 
+	for i := range req.Images {
+		img := &req.Images[i]
+		if img.Hash == "" && img.Data != "" {
+			raw := strings.TrimSpace(img.Data)
+			if commaIdx := strings.Index(raw, ","); commaIdx != -1 {
+				raw = raw[commaIdx+1:]
+			}
+			sum := sha256.Sum256([]byte(raw))
+			img.Hash = hex.EncodeToString(sum[:8])
+		}
+	}
+
 	// 1. 优先检查该 workflow 是否有处于 pending 或 未被 AI 消费的 completed 会话
 	latestSess, err := h.store.GetLatestWorkflowFeedbackSession(c.Request.Context(), workflowID)
 	if err == nil && latestSess != nil && (latestSess.Status == "pending" || (latestSess.Status == "completed" && !latestSess.ConsumedByAI)) {
@@ -253,8 +434,12 @@ func (h *APIHandler) AppendWorkflowFeedback(c *gin.Context) {
 			return
 		}
 		h.mcpServer.NotifySessionCompleted(sess)
-		h.broker.Broadcast("session_completed", sess)
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "type": "session", "session": sess})
+		broadcastSess := *sess
+		broadcastSess.Images = make(model.SessionImages, len(sess.Images))
+		copy(broadcastSess.Images, sess.Images)
+		projectSessionImages(&broadcastSess)
+		h.broker.Broadcast("session_completed", &broadcastSess)
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "type": "session", "session": &broadcastSess})
 		return
 	}
 
@@ -345,6 +530,37 @@ func (h *APIHandler) DeleteWorkflowDraft(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (h *APIHandler) DeleteSession(c *gin.Context) {
+	id := c.Param("id")
+	session, err := h.store.DeleteFeedbackSession(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	h.mcpServer.NotifySessionCompleted(session)
+	h.broker.Broadcast("session_deleted", map[string]any{
+		"session_id":  id,
+		"workflow_id": session.WorkflowID,
+	})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "deleted_session_id": id})
+}
+
+func (h *APIHandler) RestoreSession(c *gin.Context) {
+	var session model.FeedbackSession
+	if err := c.ShouldBindJSON(&session); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	restored, err := h.store.RestoreFeedbackSession(c.Request.Context(), &session)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	h.broker.Broadcast("session_updated", restored)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": restored})
 }
 
 func (h *APIHandler) CancelSession(c *gin.Context) {

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -49,19 +50,66 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 	now := time.Now()
 	deadline := now.Add(time.Duration(timeoutSec) * time.Second)
 
-	// 严守设计规范：任何 Session 必须且只能隶属于唯一的 Workflow。
-	// 若调用方未显式提供 workflow_id，系统自动根据当前日期与短 ID 派生标准工作流标识（例：wf-20260904-e61b8709），
-	// 并在回执与后续交互中回传，保证工作流聚合、阶段流转、状态继承等机制 100% 闭环。
+	// 严守设计规范（D-139 / D-153）：任何 Session 必须且只能隶属于唯一的 Workflow。
+	// 若调用方未显式提供 workflow_id，实施同项目目录/同凭据自愈继承机制，彻底避免因上下文压缩遗漏参数而乱建临时分支：
 	workflowID := strings.TrimSpace(input.WorkflowID)
 	if workflowID == "" {
-		cleanSessID := strings.TrimPrefix(sessionID, "sess-")
-		workflowID = fmt.Sprintf("wf-%s-%s", now.Format("20060102"), cleanSessID)
+		// 1. 优先基于项目目录寻找该项目最近活跃或未归档的既有工作流
+		projDir := strings.TrimSpace(input.ProjectDirectory)
+		if projDir != "" {
+			var recentSess model.FeedbackSession
+			err := s.db.WithContext(ctx).
+				Where("project_directory = ? AND workflow_id != '' AND status != 'archived'", projDir).
+				Order("updated_at desc, id desc").
+				First(&recentSess).Error
+			if err != nil && projDir != "." {
+				if absDir, aErr := filepath.Abs(projDir); aErr == nil && absDir != projDir {
+					_ = s.db.WithContext(ctx).
+						Where("project_directory = ? AND workflow_id != '' AND status != 'archived'", absDir).
+						Order("updated_at desc, id desc").
+						First(&recentSess).Error
+				}
+			}
+			if recentSess.WorkflowID != "" {
+				workflowID = recentSess.WorkflowID
+			}
+		}
+
+		// 2. 二级自愈：若同项目未匹配到但有凭据 Token 绑定，在同凭据下查找最近未归档工作流
+		if workflowID == "" && input.CredentialID > 0 {
+			var recentSess model.FeedbackSession
+			if err := s.db.WithContext(ctx).
+				Where("credential_id = ? AND workflow_id != '' AND status != 'archived'", input.CredentialID).
+				Order("updated_at desc, id desc").
+				First(&recentSess).Error; err == nil && recentSess.WorkflowID != "" {
+				workflowID = recentSess.WorkflowID
+			}
+		}
+
+		// 3. 兜底保护：若全无历史工作流（全新项目开天辟地第一轮），方才派生标准工作流标识（例：wf-20260908-e61b8709）
+		if workflowID == "" {
+			cleanSessID := strings.TrimPrefix(sessionID, "sess-")
+			workflowID = fmt.Sprintf("wf-%s-%s", now.Format("20060102"), cleanSessID)
+		}
 	}
 	input.WorkflowID = workflowID
 
 	var session model.FeedbackSession
 
 	err := s.WithTx(ctx, func(tx *gorm.DB) error {
+		// D-161: 工作流项目所有权强绑定校验
+		// 若该 workflow_id 已存在历史会话，比对绑定的项目路径，严禁跨项目交叉写入或覆写
+		if input.WorkflowID != "" {
+			var existingWfSess model.FeedbackSession
+			if err := tx.Where("workflow_id = ?", input.WorkflowID).Order("id asc").First(&existingWfSess).Error; err == nil {
+				origDir := filepath.Clean(strings.TrimSpace(existingWfSess.ProjectDirectory))
+				currDir := filepath.Clean(strings.TrimSpace(input.ProjectDirectory))
+				if origDir != "" && currDir != "" && origDir != "." && currDir != "." && origDir != currDir {
+					return NewConflictError(fmt.Sprintf("Workflow ID %q 已被项目 %q 占用，当前项目 %q 无法交叉写入！请分配独立的 workflow_id 或留空由系统自动派生。", input.WorkflowID, origDir, currDir), 0)
+				}
+			}
+		}
+
 		// 如果该工作流已存在用户自定义固定的标题，优先锁定使用用户自定义标题
 		effectiveTitle := input.Title
 		if input.WorkflowID != "" {
@@ -72,9 +120,17 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 		}
 
 		// If workflow_id provided, check if there is an existing pending session for this workflow
+		// D-159: 强制 ORDER BY created_at DESC 杜绝正序查出陈旧残留记录
 		if input.WorkflowID != "" {
 			var existing model.FeedbackSession
-			if err := tx.Where("workflow_id = ? AND status = 'pending'", input.WorkflowID).First(&existing).Error; err == nil {
+			if err := tx.Where("workflow_id = ? AND status = 'pending'", input.WorkflowID).Order("created_at desc, id desc").First(&existing).Error; err == nil {
+				// D-161: 仅在项目目录一致时才允许覆写已有 pending
+				origDir := filepath.Clean(strings.TrimSpace(existing.ProjectDirectory))
+				currDir := filepath.Clean(strings.TrimSpace(input.ProjectDirectory))
+				if origDir != "" && currDir != "" && origDir != "." && currDir != "." && origDir != currDir {
+					return NewConflictError(fmt.Sprintf("无法覆写 pending 会话：Workflow ID %q 属于项目 %q，当前项目 %q 无权覆写", input.WorkflowID, origDir, currDir), 0)
+				}
+
 				existing.Summary = input.Summary
 				if effectiveTitle != "" {
 					existing.Title = effectiveTitle
@@ -89,6 +145,15 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 					return err
 				}
 				session = existing
+
+				// D-159: 自动将该工作流下所有历史完成未消费轮次打标为已读
+				_ = tx.Model(&model.FeedbackSession{}).
+					Where("workflow_id = ? AND status = 'completed' AND consumed_by_ai = false", input.WorkflowID).
+					Updates(map[string]any{
+						"consumed_by_ai": true,
+						"consumed_at":    now,
+					}).Error
+
 				return nil
 			}
 		}
@@ -219,7 +284,21 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 			UpdatedAt:            now,
 		}
 
-		return tx.Create(&session).Error
+		if err := tx.Create(&session).Error; err != nil {
+			return err
+		}
+
+		// D-159: AI 发起新轮次交互，自动将本工作流所有历史已完成但未消费的轮次批量打标为已消费
+		if input.WorkflowID != "" {
+			_ = tx.Model(&model.FeedbackSession{}).
+				Where("workflow_id = ? AND id != ? AND status = 'completed' AND consumed_by_ai = false", input.WorkflowID, session.ID).
+				Updates(map[string]any{
+					"consumed_by_ai": true,
+					"consumed_at":    now,
+				}).Error
+		}
+
+		return nil
 	})
 
 	if err != nil {
@@ -361,6 +440,16 @@ func (s *Store) RevokeSessionFeedback(ctx context.Context, sessionID string) (*R
 
 		if session.Status != "completed" || session.ConsumedByAI {
 			return NewConflictError(fmt.Sprintf("session %q cannot be revoked (status: %s, consumed: %v)", sessionID, session.Status, session.ConsumedByAI), 0)
+		}
+
+		// D-159: 仅允许撤回本工作流最新轮次，历史轮次已终态冻结，严禁撤回复活
+		if session.WorkflowID != "" {
+			var latestSess model.FeedbackSession
+			if err := tx.Where("workflow_id = ?", session.WorkflowID).Order("created_at DESC, rowid DESC").First(&latestSess).Error; err == nil {
+				if latestSess.ID != session.ID {
+					return NewConflictError(fmt.Sprintf("session %q 不是当前工作流最新轮次，已终态冻结不可撤回", sessionID), 0)
+				}
+			}
 		}
 
 		res = RevokedFeedbackResult{
@@ -664,6 +753,16 @@ func (s *Store) KeepaliveFeedbackSession(ctx context.Context, sessionID string, 
 
 		if session.Status != "pending" {
 			return NewConflictError(fmt.Sprintf("session %q is already %s", sessionID, session.Status), 0)
+		}
+
+		// D-159: 仅允许最新轮次 keepalive，历史轮次已终态冻结，严禁复活或保活
+		if session.WorkflowID != "" {
+			var latestSess model.FeedbackSession
+			if err := tx.Where("workflow_id = ?", session.WorkflowID).Order("created_at DESC, rowid DESC").First(&latestSess).Error; err == nil {
+				if latestSess.ID != session.ID {
+					return NewConflictError(fmt.Sprintf("session %q 是历史轮次，已终态冻结，严禁复活或保活", sessionID), 0)
+				}
+			}
 		}
 
 		if extendSec <= 0 {
@@ -1021,4 +1120,73 @@ func (s *Store) UnarchiveFeedbackSession(ctx context.Context, idOrWorkflow strin
 		return nil, err
 	}
 	return &session, nil
+}
+
+// DeleteFeedbackSession 物理删除会话记录，维护工作流状态并级联清理（D-159）
+func (s *Store) DeleteFeedbackSession(ctx context.Context, sessionID string) (*model.FeedbackSession, error) {
+	var session model.FeedbackSession
+	err := s.WithTx(ctx, func(tx *gorm.DB) error {
+		if err := tx.Where("id = ?", sessionID).First(&session).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return NewNotFoundError(fmt.Sprintf("session %q not found", sessionID))
+			}
+			return err
+		}
+
+		if err := tx.Delete(&session).Error; err != nil {
+			return err
+		}
+
+		// 检查该工作流下是否还有剩余会话
+		if session.WorkflowID != "" {
+			var remainingCount int64
+			_ = tx.Model(&model.FeedbackSession{}).Where("workflow_id = ?", session.WorkflowID).Count(&remainingCount).Error
+			if remainingCount == 0 {
+				// 若已全部清空，清理该工作流的元数据
+				_ = tx.Where("key = ?", "wf_custom_title:"+session.WorkflowID).Delete(&model.SystemSetting{}).Error
+				_ = tx.Where("workflow_id = ?", session.WorkflowID).Delete(&model.WorkflowPhaseState{}).Error
+				_ = tx.Where("workflow_id = ?", session.WorkflowID).Delete(&model.WorkflowCheckpoint{}).Error
+				_ = tx.Where("workflow_id = ?", session.WorkflowID).Delete(&model.WorkflowNote{}).Error
+				_ = tx.Where("workflow_id = ?", session.WorkflowID).Delete(&model.WorkflowDraft{}).Error
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return &session, nil
+}
+
+// MarkWorkflowHistorySessionsConsumed 自动将某工作流下所有已完成但未被消费的历史轮次批量打标为已消费（D-159）
+func (s *Store) MarkWorkflowHistorySessionsConsumed(ctx context.Context, workflowID string) error {
+	workflowID = strings.TrimSpace(workflowID)
+	if workflowID == "" {
+		return nil
+	}
+	now := time.Now()
+	return s.WithTx(ctx, func(tx *gorm.DB) error {
+		return tx.Model(&model.FeedbackSession{}).
+			Where("workflow_id = ? AND status = 'completed' AND consumed_by_ai = false", workflowID).
+			Updates(map[string]any{
+				"consumed_by_ai": true,
+				"consumed_at":    now,
+			}).Error
+	})
+}
+
+// RestoreFeedbackSession 复原被删除的会话（支持撤销删除）
+func (s *Store) RestoreFeedbackSession(ctx context.Context, session *model.FeedbackSession) (*model.FeedbackSession, error) {
+	if session == nil || session.ID == "" {
+		return nil, NewInvalidInputError("invalid session data to restore")
+	}
+	err := s.WithTx(ctx, func(tx *gorm.DB) error {
+		return tx.Save(session).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
 }

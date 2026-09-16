@@ -32,10 +32,10 @@ const resolvedTheme = computed<ToasterProps['theme']>(() =>
         actionButton: '!static !shrink-0 !bg-transparent hover:!bg-muted !border-0 !border-l !border-border/60 !text-muted-foreground hover:!text-foreground !rounded-none !w-7 !h-full !flex !items-center !justify-center !cursor-pointer !p-0 !text-xs !font-medium',
         cancelButton: '!static !shrink-0 !bg-transparent hover:!bg-muted !border-0 !border-l !border-border/60 !text-muted-foreground hover:!text-foreground !rounded-none !w-7 !h-full !flex !items-center !justify-center !cursor-pointer !p-0 !text-xs !font-medium',
         closeButton: '!static !shrink-0 !ml-auto !order-last !bg-transparent hover:!bg-muted !border-0 !border-l !border-border/60 !text-muted-foreground/60 hover:!text-foreground !rounded-none !rounded-r-sm !w-7 !h-full !flex !items-center !justify-center !cursor-pointer !transform-none !top-auto !right-auto !left-auto !opacity-100 !visible',
-        success: '!border-emerald-500/30 [&_[data-icon]]:!text-emerald-500',
-        error: '!border-destructive/30 [&_[data-icon]]:!text-destructive',
-        warning: '!border-amber-500/30 [&_[data-icon]]:!text-amber-500',
-        info: '!border-primary/30 [&_[data-icon]]:!text-primary',
+        success: '!border-emerald-500/30 [&_[data-icon]]:!text-emerald-500 [&_[data-button]]:!text-emerald-500 hover:[&_[data-button]]:!text-emerald-400',
+        error: '!border-destructive/30 [&_[data-icon]]:!text-destructive [&_[data-button]]:!text-destructive hover:[&_[data-button]]:!text-destructive/80',
+        warning: '!border-amber-500/30 [&_[data-icon]]:!text-amber-500 [&_[data-button]]:!text-amber-500 hover:[&_[data-button]]:!text-amber-400',
+        info: '!border-primary/30 [&_[data-icon]]:!text-primary [&_[data-button]]:!text-primary hover:[&_[data-button]]:!text-primary/80',
       }
     }"
   />

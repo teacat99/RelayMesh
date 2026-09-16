@@ -58,8 +58,11 @@ func (s *Server) handleWorkflowContext(ctx context.Context, raw json.RawMessage)
 		}
 		args.NoteKey = "session_doc"
 		res, err := s.handleNoteSave(ctx, args)
-		if err == nil && s.onUpdate != nil {
-			s.onUpdate("workflow_sheet_updated", map[string]any{"workflow_id": args.WorkflowID})
+		if err == nil {
+			_ = s.store.MarkWorkflowHistorySessionsConsumed(ctx, args.WorkflowID)
+			if s.onUpdate != nil {
+				s.onUpdate("workflow_sheet_updated", map[string]any{"workflow_id": args.WorkflowID})
+			}
 		}
 		return res, err
 	case "session_doc_get":
@@ -101,6 +104,8 @@ func (s *Server) handleCheckpointSave(ctx context.Context, args workflowContextA
 	if err := s.store.SaveCheckpoint(ctx, cp); err != nil {
 		return nil, fmt.Errorf("failed to save checkpoint: %w", err)
 	}
+
+	_ = s.store.MarkWorkflowHistorySessionsConsumed(ctx, args.WorkflowID)
 
 	if err := s.store.SupersedeOldCheckpoints(ctx, args.WorkflowID, cp.Revision); err != nil {
 		// non-fatal
@@ -347,6 +352,8 @@ func (s *Server) handleSetPhase(ctx context.Context, args workflowContextArgs) (
 	if err := s.store.SetWorkflowPhase(ctx, args.WorkflowID, args.PhaseID, false); err != nil {
 		return nil, fmt.Errorf("failed to set phase: %w", err)
 	}
+
+	_ = s.store.MarkWorkflowHistorySessionsConsumed(ctx, args.WorkflowID)
 
 	if s.onUpdate != nil {
 		s.onUpdate("phase_changed", map[string]string{

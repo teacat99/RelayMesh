@@ -250,6 +250,55 @@ export const useSessionStore = defineStore('session', () => {
     return res.session
   }
 
+  async function deleteSession(sessionId: string) {
+    const res = await sessionsApi.delete(sessionId)
+    // 1. 从 workflowSessionsCache 中清理
+    for (const wId of Object.keys(workflowSessionsCache.value)) {
+      const rounds = workflowSessionsCache.value[wId]
+      const idx = rounds.findIndex(r => r.session_id === sessionId)
+      if (idx !== -1) {
+        rounds.splice(idx, 1)
+        if (rounds.length === 0) {
+          delete workflowSessionsCache.value[wId]
+        }
+      }
+    }
+    // 2. 从 currentWorkflowSessions 中清理
+    const curIdx = currentWorkflowSessions.value.findIndex(r => r.session_id === sessionId)
+    if (curIdx !== -1) {
+      currentWorkflowSessions.value.splice(curIdx, 1)
+    }
+
+    // 3. 如果删除的是当前选中的会话，切换至剩余最新轮次
+    if (selectedSession.value?.session_id === sessionId) {
+      if (currentWorkflowSessions.value.length > 0) {
+        selectedSession.value = currentWorkflowSessions.value[currentWorkflowSessions.value.length - 1]
+      } else {
+        selectedSession.value = null
+      }
+    }
+    if (currentSession.value?.session_id === sessionId) {
+      currentSession.value = null
+    }
+
+    await fetchSessions()
+    return res
+  }
+
+  async function restoreSession(session: FeedbackSession) {
+    const res = await sessionsApi.restore(session)
+    const wId = session.workflow_id
+    if (wId && workflowSessionsCache.value[wId]) {
+      delete workflowSessionsCache.value[wId]
+    }
+    if (wId) {
+      await loadWorkflowSessions(wId, true)
+    }
+    selectedSession.value = res.session
+    await fetchSessions()
+    return res.session
+  }
+
   async function renameSession(sessionId: string, title: string) {
     const res = await sessionsApi.rename(sessionId, title)
     const targetWId = res.session?.workflow_id || sessionId
@@ -570,6 +619,10 @@ export const useSessionStore = defineStore('session', () => {
       if (payload) applySessionPayload(payload)
       debouncedRefresh()
     })
+    eventSource.addEventListener('session_deleted', () => {
+      kickWatchdog()
+      debouncedRefresh()
+    })
     eventSource.addEventListener('queued_feedback_updated', () => {
       kickWatchdog()
       fetchQueuedFeedbacks()
@@ -695,6 +748,8 @@ export const useSessionStore = defineStore('session', () => {
     appendWorkflowFeedback,
     revokeQueuedFeedback,
     cancelSession,
+    deleteSession,
+    restoreSession,
     keepalive,
     archiveSession,
     unarchiveSession,

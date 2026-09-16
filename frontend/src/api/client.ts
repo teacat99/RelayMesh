@@ -26,7 +26,14 @@ export function registerUnauthorizedHandler(handler: () => void) {
 }
 
 api.interceptors.response.use(
-  response => response,
+  response => {
+    // D-160: 方案 A 响应头静默滑动续期 (Sliding Expiration)
+    const renewedToken = response.headers?.['x-renewed-token']
+    if (renewedToken) {
+      setAuthToken(renewedToken)
+    }
+    return response
+  },
   error => {
     if (error.response && error.response.status === 401) {
       if (onUnauthorizedCallback) {
@@ -71,6 +78,16 @@ export const sessionsApi = {
 
   async cancel(id: string): Promise<{ status: string; session: FeedbackSession }> {
     const res = await api.post(`/sessions/${encodeURIComponent(id)}/cancel`)
+    return res.data
+  },
+
+  async delete(id: string): Promise<{ status: string; deleted_session_id: string }> {
+    const res = await api.delete(`/sessions/${encodeURIComponent(id)}`)
+    return res.data
+  },
+
+  async restore(session: FeedbackSession): Promise<{ status: string; session: FeedbackSession }> {
+    const res = await api.post('/sessions/restore', session)
     return res.data
   },
 

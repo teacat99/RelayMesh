@@ -39,7 +39,7 @@ import type { SessionImage } from '../../api/types'
 import { draftsApi } from '../../api/client'
 import { VoiceRecorderStreamer } from '../../utils/voiceStream'
 import { usePreviewStore } from '../../stores/preview'
-import { toast } from 'vue-sonner'
+import { toast, toastDestructive } from '@/components/ui/sonner'
 
 const props = withDefaults(defineProps<{
   isScrolledUp?: boolean
@@ -108,7 +108,7 @@ const currentWorkflowId = computed(() => {
 const DOCK_HEIGHT_STORAGE_KEY = 'relaymesh_input_dock_height'
 const DEFAULT_INPUT_HEIGHT = 160
 const MIN_INPUT_HEIGHT = 100
-const MAX_INPUT_HEIGHT = 500
+const MAX_INPUT_HEIGHT = 1000
 const inputDockHeight = ref(DEFAULT_INPUT_HEIGHT)
 const isDraggingResize = ref(false)
 let dragStartY = 0
@@ -117,11 +117,13 @@ let lastEmittedHeight = DEFAULT_INPUT_HEIGHT
 
 function getMaxAllowedDockHeight(): number {
   if (typeof window === 'undefined') return MAX_INPUT_HEIGHT
-  // 在移动端或小视口屏幕（高度小于 650px），输入栏最大高度严禁超出视口的 45%
+  // 在移动端或小视口屏幕（高度小于 650px），输入栏最大高度限制为视口的 80%，避免完全遮蔽对话视口
   if (window.innerHeight < 650) {
-    return Math.max(MIN_INPUT_HEIGHT, Math.floor(window.innerHeight * 0.45))
+    return Math.max(MIN_INPUT_HEIGHT, Math.floor(window.innerHeight * 0.8))
   }
-  return MAX_INPUT_HEIGHT
+  // 在普通屏幕上，最高不超过视口减去顶部 Header (60px) 和最小消息阅读区 (100px)，同时上限为 MAX_INPUT_HEIGHT (1000px)
+  const dynamicMax = Math.max(MIN_INPUT_HEIGHT, window.innerHeight - 160)
+  return Math.min(MAX_INPUT_HEIGHT, dynamicMax)
 }
 
 function loadSavedDockHeight() {
@@ -253,6 +255,28 @@ function triggerDbSave(wId: string) {
   }, 400)
 }
 
+function getSanitizedDraftsForStorage(): MultiDraftState {
+  return {
+    activeIndex: multiDrafts.value.activeIndex,
+    drafts: multiDrafts.value.drafts.map(slot => ({
+      id: slot.id,
+      text: slot.text,
+      presets: slot.presets,
+      images: (slot.images || []).map(img => ({
+        name: img.name,
+        format: img.format,
+        data_type: img.data_type,
+        hash: img.hash,
+        width: img.width,
+        height: img.height,
+        // 小于 100KB 的局部小截图允许落盘，大图不落盘 LocalStorage（杜绝 5MB 溢出与序列化卡顿，大图在当前生命周期内存常驻）
+        data: (img.data && img.data.length < 100 * 1024) ? img.data : ''
+      })),
+      updated_at: slot.updated_at
+    }))
+  }
+}
+
 function saveDrafts() {
   if (isResetting) return
   const wId = currentBindingWorkflowId.value
@@ -266,7 +290,7 @@ function saveDrafts() {
   }
 
   try {
-    localStorage.setItem(wKey, JSON.stringify(multiDrafts.value))
+    localStorage.setItem(wKey, JSON.stringify(getSanitizedDraftsForStorage()))
     // 彻底清除旧版本遗留的全局污染草稿键
     localStorage.removeItem('relaymesh_active_draft_content')
     localStorage.removeItem('relaymesh_draft_global')
@@ -469,13 +493,7 @@ function deleteCurrentDraft() {
     selectedPresets.value = target.presets || []
     images.value = target.images || []
     saveDrafts()
-    toast.info('已删除该草稿', {
-      duration: 7000,
-      action: {
-        label: '↺',
-        onClick: () => restoreDraftSnapshot()
-      }
-    })
+    toastDestructive('已删除该草稿', () => restoreDraftSnapshot())
   } else {
     responseText.value = ''
     selectedPresets.value = []
@@ -488,13 +506,7 @@ function deleteCurrentDraft() {
       updated_at: Date.now()
     }
     saveDrafts()
-    toast.info('已清空当前草稿', {
-      duration: 7000,
-      action: {
-        label: '↺',
-        onClick: () => restoreDraftSnapshot()
-      }
-    })
+    toastDestructive('已清空当前草稿', () => restoreDraftSnapshot())
   }
   draftsApi.save(wId, multiDrafts.value.activeIndex, JSON.stringify(multiDrafts.value)).catch(() => {})
 }
@@ -537,13 +549,17 @@ function resetForm(targetWorkflowId?: string) {
   }, 100)
 }
 
-function getImageUrl(img: { data?: string; format?: string } | null | undefined): string {
-  if (!img || !img.data) return ''
-  if (img.data.startsWith('data:') || img.data.startsWith('http://') || img.data.startsWith('https://')) {
-    return img.data
+function getImageUrl(img: SessionImage | null | undefined): string {
+  if (!img) return ''
+  if (img.url) return img.url
+  if (img.data) {
+    if (img.data.startsWith('data:') || img.data.startsWith('http://') || img.data.startsWith('https://')) {
+      return img.data
+    }
+    const format = img.format || 'png'
+    return `data:image/${format};base64,${img.data}`
   }
-  const format = img.format || 'png'
-  return `data:image/${format};base64,${img.data}`
+  return ''
 }
 
 function loadSpecificContent(data: { text: string; presets?: string[]; images?: SessionImage[] }) {
@@ -582,9 +598,15 @@ function loadSpecificContent(data: { text: string; presets?: string[]; images?: 
   saveDrafts()
 }
 
-watch([responseText, selectedPresets, images], () => {
+// 打字高频触发：仅保存纯文本与预设草稿，避免任何深度遍历
+watch([responseText, selectedPresets], () => {
   saveDrafts()
-}, { deep: true })
+})
+
+// 图片增删与调序独立监听（非高频打字，且不开启 deep 深度监听，杜绝遍历几兆字符）
+watch(images, () => {
+  saveDrafts()
+}, { deep: false })
 
 // 仅当用户切换到不同的 workflow_id 时才做草稿切换；以 currentBindingWorkflowId 为唯一真源
 watch(currentBindingWorkflowId, (newWId, oldWId) => {
@@ -715,27 +737,61 @@ function removeImage(index: number) {
   saveDrafts()
 }
 
+async function computeImageHash(base64Data: string): Promise<string> {
+  try {
+    const raw = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data
+    const binary = atob(raw.slice(0, Math.min(raw.length, 65536)))
+    const buffer = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) {
+      buffer[i] = binary.charCodeAt(i)
+    }
+    const digest = await crypto.subtle.digest('SHA-256', buffer)
+    const hashArray = Array.from(new Uint8Array(digest))
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16)
+  } catch {
+    return Math.random().toString(36).slice(2, 18)
+  }
+}
+
+function processAndAppendImage(file: File | Blob, defaultName: string) {
+  const reader = new FileReader()
+  reader.onload = (evt) => {
+    const res = evt.target?.result as string
+    if (!res) return
+    const base64Data = res.split(',')[1] || res
+    let format = (file.type && file.type.split('/')[1]) || 'png'
+    if (format === 'jpeg') format = 'jpg'
+
+    // 严禁缩放分辨率：100% 保持 1:1 几何原生像素不变
+    const tempImg = new Image()
+    tempImg.onload = async () => {
+      const width = tempImg.naturalWidth || tempImg.width || 0
+      const height = tempImg.naturalHeight || tempImg.height || 0
+      const hash = await computeImageHash(base64Data)
+
+      images.value.push({
+        name: defaultName,
+        format: format,
+        data: base64Data,
+        data_type: 'base64',
+        hash: hash,
+        width: width,
+        height: height
+      })
+      saveDrafts()
+    }
+    tempImg.src = res
+  }
+  reader.readAsDataURL(file)
+}
+
 function handleFileSelect(e: Event) {
   const target = e.target as HTMLInputElement
   if (!target.files || target.files.length === 0) return
 
   for (let i = 0; i < target.files.length; i++) {
     const file = target.files[i]
-    const reader = new FileReader()
-    reader.onload = (evt) => {
-      const res = evt.target?.result as string
-      if (res) {
-        const base64Data = res.split(',')[1] || res
-        const format = file.type.split('/')[1] || 'png'
-        images.value.push({
-          name: file.name,
-          format: format,
-          data: base64Data,
-          data_type: 'base64'
-        })
-      }
-    }
-    reader.readAsDataURL(file)
+    processAndAppendImage(file, file.name)
   }
   target.value = ''
 }
@@ -747,20 +803,7 @@ function handlePaste(e: ClipboardEvent) {
     if (item.type.startsWith('image/')) {
       const file = item.getAsFile()
       if (file) {
-        const reader = new FileReader()
-        reader.onload = (evt) => {
-          const res = evt.target?.result as string
-          if (res) {
-            const base64Data = res.split(',')[1] || res
-            images.value.push({
-              name: `paste-${Date.now()}.png`,
-              format: 'png',
-              data: base64Data,
-              data_type: 'base64'
-            })
-          }
-        }
-        reader.readAsDataURL(file)
+        processAndAppendImage(file, `paste-${Date.now()}.png`)
       }
     }
   }
@@ -1099,16 +1142,16 @@ onUnmounted(() => {
       paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))'
     }"
   >
-    <!-- Top Border Drag Handle Bar (全面适配 Pointer Events 触控/鼠标统一，24px 触控热区 + 4px 居中指示条，双击重置) -->
+    <!-- Top Border Drag Handle Bar (仅在居中手柄区域响应拖拽与 hover，24px 触控热区 + 4px 居中指示条，双击重置) -->
     <div
-      class="absolute top-0 left-0 right-0 h-6 -translate-y-1/2 cursor-row-resize flex items-center justify-center z-50 transition-colors group/drag touch-none select-none"
-      title="按住拖拽调节输入框高度，双击重置默认高度"
-      @pointerdown="startResizeDrag"
-      @dblclick="resetInputHeight"
+      class="absolute top-0 left-0 right-0 h-6 -translate-y-1/2 flex items-center justify-center z-50 pointer-events-none select-none"
     >
       <div
-        class="w-full h-full flex items-center justify-center transition-all"
+        class="h-full px-6 flex items-center justify-center cursor-row-resize pointer-events-auto touch-none transition-all rounded-full group/drag"
         :class="isDraggingResize ? 'bg-primary/20' : 'hover:bg-primary/10'"
+        title="按住拖拽调节输入框高度，双击重置默认高度"
+        @pointerdown="startResizeDrag"
+        @dblclick="resetInputHeight"
       >
         <div
           class="w-10 h-1 rounded-full transition-all duration-150"

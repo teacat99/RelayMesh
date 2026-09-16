@@ -299,16 +299,26 @@ func (a *AuthHandler) ClearAllBlockedIPs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "all blocked ips cleared"})
 }
 
+// VerifyJWTToken 校验 JWT 并返回 claims
+func (a *AuthHandler) VerifyJWTToken(tokenString string) (*jwt.MapClaims, bool) {
+	token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+		return []byte(a.cfg.JWTSecret), nil
+	})
+	if err == nil && token.Valid {
+		if claims, ok := token.Claims.(jwt.MapClaims); ok {
+			return &claims, true
+		}
+	}
+	return nil, false
+}
+
 func (a *AuthHandler) VerifyToken(tokenString string) bool {
 	tokenString = strings.TrimSpace(tokenString)
 	if tokenString == "" {
 		return false
 	}
 	// 1. JWT Token (Web 管理登录凭据)
-	token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-		return []byte(a.cfg.JWTSecret), nil
-	})
-	if err == nil && token.Valid {
+	if _, ok := a.VerifyJWTToken(tokenString); ok {
 		return true
 	}
 	// 2. MCP Token 鉴权 (允许 Agent 持有有效 MCP Token 访问图片下载等资源)
@@ -341,6 +351,38 @@ func (a *AuthHandler) Middleware() gin.HandlerFunc {
 		// 2. 尝试从 URL Query 中获取 token (支持 SSE、图片预览或下载等特殊场景)
 		if tokenString == "" {
 			tokenString = c.Query("token")
+		}
+
+		// 3. 校验 JWT 并支持 D-160 响应头静默滑动延期 (Sliding Expiration)
+		if claims, ok := a.VerifyJWTToken(tokenString); ok {
+			if expVal, hasExp := (*claims)["exp"]; hasExp {
+				var expSec int64
+				switch v := expVal.(type) {
+				case float64:
+					expSec = int64(v)
+				case int64:
+					expSec = v
+				}
+				now := time.Now().Unix()
+				// 若剩余时长不足 3 天（3 * 24 * 3600 = 259200 秒），自动无感顺延 7 天
+				if expSec > now && (expSec-now) < 3*24*3600 {
+					sub, _ := (*claims)["sub"].(string)
+					if sub == "" {
+						sub = "admin"
+					}
+					newToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+						"sub":  sub,
+						"role": "admin",
+						"exp":  time.Now().Add(7 * 24 * time.Hour).Unix(),
+						"iat":  now,
+					})
+					if newTokenStr, err := newToken.SignedString([]byte(a.cfg.JWTSecret)); err == nil {
+						c.Header("X-Renewed-Token", newTokenStr)
+					}
+				}
+			}
+			c.Next()
+			return
 		}
 
 		if !a.VerifyToken(tokenString) {

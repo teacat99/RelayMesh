@@ -534,6 +534,13 @@ func TestMCPServer_GetSessionImage(t *testing.T) {
 	if base64Result["name"] != "pixel.png" || base64Result["base64_data"] != testBase64 {
 		t.Fatalf("unexpected base64 result: %+v", base64Result)
 	}
+
+	// 4. 测试 formatSessionImagesBlock 中统一复用 BuildSessionImageRelativeURL 的直链生成
+	updatedSess, _ := st.GetFeedbackSession(context.Background(), sess.ID)
+	imgSection := srv.formatSessionImagesBlock(updatedSess, nil, false)
+	if !strings.Contains(imgSection, "/api/v1/sessions/"+sess.ID+"/images/0") {
+		t.Fatalf("expected formatSessionImagesBlock to contain standard image URL, got: %s", imgSection)
+	}
 }
 
 func TestMCPServer_InteractiveFeedbackContentPriority(t *testing.T) {
@@ -565,6 +572,36 @@ func TestMCPServer_InteractiveFeedbackContentPriority(t *testing.T) {
 	}
 	if !strings.Contains(sess.Summary, "### 详尽完整的正文汇报内容") {
 		t.Fatalf("expected session.Summary to pick longer content, got: %s", sess.Summary)
+	}
+
+	// 测试智能防御：当客户端将长篇正文误填到 title，而 summary 填入简短一句话时，服务端自动识别对调
+	swapReq := `{
+		"jsonrpc": "2.0",
+		"id": 100,
+		"method": "tools/call",
+		"params": {
+			"name": "interactive_feedback",
+			"arguments": {
+				"project_directory": "/test/dir",
+				"title": "### 长篇正文误填到了标题\n\n这里包含了很长很长的一段详细方案分析与架构推演说明，超过了一百个字符并且详细列举了改动文件与注意事项。",
+				"summary": "简短的一句话标题",
+				"workflow_id": "wf-test-swap"
+			}
+		}
+	}`
+	reqSwap := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(swapReq))
+	wSwap := httptest.NewRecorder()
+	srv.ServeHTTP(wSwap, reqSwap)
+
+	swapSess, err := srv.store.GetLatestWorkflowFeedbackSession(context.Background(), "wf-test-swap")
+	if err != nil {
+		t.Fatalf("failed to get swapped session: %v", err)
+	}
+	if !strings.Contains(swapSess.Summary, "### 长篇正文误填到了标题") {
+		t.Fatalf("expected session.Summary to be swapped from title, got: %s", swapSess.Summary)
+	}
+	if swapSess.Title != "简短的一句话标题" {
+		t.Fatalf("expected session.Title to be swapped from summary, got: %s", swapSess.Title)
 	}
 }
 
