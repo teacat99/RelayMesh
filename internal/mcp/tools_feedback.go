@@ -45,13 +45,39 @@ func (s *Server) handleInteractiveFeedback(ctx context.Context, raw json.RawMess
 		chosen = strings.TrimSpace(args.Detail)
 	}
 
-	// 智能防御：如果大模型在极端情况下将长篇 Markdown 正文填入了 title，而 summary 仅填了一句话或为空
+	// 智能防御升级 (D-156 & D-164)：检测大模型是否误将 Markdown 正文放入 title，而将标题放入 summary
 	trimmedTitle := strings.TrimSpace(args.Title)
-	if len(trimmedTitle) > len(chosen) && len(trimmedTitle) > 100 {
-		// 调换交换：长内容作为正文 summary，短内容作为标题 title
+	hasMarkdownSyntax := strings.Contains(trimmedTitle, "\n") ||
+		strings.Contains(trimmedTitle, "###") ||
+		strings.Contains(trimmedTitle, "##") ||
+		strings.Contains(trimmedTitle, "# ") ||
+		strings.Contains(trimmedTitle, "```") ||
+		strings.Contains(trimmedTitle, "- ") ||
+		strings.Contains(trimmedTitle, "1. ") ||
+		strings.Contains(trimmedTitle, "* ")
+	isTitleLongerThanSummary := len([]rune(trimmedTitle)) > len([]rune(chosen))
+
+	if hasMarkdownSyntax || (isTitleLongerThanSummary && len([]rune(trimmedTitle)) > 30) {
+		// 100% 判定为误将正文放进了 title，执行无感对调
 		newTitle := chosen
 		chosen = trimmedTitle
 		args.Title = newTitle
+	}
+
+	// 如果对调后（或者原始传入）title 依然为空，尝试从 chosen 正文提取第一行纯文本作为 title（上限 30 字）
+	if strings.TrimSpace(args.Title) == "" && chosen != "" {
+		lines := strings.Split(chosen, "\n")
+		for _, line := range lines {
+			cleaned := strings.TrimSpace(strings.TrimLeft(line, "#-*123456789. `"))
+			if cleaned != "" {
+				runes := []rune(cleaned)
+				if len(runes) > 30 {
+					cleaned = string(runes[:30]) + "..."
+				}
+				args.Title = cleaned
+				break
+			}
+		}
 	}
 
 	args.Summary = chosen
@@ -319,7 +345,7 @@ func formatSessionHeader(sess *model.FeedbackSession) string {
 	if wID == "" {
 		wID = "wf-" + strings.TrimPrefix(sess.ID, "sess-")
 	}
-	return fmt.Sprintf("session_id: %s, workflow_id: %s", sess.ID, wID)
+	return fmt.Sprintf("session_id: %s, workflow_id: %s\n【法定工作流】workflow_id: %q (下轮调用 interactive_feedback 必须原样传递，严禁篡改或新建)", sess.ID, wID, wID)
 }
 
 func (s *Server) formatSessionHeaderWithContext(ctx context.Context, sess *model.FeedbackSession) string {

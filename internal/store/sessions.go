@@ -50,12 +50,48 @@ func (s *Store) CreateFeedbackSession(ctx context.Context, input CreateSessionIn
 	now := time.Now()
 	deadline := now.Add(time.Duration(timeoutSec) * time.Second)
 
-	// 严守设计规范（D-139 / D-153）：任何 Session 必须且只能隶属于唯一的 Workflow。
+	// 严守设计规范（D-139 / D-153 / D-164）：任何 Session 必须且只能隶属于唯一的 Workflow。
 	// 若调用方未显式提供 workflow_id，实施同项目目录/同凭据自愈继承机制，彻底避免因上下文压缩遗漏参数而乱建临时分支：
 	workflowID := strings.TrimSpace(input.WorkflowID)
+	projDir := strings.TrimSpace(input.ProjectDirectory)
+	if projDir == "." {
+		projDir = ""
+	}
+
+	// D-164: 孤儿新 Workflow ID 智能模糊吸附与纠偏
+	// 如果调用方传入了一个在库中不存在的 workflow_id，检查是否是当前项目既有活跃工作流的常见变体（例如缺失后缀、前缀、连字符变体等）
+	if workflowID != "" && projDir != "" {
+		var count int64
+		_ = s.db.WithContext(ctx).Model(&model.FeedbackSession{}).Where("workflow_id = ?", workflowID).Count(&count).Error
+		if count == 0 {
+			var activeWorkflows []string
+			_ = s.db.WithContext(ctx).Model(&model.FeedbackSession{}).
+				Where("project_directory = ? AND workflow_id != '' AND status != 'archived'", projDir).
+				Distinct("workflow_id").
+				Pluck("workflow_id", &activeWorkflows).Error
+			
+			normInput := strings.ToLower(strings.ReplaceAll(workflowID, "_", "-"))
+			cleanInput := strings.TrimPrefix(normInput, "wf-")
+
+			for _, existingWf := range activeWorkflows {
+				normExisting := strings.ToLower(strings.ReplaceAll(existingWf, "_", "-"))
+				cleanExisting := strings.TrimPrefix(normExisting, "wf-")
+
+				// 1. 完全去前缀后一致 (如 wf-relaymesh 与 relaymesh)
+				// 2. 包含或前缀匹配 (如 relaymesh 匹配 relaymesh-continuation，且长度足够避免单字母误伤)
+				// 3. 去除所有标点连字符后完全一致
+				if cleanInput == cleanExisting ||
+					(len(cleanInput) >= 5 && (strings.HasPrefix(cleanExisting, cleanInput) || strings.Contains(cleanExisting, cleanInput))) ||
+					strings.ReplaceAll(cleanInput, "-", "") == strings.ReplaceAll(cleanExisting, "-", "") {
+					workflowID = existingWf
+					break
+				}
+			}
+		}
+	}
+
 	if workflowID == "" {
 		// 1. 优先基于项目目录寻找该项目最近活跃或未归档的既有工作流
-		projDir := strings.TrimSpace(input.ProjectDirectory)
 		if projDir != "" {
 			var recentSess model.FeedbackSession
 			err := s.db.WithContext(ctx).

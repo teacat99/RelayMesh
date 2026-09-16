@@ -109,16 +109,16 @@ var (
 		"properties": {
 			"workflow_id": {
 				"type": "string",
-				"description": "[CRITICAL 1/3: THREAD IDENTIFIER] Required. Unique workflow identifier to group multiple interaction turns under a single sidebar thread (e.g. 'relaymesh-continuation'). In multi-turn chat, you MUST retain the existing workflow_id from previous turns and context. Never omit this parameter!"
+				"description": "[CRITICAL 1/3: THREAD IDENTIFIER] Required. Unique workflow identifier to group multiple interaction turns under a single sidebar thread (e.g. 'relaymesh-continuation'). In multi-turn chat, you MUST retain the existing workflow_id from previous turns and context. BANNED: Never invent new workflow IDs, never change workflow ID mid-chat, and never omit this parameter!"
 			},
 			"title": {
 				"type": "string",
 				"default": "",
-				"description": "[CRITICAL 2/3: SHORT HEADLINE ONLY] Concise 5-15 word one-line title for this feedback round (e.g. '图片加载优化方案确认'). Do NOT put full markdown report or body content here!"
+				"description": "[CRITICAL 2/3: SHORT HEADLINE ONLY] Concise 5-15 word one-line title for this feedback round (e.g. '图片加载优化方案确认'). BANNED: Never put markdown blocks, lists, code fences, or multiline text here!"
 			},
 			"summary": {
 				"type": "string",
-				"description": "[CRITICAL 3/3: FULL MARKDOWN BODY] Required. The comprehensive markdown content (C-PLAN analysis, architecture proposals, code change summaries, verification results, or questions). Must be substantive markdown. Do NOT put just a short title here!"
+				"description": "[CRITICAL 3/3: FULL MARKDOWN BODY] Required. The comprehensive markdown content (C-PLAN analysis, architecture proposals, code change summaries, verification results, or questions). Must be substantive markdown with headings and lists. BANNED: Never put a short title here, and never put detailed body content into 'title'!"
 			},
 			"content": {
 				"type": "string",
@@ -409,9 +409,9 @@ On MCP errors: If report_progress calls fail repeatedly, degrade to away mode (s
 			Description: `PRIMARY communication channel with the user via Web UI. All substantive content (analysis, plans, code change summaries, questions) MUST go through this tool's summary parameter.
 
 CORE PARAMETER CONTRACT (CRITICAL):
-1. workflow_id (REQUIRED): MUST be provided. In multi-turn chat, ALWAYS retain and pass the workflow_id from previous turns (e.g. 'relaymesh-continuation'). Never omit it.
-2. title (ONE LINE): Short headline (5-15 words). Do NOT put long markdown body in title.
-3. summary (FULL MARKDOWN): The actual detailed markdown content. Do NOT put a simple title here.
+1. workflow_id (REQUIRED): MUST be provided. In multi-turn chat, ALWAYS retain and pass the workflow_id from previous turns (e.g. 'relaymesh-continuation'). Never omit it, never rename it, and never invent a new ID mid-conversation.
+2. title (ONE LINE ONLY): Concise headline (5-15 words). Good: "图片加载优化方案确认". BANNED: Do NOT put markdown reports, multi-paragraph text, or bullet points in title.
+3. summary (FULL MARKDOWN BODY): Comprehensive analysis, plans, code changes, or questions. BANNED: Do NOT put a short title here, and do NOT put the body in title.
 
 When to call:
 - Before starting new work (understanding/plan/risks)

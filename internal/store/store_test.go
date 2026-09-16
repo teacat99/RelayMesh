@@ -427,3 +427,79 @@ func TestStore_D159_D161_Protections(t *testing.T) {
 	}
 }
 
+func TestStore_D164_WorkflowFuzzyHealing(t *testing.T) {
+	st := setupTestStore(t)
+	ctx := context.Background()
+	proj := "/workspace/my-app"
+
+	// 1. 创建基准工作流 relaymesh-continuation
+	baseSess, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       "relaymesh-continuation",
+		ProjectDirectory: proj,
+		Title:            "初始主会话",
+		Summary:          "主干流程第一轮",
+	})
+	if err != nil {
+		t.Fatalf("failed to create base session: %v", err)
+	}
+	if baseSess.WorkflowID != "relaymesh-continuation" {
+		t.Fatalf("expected workflow_id to be relaymesh-continuation, got: %s", baseSess.WorkflowID)
+	}
+
+	// 2. 模拟大模型传了常见变体（少写了后缀 relaymesh）
+	fuzzySess1, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       "relaymesh",
+		ProjectDirectory: proj,
+		Title:            "第二轮",
+		Summary:          "汇报",
+	})
+	if err != nil {
+		t.Fatalf("failed to create fuzzy session 1: %v", err)
+	}
+	if fuzzySess1.WorkflowID != "relaymesh-continuation" {
+		t.Fatalf("expected fuzzy 'relaymesh' to be healed to 'relaymesh-continuation', got: %s", fuzzySess1.WorkflowID)
+	}
+
+	// 3. 模拟大模型传了下划线变体 relaymesh_continuation
+	fuzzySess2, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       "relaymesh_continuation",
+		ProjectDirectory: proj,
+		Title:            "第三轮",
+		Summary:          "汇报",
+	})
+	if err != nil {
+		t.Fatalf("failed to create fuzzy session 2: %v", err)
+	}
+	if fuzzySess2.WorkflowID != "relaymesh-continuation" {
+		t.Fatalf("expected underscore variant to be healed, got: %s", fuzzySess2.WorkflowID)
+	}
+
+	// 4. 模拟大模型传了带 wf- 前缀的变体 wf-relaymesh-continuation
+	fuzzySess3, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       "wf-relaymesh-continuation",
+		ProjectDirectory: proj,
+		Title:            "第四轮",
+		Summary:          "汇报",
+	})
+	if err != nil {
+		t.Fatalf("failed to create fuzzy session 3: %v", err)
+	}
+	if fuzzySess3.WorkflowID != "relaymesh-continuation" {
+		t.Fatalf("expected prefix variant to be healed, got: %s", fuzzySess3.WorkflowID)
+	}
+
+	// 5. 传一个完全不同的、合法的全新工作流名称，应正常创建新工作流
+	diffSess, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       "brand-new-feature",
+		ProjectDirectory: proj,
+		Title:            "全新独立分支",
+		Summary:          "完全不同的需求",
+	})
+	if err != nil {
+		t.Fatalf("failed to create diff session: %v", err)
+	}
+	if diffSess.WorkflowID != "brand-new-feature" {
+		t.Fatalf("expected completely distinct workflow to be retained as 'brand-new-feature', got: %s", diffSess.WorkflowID)
+	}
+}
+
