@@ -83,7 +83,7 @@ func (s *Store) DeleteNote(ctx context.Context, id uint) error {
 	return s.db.WithContext(ctx).Delete(&model.WorkflowNote{}, id).Error
 }
 
-func (s *Store) ListWorkflowSummaries(ctx context.Context, limit int) ([]map[string]any, error) {
+func (s *Store) ListWorkflowSummaries(ctx context.Context, projectDir, hostName string, limit int) ([]map[string]any, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
@@ -93,10 +93,19 @@ func (s *Store) ListWorkflowSummaries(ctx context.Context, limit int) ([]map[str
 		LastActive string
 	}
 
-	err := s.db.WithContext(ctx).
+	query := s.db.WithContext(ctx).
 		Model(&model.FeedbackSession{}).
 		Select("workflow_id, COUNT(DISTINCT id) as sessions, MAX(updated_at) as last_active").
-		Where("workflow_id != ''").
+		Where("workflow_id != ''")
+
+	if projectDir != "" && projectDir != "." {
+		query = query.Where("project_directory = ?", projectDir)
+	}
+	if hostName != "" {
+		query = query.Where("host_name = ?", hostName)
+	}
+
+	err := query.
 		Group("workflow_id").
 		Order("last_active DESC").
 		Limit(limit).

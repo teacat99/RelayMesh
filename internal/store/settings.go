@@ -55,7 +55,12 @@ RelayMesh 是本工作区唯一的权威人机交互、多智能体协同与研�
    - 为避免上下文压缩丢失目标与关键决策，根据工作区环境自适应选择存储载体：
      • 场景 A：若项目根目录存在 .cursor/sessions/ 规范，按该规范维护本地会话文档；
      • 场景 B：遵守当前项目文档规范（如项目自有 docs/ 规范体系）；
-     • 场景 C：若项目无本地会话文档体系，统一调用 RelayMesh 内置 workflow_context(action: "session_doc_save", workflow_id: "...", content: "...") 将会话文档与关键决策持久化至中枢工作表（Workflow Sheet），并可通过 workflow_context(action: "session_doc_get") 检索恢复。`
+     • 场景 C：若项目无本地会话文档体系，统一调用 RelayMesh 内置 workflow_context(action: "session_doc_save", workflow_id: "...", content: "...") 将会话文档与关键决策持久化至中枢工作表（Workflow Sheet），并可通过 workflow_context(action: "session_doc_get") 检索恢复。
+
+8. 上下文获取与跨项目边界隔离（D-165）：
+   - 主机名 (HostName) 由连接凭据权威锁定，项目目录 (project_directory) 由大模型主动传递；
+   - 凡调用 list_sessions 或 workflow_context(action: 'list_workflows') 获取上下文，必须传递 project_directory，系统严格限定在当前 (HostName, ProjectDirectory) 边界内，杜绝跨项目与跨主机污染；
+   - 仅当人工明确指定特定 workflow_id 时，才允许跨目录读取该指定工作流的会话历史。`
 
 type AuthCredentials struct {
 	Username  string    `json:"username"`

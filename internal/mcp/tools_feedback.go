@@ -423,7 +423,23 @@ func (s *Server) formatSessionHeaderWithContext(ctx context.Context, sess *model
 }
 
 func (s *Server) buildRecentWorkflowsHint(ctx context.Context, currentSess *model.FeedbackSession) string {
-	allSessions, err := s.store.ListFeedbackSessions(ctx, "", "", 200)
+	projDir := ""
+	hostName := ""
+	if currentSess != nil {
+		projDir = strings.TrimSpace(currentSess.ProjectDirectory)
+		hostName = strings.TrimSpace(currentSess.HostName)
+	}
+	credCtx := CredentialFromContext(ctx)
+	if hostName == "" && credCtx != nil {
+		hostName = strings.TrimSpace(credCtx.HostName)
+	}
+
+	// D-165: 若未提供明确的项目工作区绝对路径，严禁跨项目回显工作流（保持静默）
+	if projDir == "" || projDir == "." {
+		return ""
+	}
+
+	allSessions, err := s.store.ListFeedbackSessions(ctx, projDir, "", 100)
 	if err != nil || len(allSessions) == 0 {
 		return ""
 	}
@@ -439,16 +455,11 @@ func (s *Server) buildRecentWorkflowsHint(ctx context.Context, currentSess *mode
 	wfMap := make(map[string]*wfBrief)
 	var wfOrder []string
 
-	projDir := ""
-	if currentSess != nil {
-		projDir = currentSess.ProjectDirectory
-	}
-
 	for _, sess := range allSessions {
 		if sess.Status == "archived" {
 			continue
 		}
-		if projDir != "" && projDir != "." && sess.ProjectDirectory != projDir {
+		if hostName != "" && sess.HostName != "" && sess.HostName != hostName {
 			continue
 		}
 		key := sess.WorkflowID
@@ -711,14 +722,36 @@ func (s *Server) handleListSessions(ctx context.Context, raw json.RawMessage) (a
 		status = ""
 	}
 
-	sessions, err := s.store.ListFeedbackSessions(ctx, "", status, 0)
-	if err != nil {
-		return nil, err
-	}
-
 	projDir := strings.TrimSpace(args.ProjectDirectory)
 	hostName := strings.TrimSpace(args.HostName)
 	wfID := strings.TrimSpace(args.WorkflowID)
+
+	credCtx := CredentialFromContext(ctx)
+	if hostName == "" && credCtx != nil && credCtx.HostName != "" {
+		hostName = strings.TrimSpace(credCtx.HostName)
+	}
+
+	// D-165: 双重边界强隔离校验
+	// 凡未显式指定特定 workflow_id 的列表查询，必须提供 project_directory，
+	// 严禁模型在未提供工作区绝对路径时漫游全库，杜绝泄漏跨项目与跨主机的无关会话。
+	if wfID == "" && (projDir == "" || projDir == ".") {
+		return nil, store.NewInvalidInputError("project_directory (absolute workspace path) is required when workflow_id is not specified. Provide your current workspace directory (e.g. '/path/to/project') to scope sessions to your project.")
+	}
+
+	var sessions []model.FeedbackSession
+	if wfID != "" {
+		var err error
+		sessions, err = s.store.GetSessionsByWorkflow(ctx, wfID, 100)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		sessions, err = s.store.ListFeedbackSessions(ctx, projDir, status, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	var filtered []model.FeedbackSession
 	for _, sess := range sessions {
@@ -728,7 +761,10 @@ func (s *Server) handleListSessions(ctx context.Context, raw json.RawMessage) (a
 		if projDir != "" && sess.ProjectDirectory != projDir {
 			continue
 		}
-		if hostName != "" && sess.HostName != hostName {
+		if hostName != "" && sess.HostName != "" && sess.HostName != hostName {
+			continue
+		}
+		if status != "" && sess.Status != status {
 			continue
 		}
 		filtered = append(filtered, sess)
@@ -754,8 +790,6 @@ func (s *Server) handleListSessions(ctx context.Context, raw json.RawMessage) (a
 			"updated_at":        sess.UpdatedAt,
 			"host_name":         sess.HostName,
 			"project_directory": sess.ProjectDirectory,
-			"response_text":     sess.ResponseText,
-			"user_messages":     sess.UserMessages,
 		})
 	}
 
@@ -850,31 +884,43 @@ func (s *Server) handleGetSessionHistory(ctx context.Context, raw json.RawMessag
 	sessionID := strings.TrimSpace(args.SessionID)
 
 	if workflowID == "" && sessionID == "" {
-		return nil, store.NewInvalidInputError("workflow_id or session_id is required")
+		return nil, store.NewInvalidInputError("workflow_id or session_id is required. To read conversation history, provide the specific workflow_id (or session_id).")
 	}
 
-	allSessions, err := s.store.ListFeedbackSessions(ctx, "", "all", 0)
-	if err != nil {
-		return nil, err
+	var matchedSessions []model.FeedbackSession
+	if workflowID != "" {
+		sessions, err := s.store.GetSessionsByWorkflow(ctx, workflowID, 100)
+		if err != nil {
+			return nil, err
+		}
+		matchedSessions = sessions
+	} else if sessionID != "" {
+		sess, err := s.store.GetFeedbackSession(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		matchedSessions = []model.FeedbackSession{*sess}
+		if workflowID == "" {
+			workflowID = sess.WorkflowID
+		}
 	}
 
 	var matched []map[string]any
-	for _, sess := range allSessions {
-		if (workflowID != "" && sess.WorkflowID == workflowID) || (sessionID != "" && sess.ID == sessionID) {
-			matched = append(matched, map[string]any{
-				"session_id":        sess.ID,
-				"workflow_id":       sess.WorkflowID,
-				"title":             sess.Title,
-				"summary":           sess.Summary,
-				"status":            sess.Status,
-				"consumed_by_ai":    sess.ConsumedByAI,
-				"response_text":     sess.ResponseText,
-				"user_messages":     sess.UserMessages,
-				"created_at":        sess.CreatedAt,
-				"updated_at":        sess.UpdatedAt,
-				"project_directory": sess.ProjectDirectory,
-			})
-		}
+	for _, sess := range matchedSessions {
+		matched = append(matched, map[string]any{
+			"session_id":        sess.ID,
+			"workflow_id":       sess.WorkflowID,
+			"title":             sess.Title,
+			"summary":           sess.Summary,
+			"status":            sess.Status,
+			"consumed_by_ai":    sess.ConsumedByAI,
+			"response_text":     sess.ResponseText,
+			"user_messages":     sess.UserMessages,
+			"created_at":        sess.CreatedAt,
+			"updated_at":        sess.UpdatedAt,
+			"host_name":         sess.HostName,
+			"project_directory": sess.ProjectDirectory,
+		})
 	}
 
 	return map[string]any{

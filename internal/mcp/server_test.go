@@ -891,5 +891,210 @@ func TestMCPServer_ServerInstructions_ContentCheck(t *testing.T) {
 	if !strings.Contains(store.DefaultServerInstructions, "session_doc_save") {
 		t.Fatalf("expected DefaultServerInstructions to contain session_doc_save reference")
 	}
+	if !strings.Contains(store.DefaultServerInstructions, "D-165") {
+		t.Fatalf("expected DefaultServerInstructions to contain D-165 context boundary reference")
+	}
+}
+
+func TestMCPServer_D165_ListSessionsScopingAndSecurityTrimming(t *testing.T) {
+	srv := setupTestMCPServer(t)
+	ctx := context.Background()
+
+	cred := &model.MCPCredential{
+		Name:     "test-agent-d165",
+		Token:    "test-token-d165",
+		HostName: "test-host-x",
+		IsActive: true,
+		Permissions: model.Permissions{
+			Sessions: true,
+			Feedback: true,
+		},
+	}
+	if err := srv.store.CreateCredential(ctx, cred); err != nil {
+		t.Fatalf("failed to create credential: %v", err)
+	}
+
+	// 1. 创建 Project A 和 Project B 的两个会话
+	_, err := srv.store.CreateFeedbackSession(ctx, store.CreateSessionInput{
+		WorkflowID:       "wf-proj-a",
+		ProjectDirectory: "/workspace/project-a",
+		EnvHostName:      "test-host-x",
+		Title:            "Project A Title",
+		Summary:          "Project A Summary",
+	})
+	if err != nil {
+		t.Fatalf("failed to create session A: %v", err)
+	}
+
+	_, err = srv.store.CreateFeedbackSession(ctx, store.CreateSessionInput{
+		WorkflowID:       "wf-proj-b",
+		ProjectDirectory: "/workspace/project-b",
+		EnvHostName:      "test-host-x",
+		Title:            "Project B Title",
+		Summary:          "Project B Summary",
+	})
+	if err != nil {
+		t.Fatalf("failed to create session B: %v", err)
+	}
+
+	// 2. 调用 list_sessions({})，未传 project_directory 且未传 workflow_id，应被直接拦截拒绝
+	reqNoDir := `{
+		"jsonrpc": "2.0",
+		"id": 201,
+		"method": "tools/call",
+		"params": {
+			"name": "list_sessions",
+			"arguments": {}
+		}
+	}`
+	httpReq1 := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqNoDir))
+	httpReq1.Header.Set("Authorization", "Bearer "+cred.Token)
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, httpReq1)
+
+	var resp1 jsonRPCResponse
+	_ = json.Unmarshal(w1.Body.Bytes(), &resp1)
+	resMap1, ok := resp1.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T (body: %s)", resp1.Result, w1.Body.String())
+	}
+	if isErr, _ := resMap1["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true when calling list_sessions without project_directory or workflow_id, got: %+v", resMap1)
+	}
+
+	// 3. 调用 list_sessions 并传入 project_directory: "/workspace/project-a"
+	reqWithDir := `{
+		"jsonrpc": "2.0",
+		"id": 202,
+		"method": "tools/call",
+		"params": {
+			"name": "list_sessions",
+			"arguments": {
+				"project_directory": "/workspace/project-a"
+			}
+		}
+	}`
+	httpReq2 := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqWithDir))
+	httpReq2.Header.Set("Authorization", "Bearer "+cred.Token)
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, httpReq2)
+
+	var resp2 jsonRPCResponse
+	_ = json.Unmarshal(w2.Body.Bytes(), &resp2)
+	if resp2.Error != nil {
+		t.Fatalf("unexpected error: %v", resp2.Error)
+	}
+	resMap2 := resp2.Result.(map[string]any)
+	contentList2 := resMap2["content"].([]any)
+	firstItem2 := contentList2[0].(map[string]any)
+	var listResult2 map[string]any
+	_ = json.Unmarshal([]byte(firstItem2["text"].(string)), &listResult2)
+
+	sessList2 := listResult2["sessions"].([]any)
+	if len(sessList2) != 1 {
+		t.Fatalf("expected 1 session for project-a, got %d", len(sessList2))
+	}
+	item0 := sessList2[0].(map[string]any)
+	if item0["workflow_id"] != "wf-proj-a" {
+		t.Fatalf("expected wf-proj-a, got %v", item0["workflow_id"])
+	}
+	// 验证暴露面剪裁：list_sessions 严禁泄漏 response_text 和 user_messages
+	if _, exists := item0["response_text"]; exists {
+		t.Fatalf("security violation: response_text should not be exposed in list_sessions")
+	}
+	if _, exists := item0["user_messages"]; exists {
+		t.Fatalf("security violation: user_messages should not be exposed in list_sessions")
+	}
+
+	// 4. 人工显式指定 workflow_id 破例穿透测试：传入 workflow_id: "wf-proj-b"（无需 project_directory）
+	reqExplicitWf := `{
+		"jsonrpc": "2.0",
+		"id": 203,
+		"method": "tools/call",
+		"params": {
+			"name": "list_sessions",
+			"arguments": {
+				"workflow_id": "wf-proj-b"
+			}
+		}
+	}`
+	httpReq3 := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqExplicitWf))
+	httpReq3.Header.Set("Authorization", "Bearer "+cred.Token)
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, httpReq3)
+
+	var resp3 jsonRPCResponse
+	_ = json.Unmarshal(w3.Body.Bytes(), &resp3)
+	if resp3.Error != nil {
+		t.Fatalf("unexpected error on explicit workflow_id: %v", resp3.Error)
+	}
+
+	// 5. get_session_history 获取指定 workflow_id 全文
+	reqHist := `{
+		"jsonrpc": "2.0",
+		"id": 204,
+		"method": "tools/call",
+		"params": {
+			"name": "get_session_history",
+			"arguments": {
+				"workflow_id": "wf-proj-b"
+			}
+		}
+	}`
+	httpReq4 := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqHist))
+	httpReq4.Header.Set("Authorization", "Bearer "+cred.Token)
+	w4 := httptest.NewRecorder()
+	srv.ServeHTTP(w4, httpReq4)
+
+	var resp4 jsonRPCResponse
+	_ = json.Unmarshal(w4.Body.Bytes(), &resp4)
+	if resp4.Error != nil {
+		t.Fatalf("unexpected error on get_session_history: %v", resp4.Error)
+	}
+	resMap4 := resp4.Result.(map[string]any)
+	contentList4 := resMap4["content"].([]any)
+	firstItem4 := contentList4[0].(map[string]any)
+	var histResult4 map[string]any
+	_ = json.Unmarshal([]byte(firstItem4["text"].(string)), &histResult4)
+	if histResult4["workflow_id"] != "wf-proj-b" {
+		t.Fatalf("expected wf-proj-b history, got %v", histResult4["workflow_id"])
+	}
+
+	// 6. workflow_context list_workflows 隔离测试：传入 project_directory: "/workspace/project-a"
+	reqListWf := `{
+		"jsonrpc": "2.0",
+		"id": 205,
+		"method": "tools/call",
+		"params": {
+			"name": "workflow_context",
+			"arguments": {
+				"action": "list_workflows",
+				"project_directory": "/workspace/project-a"
+			}
+		}
+	}`
+	httpReq5 := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqListWf))
+	httpReq5.Header.Set("Authorization", "Bearer "+cred.Token)
+	w5 := httptest.NewRecorder()
+	srv.ServeHTTP(w5, httpReq5)
+
+	var resp5 jsonRPCResponse
+	_ = json.Unmarshal(w5.Body.Bytes(), &resp5)
+	if resp5.Error != nil {
+		t.Fatalf("unexpected error on list_workflows: %v", resp5.Error)
+	}
+	resMap5 := resp5.Result.(map[string]any)
+	contentList5 := resMap5["content"].([]any)
+	firstItem5 := contentList5[0].(map[string]any)
+	var wfResult5 map[string]any
+	_ = json.Unmarshal([]byte(firstItem5["text"].(string)), &wfResult5)
+	wfList5 := wfResult5["workflows"].([]any)
+	if len(wfList5) != 1 {
+		t.Fatalf("expected 1 workflow for project-a, got %d", len(wfList5))
+	}
+	wfItem0 := wfList5[0].(map[string]any)
+	if wfItem0["workflow_id"] != "wf-proj-a" {
+		t.Fatalf("expected wf-proj-a, got %v", wfItem0["workflow_id"])
+	}
 }
 

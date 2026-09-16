@@ -503,3 +503,58 @@ func TestStore_D164_WorkflowFuzzyHealing(t *testing.T) {
 	}
 }
 
+func TestStore_D165_ListWorkflowSummariesScoping(t *testing.T) {
+	st := setupTestStore(t)
+	ctx := context.Background()
+
+	// 创建两个不同主机与不同目录下的工作流会话
+	_, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       "wf-project-alpha",
+		ProjectDirectory: "/workspace/alpha",
+		EnvHostName:      "host-A",
+		Title:            "Alpha Round",
+		Summary:          "Alpha Summary",
+	})
+	if err != nil {
+		t.Fatalf("failed to create alpha session: %v", err)
+	}
+
+	_, err = st.CreateFeedbackSession(ctx, CreateSessionInput{
+		WorkflowID:       "wf-project-beta",
+		ProjectDirectory: "/workspace/beta",
+		EnvHostName:      "host-B",
+		Title:            "Beta Round",
+		Summary:          "Beta Summary",
+	})
+	if err != nil {
+		t.Fatalf("failed to create beta session: %v", err)
+	}
+
+	// 1. 无过滤查询：返回全部
+	allSummaries, err := st.ListWorkflowSummaries(ctx, "", "", 10)
+	if err != nil {
+		t.Fatalf("failed to list all summaries: %v", err)
+	}
+	if len(allSummaries) != 2 {
+		t.Fatalf("expected 2 workflows, got: %d", len(allSummaries))
+	}
+
+	// 2. 按 project_directory 过滤：只返回 Alpha
+	alphaSummaries, err := st.ListWorkflowSummaries(ctx, "/workspace/alpha", "", 10)
+	if err != nil {
+		t.Fatalf("failed to list alpha summaries: %v", err)
+	}
+	if len(alphaSummaries) != 1 || alphaSummaries[0]["workflow_id"] != "wf-project-alpha" {
+		t.Fatalf("expected only wf-project-alpha, got: %+v", alphaSummaries)
+	}
+
+	// 3. 按 host_name 过滤：只返回 Beta
+	betaSummaries, err := st.ListWorkflowSummaries(ctx, "", "host-B", 10)
+	if err != nil {
+		t.Fatalf("failed to list beta summaries: %v", err)
+	}
+	if len(betaSummaries) != 1 || betaSummaries[0]["workflow_id"] != "wf-project-beta" {
+		t.Fatalf("expected only wf-project-beta, got: %+v", betaSummaries)
+	}
+}
+

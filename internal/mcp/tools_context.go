@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/teacat99/RelayMesh/internal/model"
@@ -22,6 +23,8 @@ type workflowContextArgs struct {
 	ReplayAfterCheckpoint bool                   `json:"replay_after_checkpoint,omitempty"`
 	MaxBytes             int                     `json:"max_bytes,omitempty"`
 	PhaseID              string                  `json:"phase_id,omitempty"`
+	ProjectDirectory     string                  `json:"project_directory,omitempty"`
+	HostName             string                  `json:"host_name,omitempty"`
 }
 
 func (s *Server) handleWorkflowContext(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -331,7 +334,15 @@ func (s *Server) handleNoteDelete(ctx context.Context, args workflowContextArgs)
 }
 
 func (s *Server) handleListWorkflows(ctx context.Context, args workflowContextArgs) (any, error) {
-	summaries, err := s.store.ListWorkflowSummaries(ctx, args.Limit)
+	projDir := strings.TrimSpace(args.ProjectDirectory)
+	hostName := strings.TrimSpace(args.HostName)
+
+	credCtx := CredentialFromContext(ctx)
+	if hostName == "" && credCtx != nil && credCtx.HostName != "" {
+		hostName = credCtx.HostName
+	}
+
+	summaries, err := s.store.ListWorkflowSummaries(ctx, projDir, hostName, args.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list workflows: %w", err)
 	}

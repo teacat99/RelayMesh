@@ -179,27 +179,27 @@ var (
 	listSessionsSchema = json.RawMessage(`{
 		"type": "object",
 		"properties": {
+			"project_directory": {
+				"type": "string",
+				"description": "[REQUIRED unless workflow_id is provided] Absolute project workspace directory on the client host (e.g. '/home/teacat/CatFile.Docker/RelayMesh'). Enforces strict project boundary isolation to prevent pulling unrelated context from other projects."
+			},
+			"workflow_id": {
+				"type": "string",
+				"description": "Optional workflow identifier to filter sessions. When provided (e.g. by explicit human instruction), allows viewing history for that specific workflow."
+			},
 			"status": {
 				"type": "string",
 				"enum": ["all", "pending", "completed", "cancelled"],
 				"description": "Filter sessions by status."
 			},
-			"workflow_id": {
-				"type": "string",
-				"description": "Optional workflow identifier to filter sessions."
-			},
-			"project_directory": {
-				"type": "string",
-				"description": "Filter sessions by project directory path. Useful for discovering workflows after context compression."
-			},
 			"host_name": {
 				"type": "string",
-				"description": "Filter sessions by host name."
+				"description": "Filter sessions by host name (automatically defaults to current client host from credential)."
 			},
 			"group_by": {
 				"type": "string",
 				"enum": ["workflow"],
-				"description": "When set to 'workflow', returns aggregated workflow-level summaries instead of individual sessions. Includes workflow_id, title, host_name, session_count, last_active_at, etc."
+				"description": "When set to 'workflow', returns aggregated workflow-level summaries for the project instead of individual sessions."
 			},
 			"limit": {
 				"type": "integer",
@@ -327,6 +327,10 @@ var (
 			"phase_id": {
 				"type": "string",
 				"description": "Phase ID for set_phase action (e.g. 'assess', 'plan', 'dev', 'verify', 'done')."
+			},
+			"project_directory": {
+				"type": "string",
+				"description": "Client workspace absolute path (e.g. '/home/teacat/CatFile.Docker/RelayMesh'). Required for list_workflows to scope workflow summaries strictly to the current project."
 			}
 		}
 	}`)
@@ -480,12 +484,12 @@ Output Modes:
 	if perms.Sessions {
 		tools = append(tools, ToolDefinition{
 			Name:        "list_sessions",
-			Description: "Query feedback sessions filtered by status, workflow_id, project_directory, or host_name. Use group_by='workflow' to get workflow-level summaries — essential for recovering workflow_id after context compression. Example: list_sessions({ project_directory: '/path/to/project', group_by: 'workflow' }) to discover all workflows for this project.",
+			Description: "Query feedback sessions strictly isolated to the current project_directory and host_name. Pass group_by='workflow' to get workflow-level summaries — essential for recovering workflow_id after context compression. Example: list_sessions({ project_directory: '/path/to/project', group_by: 'workflow' }). Cross-project queries are forbidden unless an explicit workflow_id is provided.",
 			InputSchema: listSessionsSchema,
 		})
 		tools = append(tools, ToolDefinition{
 			Name:        "get_session_history",
-			Description: "Retrieve multi-round conversation history and user feedback text for a workflow or session. Use to review prior context when resuming a conversation.",
+			Description: "Retrieve multi-round conversation history and user feedback text for an explicitly specified workflow_id (or session_id). Use to review prior context when resuming a conversation. Cross-project reading is only permitted when the target workflow_id is explicitly provided.",
 			InputSchema: getSessionHistorySchema,
 		})
 	}
@@ -536,7 +540,7 @@ Limits: name max 128 chars, summary max 500 chars, content max 20000 chars, max 
 - "note_delete": Delete a note by note_id.
 
 ## Discovery
-- "list_workflows": List known workflows with their latest checkpoint info, session count, current phase, and last activity time. Essential for recovering context after compression — equivalent to an _index.md for workflows.
+- "list_workflows": List known workflows within the current project (strictly scoped by project_directory and host_name), including latest checkpoint info, session count, current phase, and last activity time. Provide project_directory to prevent seeing workflows from other projects.
 
 ## Phase Control
 - "set_phase": Update the current workflow phase without triggering a full feedback interaction. Requires workflow_id and phase_id. The phase change is broadcast via SSE and injected into subsequent MCP response headers as current_phase + phase_prompt.
