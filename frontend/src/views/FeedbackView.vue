@@ -14,6 +14,7 @@ import type { FeedbackSession, SessionImage } from '../api/types'
 import { toast } from 'vue-sonner'
 import { AlertTriangle, RefreshCw, WifiOff } from 'lucide-vue-next'
 import { useSessionTimer } from '../composables/useSessionTimer'
+import { perfMark, perfMeasure } from '../utils/perf'
 
 const sessionStore = useSessionStore()
 const taskStore = useTaskStore()
@@ -167,6 +168,7 @@ async function handleSubmit(data: { text: string; presets: string[]; images: Ses
 }
 
 async function handleRevokeSession(sessionId: string) {
+  if (import.meta.env.DEV) perfMark('revoke:click')
   try {
     const revoked = await sessionStore.revokeFeedback(sessionId)
     if (revoked) {
@@ -175,6 +177,7 @@ async function handleRevokeSession(sessionId: string) {
         presets: revoked.user_messages || [],
         images: revoked.images || []
       })
+      if (import.meta.env.DEV) nextTick(() => perfMeasure('revoke:click→filled', 'revoke:click'))
       toast.success('已撤回反馈，内容已还原至输入框')
     }
   } catch (err: any) {
@@ -227,8 +230,9 @@ watch(isSidebarCollapsed, () => {
   updateSidebarCssVar()
 }, { immediate: true })
 
-watch(() => sessionStore.selectedSession, (sess) => {
-  const currentWId = sess?.workflow_id || sess?.session_id
+// 按工作流 id 监听而不是按会话对象监听：SSE 补丁、保活、轮询都会替换 selectedSession / currentSession 对象，
+// 对象身份一变就重拉待发送队列，一次撤回曾因此多出 5 次无意义的请求（D-171 / P1）。
+watch(() => sessionStore.selectedSession?.workflow_id || sessionStore.selectedSession?.session_id || '', (currentWId) => {
   if (currentWId) {
     sessionStore.fetchQueuedFeedbacks(currentWId)
     activeItemType.value = 'feedback'
@@ -236,15 +240,12 @@ watch(() => sessionStore.selectedSession, (sess) => {
   }
 }, { immediate: true })
 
-watch(() => sessionStore.currentSession, (curr) => {
+watch(() => sessionStore.currentSession?.workflow_id || sessionStore.currentSession?.session_id || '', (currentWId) => {
   // 仅在当前未选中任何会话时，跟随 currentSession 赋予默认 ID
-  if (!sessionStore.selectedSession && curr) {
-    const currentWId = curr.workflow_id || curr.session_id
-    if (currentWId) {
-      sessionStore.fetchQueuedFeedbacks(currentWId)
-      activeItemType.value = 'feedback'
-      activeItemId.value = currentWId
-    }
+  if (!sessionStore.selectedSession && currentWId) {
+    sessionStore.fetchQueuedFeedbacks(currentWId)
+    activeItemType.value = 'feedback'
+    activeItemId.value = currentWId
   }
 })
 

@@ -212,7 +212,8 @@ services:
       # Web 控制台管理员账号与访问强密码
       - RELAYMESH_WEB_USERNAME=admin
       - RELAYMESH_WEB_PASSWORD=YourStrongWebPassword2026!
-      - RELAYMESH_JWT_SECRET=YourRandomJWTSecretKeyAtLeast32CharsLong!
+      # JWT 签名密钥无需手工配置：留空时首次启动自动生成随机密钥并持久化到数据库（挂载 ./data 即可跨重启保持登录态）
+      # 如需多实例共用同一密钥，可设置 RELAYMESH_JWT_SECRET 为不少于 32 字符的随机串（如 openssl rand -base64 48）
       # 全局 MCP 访问 Token
       - RELAYMESH_MCP_TOKEN=rmk_prod_secret_token_8888
       - RELAYMESH_ALLOW_NON_LOOPBACK=true
@@ -472,8 +473,9 @@ server {
 | `RELAYMESH_PROJECT_ID` | 字符串 | `default` | 默认项目隔离标识 |
 | `RELAYMESH_WEB_USERNAME` | 字符串 | `admin` | Web 控制台管理员账号 |
 | `RELAYMESH_WEB_PASSWORD` | 字符串 | 空 (免密) | Web 控制台密码（配置后强制开启 JWT 登录鉴权） |
-| `RELAYMESH_JWT_SECRET` | 字符串 | 内置默认 | JWT 签名密钥（生产环境必须修改为随机长字符串） |
+| `RELAYMESH_JWT_SECRET` | 字符串 | 空 (自动生成) | JWT 签名密钥。留空时首次启动自动生成 384 bit 随机密钥并持久化到数据库；显式设置时须为不少于 32 字符的随机串，内置默认值、示例占位符与低熵字符串会被忽略并改用自动生成的密钥 |
 | `RELAYMESH_MCP_TOKEN` | 字符串 | 空 (免鉴权) | 全局 MCP 访问 Token（配置后 MCP 请求需携带 Token） |
+| `RELAYMESH_TRUSTED_PROXIES` | 字符串 | 空 (回环 + 私网) | 可信反向代理网段：仅当直连对端在此范围内，才采信其 `X-Forwarded-For` / `X-Real-IP` 作为客户端 IP（登录反爆破据此计数）。支持逗号分隔的 IP / CIDR，`default` 表示回环 + 私网，`none` 表示不信任任何代理；经公网 CDN 等非私网反代时需显式填写其出口网段 |
 | `RELAYMESH_TLS_ENABLED` | 布尔值 | `true` | 是否启用内置零依赖 HTTPS 自签名 TLS 引擎 |
 | `RELAYMESH_ASR_API_URL` | 字符串 | MIMO 官方端点 | 语音识别 ASR 服务接口地址 |
 | `RELAYMESH_ASR_API_KEY` | 字符串 | 空 | 语音识别 ASR 认证密钥 |

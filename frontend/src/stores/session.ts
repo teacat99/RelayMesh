@@ -6,6 +6,28 @@ import { useNotifyStore } from './notify'
 import { useAuthStore } from './auth'
 import { useTaskStore } from './task'
 import { useSettingsStore } from './settings'
+import {
+  FULL_SYNC_SCOPE,
+  classifySessionPayload,
+  createAwayTracker,
+  createKeyedFlight,
+  createSyncScheduler,
+  isCacheFresh,
+  isSameSessionData,
+  isStaleIncoming,
+  mergeFetchedList,
+  mergeSessionPatch,
+  type ResolvedSyncScope,
+  type SyncScope,
+} from '../utils/sessionSync'
+
+// 会话类 SSE 事件的种类；载荷形态（完整会话 / 仅 session_id）由 classifySessionPayload 判定
+type SessionEventKind = 'update' | 'updated' | 'completed' | 'cancelled' | 'keepalive' | 'archived' | 'unarchived'
+
+// 工作流完整列表的兜底 TTL：SSE 健康时缓存由事件补丁维护，只有久未整表同步才回源一次
+const WORKFLOW_CACHE_TTL_MS = 5 * 60 * 1000
+// 页面离开超过该时长，回到前台才做一次校准；更短的切换完全依赖 SSE 事件，不发任何请求
+const AWAY_RECALIBRATE_MS = 30 * 1000
 
 export const useSessionStore = defineStore('session', () => {
   const currentSession = ref<FeedbackSession | null>(null)
@@ -30,29 +52,70 @@ export const useSessionStore = defineStore('session', () => {
   const currentWorkflowSessions = ref<FeedbackSession[]>([])
   const loadingWorkflowSessions = ref(false)
 
+  // —— 同步引擎（D-171 / P1）：以下均为非响应式的同步元数据 ——
+  // 工作流完整列表最近一次「开始拉取」的时间，用于判断缓存是否仍可信
+  const workflowSyncedAt = new Map<string, number>()
+  // 某个工作流的整表拉取在途期间，被本地补丁 / 本地操作改动过的会话 id；拉取返回时据此避免旧快照覆盖新补丁
+  const workflowTouched = new Map<string, Set<string>>()
+  // 同理，针对在途的简略列表（sessions）拉取
+  const sessionsListTouched = new Set<Set<string>>()
+  // 最近一次 SSE 断线的时间：此前完成的整表缓存不再可信（期间可能漏事件）
+  let lastSseGapAt = 0
+  let hasConnectedOnce = false
+  let activeWorkflowLoads = 0
+  const awayTracker = createAwayTracker(AWAY_RECALIBRATE_MS)
+
+  function activeWorkflowId(): string {
+    return selectedSession.value?.workflow_id || selectedSession.value?.session_id || ''
+  }
+
+  function noteLocalChange(workflowId: string | undefined, sessionId: string) {
+    if (workflowId) workflowTouched.get(workflowId)?.add(sessionId)
+    for (const touched of sessionsListTouched) touched.add(sessionId)
+  }
+
+  // 整表拉取统一走单飞：同一工作流同时最多 1 个在途请求 + 1 个尾随，合并并发触发（INV-R3）
+  const workflowFlight = createKeyedFlight(
+    async (workflowId: string) => {
+      const startedAt = Date.now()
+      const touched = new Set<string>()
+      workflowTouched.set(workflowId, touched)
+      activeWorkflowLoads++
+      loadingWorkflowSessions.value = true
+      try {
+        const res = await sessionsApi.getWorkflowSessions(workflowId)
+        if (res && Array.isArray(res.sessions)) {
+          const merged = mergeFetchedList(workflowSessionsCache.value[workflowId], res.sessions, touched, { localOnlyPosition: 'end' })
+          workflowSessionsCache.value[workflowId] = merged
+          workflowSyncedAt.set(workflowId, startedAt)
+          // 如果当前仍然停留在这个工作流，更新当前展示列表
+          if (activeWorkflowId() === workflowId) {
+            currentWorkflowSessions.value = merged
+          }
+        }
+      } finally {
+        workflowTouched.delete(workflowId)
+        activeWorkflowLoads--
+        loadingWorkflowSessions.value = activeWorkflowLoads > 0
+      }
+    },
+    (workflowId, err) => console.error(`Failed to load workflow sessions for ${workflowId}`, err)
+  )
+
+  /**
+   * 加载某个工作流的完整多轮列表。
+   * force=false：有缓存则先秒开展示；缓存仍可信（SSE 期间一直在线且未超过兜底 TTL）就不回源，否则回源刷新；
+   * force=true：保证发起一次在本次调用之后才开始的拉取（调用方刚做过变更、要拿最新数据时使用）。
+   */
   async function loadWorkflowSessions(workflowId: string, force = false) {
     if (!workflowId) return
-    // 1. 若本地已有缓存且非强制刷新，先赋给展示层（0ms 秒开）
-    if (!force && workflowSessionsCache.value[workflowId]?.length) {
-      currentWorkflowSessions.value = workflowSessionsCache.value[workflowId]
+    const cached = workflowSessionsCache.value[workflowId]
+    if (!force && cached?.length) {
+      // 本地已有缓存且非强制刷新，先赋给展示层（0ms 秒开）
+      currentWorkflowSessions.value = cached
+      if (isCacheFresh(workflowSyncedAt.get(workflowId), lastSseGapAt, Date.now(), WORKFLOW_CACHE_TTL_MS)) return
     }
-
-    try {
-      loadingWorkflowSessions.value = true
-      const res = await sessionsApi.getWorkflowSessions(workflowId)
-      if (res && Array.isArray(res.sessions)) {
-        workflowSessionsCache.value[workflowId] = res.sessions
-        // 如果当前仍然停留在这个工作流，更新当前展示列表
-        const activeWId = selectedSession.value?.workflow_id || selectedSession.value?.session_id
-        if (activeWId === workflowId) {
-          currentWorkflowSessions.value = res.sessions
-        }
-      }
-    } catch (err) {
-      console.error(`Failed to load workflow sessions for ${workflowId}`, err)
-    } finally {
-      loadingWorkflowSessions.value = false
-    }
+    await workflowFlight.request(workflowId, force)
   }
 
   function selectSession(session: FeedbackSession | null) {
@@ -72,26 +135,36 @@ export const useSessionStore = defineStore('session', () => {
       loading.value = true
       const res = await sessionsApi.getCurrent()
       if (res.has_session && res.session) {
-        if (!currentSession.value || currentSession.value.session_id !== res.session.session_id) {
-          notifyStore.notify('新反馈请求', res.session.title || '收到新的 AI 反馈请求，请及时查看。')
+        const incoming = res.session
+        const cur = currentSession.value
+        const sameSession = !!cur && cur.session_id === incoming.session_id
+
+        // 响应生成于某个本地补丁之前（较旧的快照）：丢弃，避免把较新的本地状态打回去
+        if (sameSession && isStaleIncoming(cur, incoming)) return
+
+        const wId = incoming.workflow_id || incoming.session_id
+        const followsSelection = !selectedSession.value ||
+          selectedSession.value.session_id === incoming.session_id ||
+          (!!incoming.workflow_id && selectedSession.value.workflow_id === incoming.workflow_id)
+
+        // 稳态（兜底轮询的绝大多数情况）：内容完全没变，不替换任何对象（避免触发下游监听与重渲染），
+        // 只让缓存按新鲜度自行判断是否需要回源
+        if (sameSession && isSameSessionData(cur, incoming)) {
+          if (followsSelection && wId) void loadWorkflowSessions(wId)
+          return
         }
-        currentSession.value = res.session
+
+        if (!sameSession) {
+          notifyStore.notify('新反馈请求', incoming.title || '收到新的 AI 反馈请求，请及时查看。')
+        }
+        currentSession.value = incoming
         // 当收到新的 pending 会话时，仅当未选定任何会话（初始空白态），或者当前选中的正是该同会话/同工作流时才同步更新
-        if (!selectedSession.value) {
-          selectedSession.value = res.session
-          const wId = res.session.workflow_id || res.session.session_id
-          if (wId) {
-            loadWorkflowSessions(wId)
-          }
-        } else if (selectedSession.value.session_id === res.session.session_id ||
-                   (res.session.workflow_id && selectedSession.value.workflow_id === res.session.workflow_id)) {
-          // 同一会话或同一工作流下的新轮次，保持同步更新
-          selectedSession.value = res.session
-          const wId = res.session.workflow_id || res.session.session_id
-          if (wId) {
-            loadWorkflowSessions(wId)
-          }
+        if (followsSelection) {
+          selectedSession.value = incoming
         }
+        // 把最新状态补丁进各级缓存（新轮次追加、已有轮次刷新实时字段），不再无条件整表重拉
+        applySessionPayload(incoming)
+        if (followsSelection && wId) void loadWorkflowSessions(wId)
         // 若用户当前正停留在其他不同工作流，严格保持 selectedSession 不动，绝不主动强切窗口！
       } else {
         const prevPendingId = currentSession.value?.session_id
@@ -110,30 +183,40 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   let fetchSessionsSeq = 0
-  let refreshTimer: any = null
 
-  function applySessionPayload(data: any) {
-    if (!data || typeof data !== 'object') return
-    const sess = (data.session || data) as FeedbackSession
-    if (!sess || !sess.session_id) return
+  /**
+   * 把一条完整会话补丁进 sessions / selectedSession / 工作流缓存 / currentSession。
+   * 服务端的会话类事件载荷与 GET /sessions/:id 等价（含实时字段，图片只带引用），所以补丁即权威，无需再整表重拉。
+   * 比本地副本更旧的载荷（例如撤回之后才到达的更早事件）按容器逐一丢弃，避免把新状态打回去。
+   */
+  function applySessionPayload(data: unknown) {
+    const classified = classifySessionPayload(data)
+    if (classified.kind !== 'full' || !classified.session) return
+    const sess = classified.session
+
+    const wId = sess.workflow_id || sess.session_id
+    noteLocalChange(wId, sess.session_id)
 
     const idx = sessions.value.findIndex(s => s.session_id === sess.session_id)
     if (idx !== -1) {
-      sessions.value[idx] = { ...sessions.value[idx], ...sess }
+      if (!isStaleIncoming(sessions.value[idx], sess)) {
+        sessions.value[idx] = mergeSessionPatch(sessions.value[idx], sess)
+      }
     } else {
       sessions.value.unshift(sess)
     }
 
-    if (selectedSession.value?.session_id === sess.session_id) {
-      selectedSession.value = { ...selectedSession.value, ...sess }
+    if (selectedSession.value?.session_id === sess.session_id && !isStaleIncoming(selectedSession.value, sess)) {
+      selectedSession.value = mergeSessionPatch(selectedSession.value, sess)
     }
 
-    const wId = sess.workflow_id || sess.session_id
     if (wId && workflowSessionsCache.value[wId]) {
       const list = workflowSessionsCache.value[wId]
       const itemIdx = list.findIndex(s => s.session_id === sess.session_id)
       if (itemIdx !== -1) {
-        list[itemIdx] = { ...list[itemIdx], ...sess }
+        if (!isStaleIncoming(list[itemIdx], sess)) {
+          list[itemIdx] = mergeSessionPatch(list[itemIdx], sess)
+        }
       } else {
         list.push(sess)
       }
@@ -142,38 +225,96 @@ export const useSessionStore = defineStore('session', () => {
       }
     }
 
-    if (currentSession.value?.session_id === sess.session_id) {
-      if (sess.status === 'pending') {
-        currentSession.value = { ...currentSession.value, ...sess }
-      } else {
-        currentSession.value = null
+    const cur = currentSession.value
+    if (cur?.session_id === sess.session_id) {
+      if (!isStaleIncoming(cur, sess)) {
+        currentSession.value = sess.status === 'pending' ? mergeSessionPatch(cur, sess) : null
       }
-    } else if (sess.status === 'pending' && !currentSession.value) {
+    } else if (sess.status === 'pending' && !cur) {
       currentSession.value = sess
     }
   }
 
+  // 校准请求统一走合并调度：同一窗口内范围取并集，去抖 120ms + 最长等待 1s，到点只执行一次
+  function flushSync(scope: ResolvedSyncScope) {
+    if (scope.current) void fetchCurrentSession()
+    if (scope.sessions) void fetchSessions()
+    if (scope.queued) void fetchQueuedFeedbacks()
+    if (scope.workflow) {
+      const wId = activeWorkflowId()
+      if (wId) void loadWorkflowSessions(wId, true)
+    }
+  }
+  const syncScheduler = createSyncScheduler(flushSync)
+
+  function scheduleSync(scope: SyncScope) {
+    syncScheduler.schedule(scope)
+  }
+
+  // 全量校准：仅用于无法补丁的场景（无载荷事件、结构性变更、重连、久别回到前台）
   function debouncedRefresh() {
-    if (refreshTimer) clearTimeout(refreshTimer)
-    refreshTimer = setTimeout(() => {
-      fetchCurrentSession()
-      fetchSessions()
-      fetchQueuedFeedbacks()
-      const activeWId = selectedSession.value?.workflow_id || selectedSession.value?.session_id
-      if (activeWId) {
-        loadWorkflowSessions(activeWId, true)
-      }
-    }, 120)
+    scheduleSync(FULL_SYNC_SCOPE)
+  }
+
+  // MCP 侧通知只带 session_id（等待者注册 / 注销、新会话创建等）：按 id 拉取这一条会话即可，
+  // 同一会话的连续通知合并为一次在途 + 一次尾随；拉取结果自带实时字段，直接补丁
+  const pokeFlight = createKeyedFlight(async (sessionId: string) => {
+    try {
+      const res = await sessionsApi.get(sessionId)
+      if (res?.session) applySessionPayload(res.session)
+    } catch (err: any) {
+      // 404：会话已被删除，由 session_deleted 事件负责清理
+      if (err?.response?.status !== 404) console.error(`Failed to fetch session ${sessionId}`, err)
+    }
+  })
+
+  // 带完整会话的事件在补丁之后还需要校准哪些轻量数据
+  function scopeForFullEvent(kind: SessionEventKind, session: FeedbackSession): SyncScope {
+    switch (kind) {
+      case 'archived':
+      case 'unarchived':
+        // 归档 / 取消归档影响整个工作流的多行状态，属于结构性变更
+        return FULL_SYNC_SCOPE
+      case 'update':
+      case 'completed':
+      case 'cancelled':
+        // 完成 / 取消后可能有另一个待反馈会话接替成为「当前会话」；队列也可能随之变化
+        return { current: true, queued: true }
+      case 'updated':
+        // 会话被 AI 消费（completed）时，排队中的反馈可能已随新轮次被吸收，队列需要校准；其他更新不影响队列
+        return session.status === 'completed' ? { queued: true } : {}
+      default:
+        return {}
+    }
+  }
+
+  function handleSessionEvent(kind: SessionEventKind, payload: unknown) {
+    const classified = classifySessionPayload(payload)
+    if (classified.kind === 'full' && classified.session) {
+      // 载荷即权威：只打补丁，不整表重拉（INV-R4）
+      applySessionPayload(classified.session)
+      scheduleSync(scopeForFullEvent(kind, classified.session))
+    } else if (classified.kind === 'poke' && classified.sessionId) {
+      void pokeFlight.request(classified.sessionId, true)
+      // 新会话创建需要触发「新反馈请求」通知并同步 currentSession，这些都在 fetchCurrentSession 里
+      scheduleSync({ current: true, queued: true })
+    } else {
+      // 载荷里没有会话（解析失败等）：无法补丁，退回整表校准
+      debouncedRefresh()
+    }
   }
 
   async function fetchSessions(status?: string) {
     const reqSeq = ++fetchSessionsSeq
+    const touched = new Set<string>()
+    sessionsListTouched.add(touched)
     try {
       const res = await sessionsApi.list({ status, limit: 200, brief: true })
       if (reqSeq !== fetchSessionsSeq) {
         return
       }
-      sessions.value = res.sessions
+      // 在途期间被本地补丁改动过的会话以本地为准，其余以服务端快照为准
+      sessions.value = mergeFetchedList(sessions.value, res.sessions, touched, { localOnlyPosition: 'start' })
       if (!selectedSession.value) {
         if (currentSession.value) {
           selectSession(currentSession.value)
@@ -183,12 +324,14 @@ export const useSessionStore = defineStore('session', () => {
       } else {
         // 如果已经选中了某个会话，在 sessions 列表中找到最新对象并同步状态（例如已完成、已更新）
         const updated = res.sessions.find(s => s.session_id === selectedSession.value?.session_id)
-        if (updated) {
+        if (updated && !isStaleIncoming(selectedSession.value, updated)) {
           selectedSession.value = { ...selectedSession.value, ...updated }
         }
       }
     } catch (err) {
       console.error('Failed to list sessions', err)
+    } finally {
+      sessionsListTouched.delete(touched)
     }
   }
 
@@ -201,13 +344,13 @@ export const useSessionStore = defineStore('session', () => {
         images: images
       })
       if (res.session) {
+        // 提交接口返回该会话提交后的权威状态，本地补丁即可，界面不必等待任何整表重拉；
+        // 后续的 session_completed 事件会把 currentSession 等衔接好，SSE 不在线时才退回整表校准
         applySessionPayload(res.session)
-        const wId = res.session.workflow_id || res.session.session_id
-        if (wId) {
-          await loadWorkflowSessions(wId, true)
-        }
+        if (!sseConnected.value) debouncedRefresh()
+      } else {
+        debouncedRefresh()
       }
-      await fetchSessions()
       return res.session
     } finally {
       submitting.value = false
@@ -258,11 +401,15 @@ export const useSessionStore = defineStore('session', () => {
       const idx = rounds.findIndex(r => r.session_id === sessionId)
       if (idx !== -1) {
         rounds.splice(idx, 1)
+        // 标记为本地已删除：在途的整表拉取若带回旧快照，不能让它复活
+        noteLocalChange(wId, sessionId)
         if (rounds.length === 0) {
           delete workflowSessionsCache.value[wId]
         }
       }
     }
+    noteLocalChange(undefined, sessionId)
+    sessions.value = sessions.value.filter(s => s.session_id !== sessionId)
     // 2. 从 currentWorkflowSessions 中清理
     const curIdx = currentWorkflowSessions.value.findIndex(r => r.session_id === sessionId)
     if (curIdx !== -1) {
@@ -401,21 +548,32 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  // 某个会话在本地各级缓存里已有的非空标题。
+  // 自定义工作流标题由列表接口注入，撤回不会改变标题，所以撤回补丁沿用本地标题，不让接口里的原始标题把它冲掉。
+  function cachedTitleOf(sessionId: string, workflowId?: string): string {
+    const pools: Array<FeedbackSession | null | undefined> = [
+      selectedSession.value,
+      currentSession.value,
+      ...(workflowId ? workflowSessionsCache.value[workflowId] ?? [] : []),
+      ...sessions.value,
+    ]
+    return pools.find(s => !!s && s.session_id === sessionId && !!s.title)?.title || ''
+  }
+
   async function revokeFeedback(sessionId: string) {
     try {
       submitting.value = true
       const res = await sessionsApi.revoke(sessionId)
-      if (currentSession.value?.session_id === sessionId) {
-        currentSession.value = res.session
+      if (res.session) {
+        // 撤回接口返回该会话撤回后的权威状态，本地补丁即可：回填输入框只取决于这一次往返，
+        // 不再串行等待整条工作流与会话列表的重拉（INV-R1）。服务端随后广播的 session_updated 与此等价，重复应用是幂等的。
+        const title = cachedTitleOf(sessionId, res.session.workflow_id || res.session.session_id)
+        applySessionPayload(title ? { ...res.session, title } : res.session)
+        // SSE 不在线时没有后续事件可依赖，退回后台整表校准
+        if (!sseConnected.value) debouncedRefresh()
+      } else {
+        debouncedRefresh()
       }
-      if (selectedSession.value?.session_id === sessionId) {
-        selectedSession.value = res.session
-      }
-      const wId = res.session?.workflow_id || res.session?.session_id
-      if (wId) {
-        await loadWorkflowSessions(wId, true)
-      }
-      await fetchSessions()
       return res.revoked
     } finally {
       submitting.value = false
@@ -435,9 +593,10 @@ export const useSessionStore = defineStore('session', () => {
       if (res.session) {
         applySessionPayload(res.session)
       }
-      await loadWorkflowSessions(workflowId, true)
-      await fetchSessions()
+      // 待发送队列可能因此变化（入队，或被进行中的会话吸收），这是一次极轻量的请求；
+      // 会话本身由补丁 + SSE 事件维护，SSE 不在线时才退回整表校准
       await fetchQueuedFeedbacks(workflowId)
+      if (!sseConnected.value) debouncedRefresh()
       return res
     } finally {
       submitting.value = false
@@ -499,34 +658,47 @@ export const useSessionStore = defineStore('session', () => {
       eventSource = null
     }
     sseConnected.value = false
+    lastSseGapAt = Date.now()
     scheduleReconnect()
   }
 
   function handleVisibilityChange() {
-    if (document.visibilityState === 'visible') {
-      if (!sseConnected.value && !isManualDisconnect) {
-        console.log('[SSE] Tab became visible and SSE is disconnected. Triggering immediate reconnect...')
-        if (reconnectTimer) {
-          window.clearTimeout(reconnectTimer)
-          reconnectTimer = null
-        }
-        reconnectAttempt = 0
-        connectSSE()
-      } else if (sseConnected.value) {
-        // 唤醒自愈：切回前台瞬间主动同步最新状态，消除移动端休眠恢复后的数据滞后
-        debouncedRefresh()
+    if (document.visibilityState === 'hidden') {
+      awayTracker.markInactive()
+      return
+    }
+    if (document.visibilityState !== 'visible') return
+
+    // 只有离开足够久才值得校准；短暂切换期间 SSE 持续在线，数据一直在线同步，没有任何必要发请求（INV-R5）
+    const awayLongEnough = awayTracker.markActive()
+    if (!sseConnected.value && !isManualDisconnect) {
+      console.log('[SSE] Tab became visible and SSE is disconnected. Triggering immediate reconnect...')
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer)
+        reconnectTimer = null
       }
+      reconnectAttempt = 0
+      connectSSE()
+    } else if (sseConnected.value && awayLongEnough) {
+      // 唤醒自愈：久别回到前台时主动同步最新状态，消除移动端休眠恢复后的数据滞后
+      debouncedRefresh()
     }
   }
 
+  function handleWindowBlur() {
+    awayTracker.markInactive()
+  }
+
   function handleWindowFocus() {
-    if (sseConnected.value) {
+    const awayLongEnough = awayTracker.markActive()
+    if (sseConnected.value && awayLongEnough) {
       debouncedRefresh()
     }
   }
 
   if (typeof window !== 'undefined') {
     document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('blur', handleWindowBlur)
     window.addEventListener('focus', handleWindowFocus)
   }
 
@@ -551,11 +723,19 @@ export const useSessionStore = defineStore('session', () => {
       // 连接恢复后主动拉取最新数据，确保断线期间事件不丢失
       fetchCurrentSession()
       fetchSessions()
+      if (hasConnectedOnce) {
+        // 重连：断线期间可能漏掉了事件，选中工作流与队列都要整表校准一次（首次连接没有这个问题，避免重复拉取）
+        const wId = activeWorkflowId()
+        if (wId) void loadWorkflowSessions(wId, true)
+        void fetchQueuedFeedbacks()
+      }
+      hasConnectedOnce = true
     }
 
     eventSource.onerror = () => {
       console.warn('[SSE] Connection error.')
       sseConnected.value = false
+      lastSseGapAt = Date.now()
       if (eventSource) {
         try {
           eventSource.close()
@@ -577,48 +757,21 @@ export const useSessionStore = defineStore('session', () => {
     eventSource.addEventListener('connected', () => {
       kickWatchdog()
     })
-    eventSource.addEventListener('session_update', (e: MessageEvent) => {
-      kickWatchdog()
-      const payload = parseSSEEventData(e)
-      if (payload) applySessionPayload(payload)
-      debouncedRefresh()
-    })
-    eventSource.addEventListener('session_updated', (e: MessageEvent) => {
-      kickWatchdog()
-      const payload = parseSSEEventData(e)
-      if (payload) applySessionPayload(payload)
-      debouncedRefresh()
-    })
-    eventSource.addEventListener('session_completed', (e: MessageEvent) => {
-      kickWatchdog()
-      const payload = parseSSEEventData(e)
-      if (payload) applySessionPayload(payload)
-      debouncedRefresh()
-    })
-    eventSource.addEventListener('session_cancelled', (e: MessageEvent) => {
-      kickWatchdog()
-      const payload = parseSSEEventData(e)
-      if (payload) applySessionPayload(payload)
-      debouncedRefresh()
-    })
-    eventSource.addEventListener('session_archived', (e: MessageEvent) => {
-      kickWatchdog()
-      const payload = parseSSEEventData(e)
-      if (payload) applySessionPayload(payload)
-      debouncedRefresh()
-    })
-    eventSource.addEventListener('session_unarchived', (e: MessageEvent) => {
-      kickWatchdog()
-      const payload = parseSSEEventData(e)
-      if (payload) applySessionPayload(payload)
-      debouncedRefresh()
-    })
-    eventSource.addEventListener('session_keepalive', (e: MessageEvent) => {
-      kickWatchdog()
-      const payload = parseSSEEventData(e)
-      if (payload) applySessionPayload(payload)
-      debouncedRefresh()
-    })
+    const sessionEvents: Array<[string, SessionEventKind]> = [
+      ['session_update', 'update'],
+      ['session_updated', 'updated'],
+      ['session_completed', 'completed'],
+      ['session_cancelled', 'cancelled'],
+      ['session_archived', 'archived'],
+      ['session_unarchived', 'unarchived'],
+      ['session_keepalive', 'keepalive'],
+    ]
+    for (const [eventName, kind] of sessionEvents) {
+      eventSource.addEventListener(eventName, (e: MessageEvent) => {
+        kickWatchdog()
+        handleSessionEvent(kind, parseSSEEventData(e))
+      })
+    }
     eventSource.addEventListener('session_deleted', () => {
       kickWatchdog()
       debouncedRefresh()
@@ -686,6 +839,7 @@ export const useSessionStore = defineStore('session', () => {
 
   function disconnectSSE() {
     isManualDisconnect = true
+    lastSseGapAt = Date.now()
     if (watchdogTimer) {
       window.clearTimeout(watchdogTimer)
       watchdogTimer = null

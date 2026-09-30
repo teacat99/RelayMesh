@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/teacat99/RelayMesh/internal/config"
 	"github.com/teacat99/RelayMesh/internal/mcp"
+	"github.com/teacat99/RelayMesh/internal/model"
 	"github.com/teacat99/RelayMesh/internal/store"
 )
 
@@ -27,7 +28,17 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 	}
 
 	broker := NewSSEBroker()
-	mcpServer := mcp.NewServer(cfg, st, func(eventType string, data any) {
+	var mcpServer *mcp.Server
+	mcpServer = mcp.NewServer(cfg, st, func(eventType string, data any) {
+		// MCP 侧直接广播的会话对象（例如 AI 消费反馈后的 session_updated）与 REST 广播走同一套载荷规整：
+		// 补齐实时字段并剥离图片 Base64，避免把用户上传的截图原样推送给每个浏览器。
+		if sess, ok := data.(*model.FeedbackSession); ok {
+			var live sessionLiveSource
+			if mcpServer != nil {
+				live = mcpServer
+			}
+			data = sessionEventPayload(live, sess)
+		}
 		broker.Broadcast(eventType, data)
 	})
 
@@ -35,6 +46,9 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 	handler := NewAPIHandler(cfg, st, mcpServer, broker)
 
 	engine := gin.Default()
+
+	// 可信代理与客户端 IP：登录反爆破等以 c.ClientIP() 为键的逻辑依赖它，必须收窄 Gin「信任全部代理」的默认值。
+	ConfigureTrustedProxies(engine, cfg.TrustedProxies)
 
 	// CORS Middleware
 	engine.Use(func(c *gin.Context) {

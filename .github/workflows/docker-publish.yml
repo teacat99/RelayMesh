@@ -15,6 +15,8 @@ env:
 
 jobs:
   build-and-push:
+    # 只在公开库构建并推送镜像：私有库没有 Docker Hub 凭据，每次推送 master 都会空跑到失败甚至挂满 6 小时
+    if: ${{ github.repository == 'teacat99/RelayMesh' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

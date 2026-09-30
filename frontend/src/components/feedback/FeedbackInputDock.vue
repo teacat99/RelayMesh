@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch, nextTick, h } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch, nextTick, h } from 'vue'
 import { useResizeObserver } from '@vueuse/core'
 import { useSessionStore } from '../../stores/session'
 import { useSettingsStore } from '../../stores/settings'
@@ -37,6 +37,7 @@ import PhaseSlider from './PhaseSlider.vue'
 import type { QuickPresetItem } from '../../stores/settings'
 import type { SessionImage } from '../../api/types'
 import { draftsApi } from '../../api/client'
+import { createDraftPersister, draftSignature } from '../../utils/draftSync'
 import { VoiceRecorderStreamer } from '../../utils/voiceStream'
 import { usePreviewStore } from '../../stores/preview'
 import { toast, toastDestructive } from '@/components/ui/sonner'
@@ -239,96 +240,116 @@ const multiDrafts = ref<MultiDraftState>({
   ]
 })
 
-function getDraftStorageKey(workflowId?: string): string {
-  const wId = workflowId || currentBindingWorkflowId.value
-  return `relaymesh_multidrafts_wf_${wId}`
+function getDraftStorageKey(workflowId: string): string {
+  return `relaymesh_multidrafts_wf_${workflowId}`
 }
 
-let dbSaveTimer: number | null = null
-
-function triggerDbSave(wId: string) {
-  if (dbSaveTimer) window.clearTimeout(dbSaveTimer)
-  dbSaveTimer = window.setTimeout(() => {
-    draftsApi.save(wId, multiDrafts.value.activeIndex, JSON.stringify(multiDrafts.value)).catch(err => {
-      console.warn('Failed to sync draft to server db:', err)
-    })
-  }, 400)
+// 「这份内容已经同步到服务端」的标记键：值是内容哈希，载入时若与本地内容一致就不必再上传一遍
+function getDraftSyncedMarkKey(workflowId: string): string {
+  return `relaymesh_multidrafts_synced_wf_${workflowId}`
 }
 
-function getSanitizedDraftsForStorage(): MultiDraftState {
+// 输入区（responseText / selectedPresets / images）与 multiDrafts 当前所属的工作流。
+// 只在 loadDrafts 里更新，所有落盘都以它为准，不再在保存时用响应式状态临时推导：
+// 切换工作流的瞬间，推导出来的已经是新工作流，而输入区里还是旧工作流的内容，旧实现因此会把旧草稿写进新工作流的存储键。
+let boundWorkflowId = ''
+let loadSeq = 0
+
+// 落盘引擎（去抖 + 内容签名跳过未变化 + 上传串行，详见 utils/draftSync.ts）
+const draftPersister = createDraftPersister({
+  writeLocal: (wId, json) => localStorage.setItem(getDraftStorageKey(wId), json),
+  upload: (wId, activeIndex, json) => draftsApi.save(wId, activeIndex, json),
+  onUploaded: (wId, hash) => {
+    try {
+      localStorage.setItem(getDraftSyncedMarkKey(wId), hash)
+    } catch (_) {}
+  },
+  onError: (kind, wId, err) => {
+    if (kind === 'remote') console.warn(`Failed to sync draft to server db (${wId}):`, err)
+  },
+})
+
+function createEmptyDrafts(): MultiDraftState {
   return {
-    activeIndex: multiDrafts.value.activeIndex,
-    drafts: multiDrafts.value.drafts.map(slot => ({
-      id: slot.id,
-      text: slot.text,
-      presets: slot.presets,
-      images: (slot.images || []).map(img => ({
-        name: img.name,
-        format: img.format,
-        data_type: img.data_type,
-        hash: img.hash,
-        width: img.width,
-        height: img.height,
-        // 小于 100KB 的局部小截图允许落盘，大图不落盘 LocalStorage（杜绝 5MB 溢出与序列化卡顿，大图在当前生命周期内存常驻）
-        data: (img.data && img.data.length < 100 * 1024) ? img.data : ''
-      })),
-      updated_at: slot.updated_at
-    }))
+    activeIndex: 0,
+    drafts: [{ id: '1', text: '', presets: [], images: [], updated_at: Date.now() }]
   }
+}
+
+function parseStoredDrafts(raw: string | null | undefined): MultiDraftState | null {
+  if (!raw) return null
+  try {
+    const data = JSON.parse(raw)
+    if (data && Array.isArray(data.drafts) && data.drafts.length > 0) {
+      const idx = data.activeIndex
+      return {
+        activeIndex: typeof idx === 'number' && idx >= 0 && idx < data.drafts.length ? idx : 0,
+        drafts: data.drafts
+      }
+    }
+  } catch (_) {}
+  return null
+}
+
+// 把输入区里的内容写回当前草稿卡槽（只是内存赋值，不做任何序列化）
+function syncActiveSlotFromInputs() {
+  const slot = multiDrafts.value.drafts[multiDrafts.value.activeIndex]
+  if (!slot) return
+  slot.text = responseText.value
+  slot.presets = selectedPresets.value
+  slot.images = images.value
+  slot.updated_at = Date.now()
+}
+
+// 落盘引擎冲刷时读取内容的入口：只有输入区仍然属于 wId 时才返回，否则返回 null 让本次冲刷作废，绝不写错地方
+function readBoundDrafts(wId: string): MultiDraftState | null {
+  if (boundWorkflowId !== wId) return null
+  syncActiveSlotFromInputs()
+  return multiDrafts.value
 }
 
 function saveDrafts() {
   if (isResetting) return
-  const wId = currentBindingWorkflowId.value
-  const wKey = getDraftStorageKey(wId)
-  const curIdx = multiDrafts.value.activeIndex
-  if (multiDrafts.value.drafts[curIdx]) {
-    multiDrafts.value.drafts[curIdx].text = responseText.value
-    multiDrafts.value.drafts[curIdx].presets = selectedPresets.value
-    multiDrafts.value.drafts[curIdx].images = images.value
-    multiDrafts.value.drafts[curIdx].updated_at = Date.now()
-  }
+  const wId = boundWorkflowId
+  if (!wId) return
+  syncActiveSlotFromInputs()
+  // 只登记「有变化」；本地写入 300ms 去抖、服务端 1.5s 去抖，内容没变化则都不执行
+  draftPersister.touch(wId, () => readBoundDrafts(wId))
+}
 
-  try {
-    localStorage.setItem(wKey, JSON.stringify(getSanitizedDraftsForStorage()))
-    // 彻底清除旧版本遗留的全局污染草稿键
-    localStorage.removeItem('relaymesh_active_draft_content')
-    localStorage.removeItem('relaymesh_draft_global')
-  } catch (_) {}
-
-  // 异步同步到后端数据库
-  triggerDbSave(wId)
+// 显式操作（重置、删除、撤销删除）以及离开页面时需要立即落盘
+function flushDrafts(wId: string = boundWorkflowId) {
+  if (!wId) return
+  draftPersister.touch(wId, () => readBoundDrafts(wId))
+  draftPersister.flush(wId)
 }
 
 async function loadDrafts(forceWorkflowId?: string) {
-  if (isResetting) return
   const wId = forceWorkflowId || currentBindingWorkflowId.value
   const wKey = getDraftStorageKey(wId)
-  
-  // 彻底清除旧版本遗留的全局污染草稿键，避免跨会话乱恢复
+  const seq = ++loadSeq
+  // 先切换绑定：此后所有保存的目标都是新工作流
+  boundWorkflowId = wId
+
+  // 彻底清除旧版本遗留的全局污染草稿键，避免跨会话乱恢复（载入时清理一次即可，不必在每次按键时做）
   try {
     localStorage.removeItem('relaymesh_active_draft_content')
     localStorage.removeItem('relaymesh_draft_global')
   } catch (_) {}
 
   // 1. 本地快速恢复 (0 延迟即时呈现)
+  let loaded: MultiDraftState | null = null
+  let migratedFromLegacy = false
   try {
-    const raw = localStorage.getItem(wKey)
-    if (raw) {
-      const data = JSON.parse(raw)
-      if (data && Array.isArray(data.drafts) && data.drafts.length > 0) {
-        multiDrafts.value = {
-          activeIndex: typeof data.activeIndex === 'number' && data.activeIndex < data.drafts.length ? data.activeIndex : 0,
-          drafts: data.drafts
-        }
-      }
-    } else {
+    loaded = parseStoredDrafts(localStorage.getItem(wKey))
+    if (!loaded) {
       // 检查旧单草稿格式
       const oldKey = `relaymesh_draft_wf_${wId}`
       const oldRaw = localStorage.getItem(oldKey)
       if (oldRaw) {
+        migratedFromLegacy = true
         const oldData = JSON.parse(oldRaw)
-        multiDrafts.value = {
+        loaded = {
           activeIndex: 0,
           drafts: [
             {
@@ -341,47 +362,57 @@ async function loadDrafts(forceWorkflowId?: string) {
           ]
         }
         localStorage.removeItem(oldKey)
-      } else {
-        // 无草稿时生成 1 个干净空草稿
-        multiDrafts.value = {
-          activeIndex: 0,
-          drafts: [
-            { id: '1', text: '', presets: [], images: [], updated_at: Date.now() }
-          ]
-        }
       }
     }
-
-    const current = multiDrafts.value.drafts[multiDrafts.value.activeIndex] || multiDrafts.value.drafts[0]
-    responseText.value = current.text || ''
-    selectedPresets.value = current.presets || []
-    images.value = current.images || []
   } catch (_) {}
+  const restoredLocally = loaded !== null
+
+  // 无草稿（或记录已损坏）时生成 1 个干净空草稿；无论如何都要整体替换，绝不能让上一个工作流的内容残留在输入区
+  multiDrafts.value = loaded || createEmptyDrafts()
+  const current = multiDrafts.value.drafts[multiDrafts.value.activeIndex] || multiDrafts.value.drafts[0]
+  responseText.value = current.text || ''
+  selectedPresets.value = current.presets || []
+  images.value = current.images || []
+
+  if (restoredLocally) {
+    // 本地内容就是刚读到的内容，无需重复写；服务端是否已一致取决于上次上传成功后留下的标记
+    let marker: string | null = null
+    try {
+      marker = localStorage.getItem(getDraftSyncedMarkKey(wId))
+    } catch (_) {}
+    // 旧格式迁移得来的内容还不在新键里（旧键已删除），必须立刻落盘，否则在下一次编辑之前刷新就会丢草稿
+    draftPersister.markPersisted(wId, multiDrafts.value, { local: !migratedFromLegacy, remoteSyncedHash: marker })
+    if (migratedFromLegacy) flushDrafts(wId)
+    return
+  }
+
+  // 空白草稿不需要往服务端传，但本地存储里还没有它，稍后需要落一份（同时也标记「已经问过服务端」，避免每次进入都再问一遍）
+  draftPersister.markPersisted(wId, multiDrafts.value, { local: false, remote: true })
+  const emptySignature = draftSignature(multiDrafts.value)
 
   // 2. 异步从后端数据库拉取最新草稿数据（仅当本地无任何记录时才启用，防止覆盖已清空的草稿）
-  const hasLocalEntry = (() => { try { return localStorage.getItem(wKey) !== null } catch { return false } })()
-  if (!hasLocalEntry) {
-    try {
-      const res = await draftsApi.get(wId)
-      if (res && res.draft && res.draft.drafts_json) {
-        const serverData = JSON.parse(res.draft.drafts_json)
-        if (serverData && Array.isArray(serverData.drafts) && serverData.drafts.length > 0) {
-          multiDrafts.value = {
-            activeIndex: typeof serverData.activeIndex === 'number' && serverData.activeIndex < serverData.drafts.length ? serverData.activeIndex : 0,
-            drafts: serverData.drafts
-          }
-          const cur = multiDrafts.value.drafts[multiDrafts.value.activeIndex] || multiDrafts.value.drafts[0]
-          responseText.value = cur.text || ''
-          selectedPresets.value = cur.presets || []
-          images.value = cur.images || []
-          try {
-            localStorage.setItem(wKey, JSON.stringify(multiDrafts.value))
-          } catch (_) {}
-        }
+  try {
+    const res = await draftsApi.get(wId)
+    // 等待期间已经切走：这份服务端草稿属于别的工作流的旧绑定，直接丢弃
+    if (seq !== loadSeq || boundWorkflowId !== wId) return
+    // 等待期间用户已经开始输入：以用户输入为准，不用服务端内容覆盖
+    syncActiveSlotFromInputs()
+    const untouched = draftSignature(multiDrafts.value) === emptySignature
+    if (untouched && res && res.draft && res.draft.drafts_json) {
+      const serverData = parseStoredDrafts(res.draft.drafts_json)
+      if (serverData) {
+        multiDrafts.value = serverData
+        const cur = serverData.drafts[serverData.activeIndex] || serverData.drafts[0]
+        responseText.value = cur.text || ''
+        selectedPresets.value = cur.presets || []
+        images.value = cur.images || []
+        draftPersister.markPersisted(wId, multiDrafts.value, { local: false, remote: true })
       }
-    } catch (err) {
-      console.warn('Failed to fetch draft from server db:', err)
     }
+    // 落一份本地记录（服务端有草稿则是它，没有则是空白），之后进入不再重复询问服务端
+    flushDrafts(wId)
+  } catch (err) {
+    console.warn('Failed to fetch draft from server db:', err)
   }
 }
 
@@ -441,7 +472,12 @@ let deletedDraftSnapshot: {
 function restoreDraftSnapshot() {
   if (!deletedDraftSnapshot) return
   const { draft, index, totalBefore, workflowId } = deletedDraftSnapshot
-  const wId = workflowId || sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id || 'default'
+  // 输入区已经切到别的工作流：撤销会把草稿插进错误的工作流，宁可放弃也不能串草稿
+  if (workflowId !== boundWorkflowId) {
+    deletedDraftSnapshot = null
+    toast.warning('该草稿所属的工作流已切换，无法撤销删除')
+    return
+  }
 
   if (totalBefore <= 1) {
     multiDrafts.value.drafts[0] = { ...draft }
@@ -457,14 +493,13 @@ function restoreDraftSnapshot() {
   selectedPresets.value = draft.presets || []
   images.value = draft.images || []
   saveDrafts()
-
-  draftsApi.save(wId, multiDrafts.value.activeIndex, JSON.stringify(multiDrafts.value)).catch(() => {})
+  flushDrafts()
   deletedDraftSnapshot = null
   toast.success('已成功撤销并恢复草稿')
 }
 
 function deleteCurrentDraft() {
-  const wId = sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id || 'default'
+  const wId = boundWorkflowId
   const curIdx = multiDrafts.value.activeIndex
   const currentDraft = multiDrafts.value.drafts[curIdx]
 
@@ -508,12 +543,14 @@ function deleteCurrentDraft() {
     saveDrafts()
     toastDestructive('已清空当前草稿', () => restoreDraftSnapshot())
   }
-  draftsApi.save(wId, multiDrafts.value.activeIndex, JSON.stringify(multiDrafts.value)).catch(() => {})
+  // 删除是显式操作，立即落盘
+  flushDrafts(wId)
 }
 
-function resetForm(targetWorkflowId?: string) {
+// 重置输入区（提交之后清空当前草稿）。被重置的永远是输入区当前所属的工作流，落盘也以它为准；
+// 参数只为兼容旧调用保留——调用方传入的可能不是草稿所属的键（例如任务视图传的是任务 ID）。
+function resetForm(_targetWorkflowId?: string) {
   isResetting = true
-  const wId = targetWorkflowId || sessionStore.currentSession?.workflow_id || sessionStore.selectedSession?.workflow_id || 'default'
   if (multiDrafts.value.drafts.length > 1) {
     const curIdx = multiDrafts.value.activeIndex
     multiDrafts.value.drafts.splice(curIdx, 1)
@@ -536,13 +573,8 @@ function resetForm(targetWorkflowId?: string) {
     }
   }
 
-  const wKey = getDraftStorageKey(targetWorkflowId)
-  try {
-    localStorage.setItem(wKey, JSON.stringify(multiDrafts.value))
-  } catch (_) {}
-
-  // 数据库也同步更新
-  draftsApi.save(wId, multiDrafts.value.activeIndex, JSON.stringify(multiDrafts.value)).catch(() => {})
+  // 本地与服务端立即同步（提交后的空白状态必须马上落盘，不能等去抖）
+  flushDrafts()
 
   setTimeout(() => {
     isResetting = false
@@ -609,14 +641,25 @@ watch(images, () => {
 }, { deep: false })
 
 // 仅当用户切换到不同的 workflow_id 时才做草稿切换；以 currentBindingWorkflowId 为唯一真源
-watch(currentBindingWorkflowId, (newWId, oldWId) => {
-  if (newWId !== oldWId) {
-    if (oldWId) {
-      saveDrafts()
-    }
-    loadDrafts(newWId)
+watch(currentBindingWorkflowId, (newWId) => {
+  if (!newWId || newWId === boundWorkflowId) return
+  const previous = boundWorkflowId
+  if (previous) {
+    // 此刻输入区与 multiDrafts 仍然属于旧工作流：先把它立即落盘，再切换绑定（INV-D1 / INV-D2）
+    flushDrafts(previous)
+    draftPersister.release(previous)
   }
+  void loadDrafts(newWId)
 })
+
+// 页面被隐藏（切标签、锁屏、关闭）时立即落盘，不等去抖
+function handleDraftVisibilityChange() {
+  if (document.visibilityState === 'hidden') draftPersister.flush()
+}
+
+function handleDraftPageHide() {
+  draftPersister.flush()
+}
 
 // ==========================================
 // 快捷预设 Pills (支持右键编辑、自动追加规则勾选)
@@ -1080,12 +1123,21 @@ onMounted(() => {
   loadDrafts()
   window.addEventListener('paste', handlePaste)
   window.addEventListener('resize', handleWindowResize)
+  document.addEventListener('visibilitychange', handleDraftVisibilityChange)
+  window.addEventListener('pagehide', handleDraftPageHide)
+})
+
+onBeforeUnmount(() => {
+  // 卸载前把所有待处理的草稿落盘（此时输入区状态仍然有效）
+  draftPersister.flush()
 })
 
 onUnmounted(() => {
   stopVoiceRecognition()
   window.removeEventListener('paste', handlePaste)
   window.removeEventListener('resize', handleWindowResize)
+  document.removeEventListener('visibilitychange', handleDraftVisibilityChange)
+  window.removeEventListener('pagehide', handleDraftPageHide)
 })
 
   // 悬浮区真实尺寸感知与几何自适应拓扑（Demand 3 & Demand 2）

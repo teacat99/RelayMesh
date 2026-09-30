@@ -49,6 +49,11 @@ func runStdio() {
 	}
 	defer st.Close()
 
+	// 解析 JWT 签名密钥：内置默认值 / 弱密钥一律替换为自动生成并持久化的随机密钥（必须早于 api.NewServer）。
+	if err := applyJWTSecret(cfg, st); err != nil {
+		log.Fatalf("[RelayMesh stdio] Failed to resolve JWT signing secret: %v", err)
+	}
+
 	if cfg.MCPToken != "" {
 		if _, err := st.EnsureEnvMCPCredential(context.Background(), cfg.MCPToken); err != nil {
 			log.Printf("[RelayMesh stdio] Warning: failed to ensure env MCP credential: %v", err)

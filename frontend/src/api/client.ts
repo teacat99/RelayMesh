@@ -1,5 +1,6 @@
 import axios from 'axios'
 import type { FeedbackSession, TaskSummary, TaskDetail, Report, Feedback, SessionImage, WorkflowDraft, TaskStage, Segment, WaitPolicy } from './types'
+import { perfRecordRequest } from '../utils/perf'
 
 export const api = axios.create({
   baseURL: '/api/v1',
@@ -43,6 +44,36 @@ api.interceptors.response.use(
     return Promise.reject(error)
   }
 )
+
+// 仅开发模式：记录每个请求的路由、耗时与解码后字节数，供 window.__rmPerf 汇总（D-171 / P0，生产构建整段树摇移除）
+if (import.meta.env.DEV) {
+  api.interceptors.request.use(config => {
+    ;(config as any).__perfStart = performance.now()
+    return config
+  })
+  const record = (config: any, status: number, bytes: number) => {
+    const startedAt: number = config?.__perfStart ?? performance.now()
+    perfRecordRequest({
+      method: String(config?.method || 'get').toUpperCase(),
+      url: String(config?.url || ''),
+      status,
+      ms: performance.now() - startedAt,
+      bytes,
+      startedAt,
+    })
+  }
+  api.interceptors.response.use(
+    response => {
+      const text = (response.request as XMLHttpRequest | undefined)?.responseText
+      record(response.config, response.status, typeof text === 'string' ? text.length : 0)
+      return response
+    },
+    error => {
+      record(error?.config, error?.response?.status ?? 0, 0)
+      return Promise.reject(error)
+    }
+  )
+}
 
 // Initialize token from storage if available
 const storedToken = localStorage.getItem('relaymesh_token')

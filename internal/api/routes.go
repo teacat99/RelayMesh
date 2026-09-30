@@ -371,15 +371,13 @@ func (h *APIHandler) SubmitFeedback(c *gin.Context) {
 		return
 	}
 
-	// Wake up MCP waiter & broadcast SSE
+	// 先取快照再唤醒 MCP 等待者：等待者协程会把同一个 session 对象标记为已消费，
+	// 先复制既避免数据竞争，也保证「已完成」事件先于「已消费」事件发出（后者 updated_at 更新，前端据此去重）。
+	payload := h.sessionPayload(session)
 	h.mcpServer.NotifySessionCompleted(session)
-	broadcastSess := *session
-	broadcastSess.Images = make(model.SessionImages, len(session.Images))
-	copy(broadcastSess.Images, session.Images)
-	projectSessionImages(&broadcastSess)
-	h.broker.Broadcast("session_completed", &broadcastSess)
+	h.broker.Broadcast("session_completed", payload)
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": &broadcastSess})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": payload})
 }
 
 func (h *APIHandler) RevokeSession(c *gin.Context) {
@@ -390,7 +388,7 @@ func (h *APIHandler) RevokeSession(c *gin.Context) {
 		return
 	}
 
-	h.broker.Broadcast("session_updated", session)
+	h.broadcastSession("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "revoked": res, "session": session})
 }
 
@@ -433,13 +431,10 @@ func (h *APIHandler) AppendWorkflowFeedback(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		payload := h.sessionPayload(sess)
 		h.mcpServer.NotifySessionCompleted(sess)
-		broadcastSess := *sess
-		broadcastSess.Images = make(model.SessionImages, len(sess.Images))
-		copy(broadcastSess.Images, sess.Images)
-		projectSessionImages(&broadcastSess)
-		h.broker.Broadcast("session_completed", &broadcastSess)
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "type": "session", "session": &broadcastSess})
+		h.broker.Broadcast("session_completed", payload)
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "type": "session", "session": payload})
 		return
 	}
 
@@ -559,7 +554,7 @@ func (h *APIHandler) RestoreSession(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	h.broker.Broadcast("session_updated", restored)
+	h.broadcastSession("session_updated", restored)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": restored})
 }
 
@@ -572,7 +567,7 @@ func (h *APIHandler) CancelSession(c *gin.Context) {
 	}
 
 	h.mcpServer.NotifySessionCompleted(session)
-	h.broker.Broadcast("session_cancelled", session)
+	h.broadcastSession("session_cancelled", session)
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
@@ -587,7 +582,7 @@ func (h *APIHandler) KeepaliveSession(c *gin.Context) {
 		return
 	}
 
-	h.broker.Broadcast("session_keepalive", session)
+	h.broadcastSession("session_keepalive", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 
@@ -599,7 +594,7 @@ func (h *APIHandler) ArchiveSession(c *gin.Context) {
 		return
 	}
 
-	h.broker.Broadcast("session_archived", session)
+	h.broadcastSession("session_archived", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 
@@ -626,7 +621,7 @@ func (h *APIHandler) RenameSession(c *gin.Context) {
 	}
 	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
 
-	h.broker.Broadcast("session_updated", session)
+	h.broadcastSession("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 
@@ -653,7 +648,7 @@ func (h *APIHandler) UpdateSessionPromptWait(c *gin.Context) {
 	}
 	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
 
-	h.broker.Broadcast("session_updated", session)
+	h.broadcastSession("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 
@@ -680,7 +675,7 @@ func (h *APIHandler) UpdateSessionMaxChecks(c *gin.Context) {
 	}
 	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
 
-	h.broker.Broadcast("session_updated", session)
+	h.broadcastSession("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 
@@ -707,7 +702,7 @@ func (h *APIHandler) UpdateSessionWaitCountdown(c *gin.Context) {
 	}
 	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
 
-	h.broker.Broadcast("session_updated", session)
+	h.broadcastSession("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 
@@ -734,7 +729,7 @@ func (h *APIHandler) UpdateSessionUserPresence(c *gin.Context) {
 	}
 	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
 
-	h.broker.Broadcast("session_updated", session)
+	h.broadcastSession("session_updated", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 
@@ -907,7 +902,7 @@ func (h *APIHandler) UnarchiveSession(c *gin.Context) {
 		return
 	}
 
-	h.broker.Broadcast("session_unarchived", session)
+	h.broadcastSession("session_unarchived", session)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 

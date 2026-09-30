@@ -22,6 +22,7 @@ type Config struct {
 	WebPassword              string
 	JWTSecret                string
 	AllowNonLoopback         bool
+	TrustedProxies           string // RELAYMESH_TRUSTED_PROXIES，语义与校验见 api.ResolveTrustedProxies
 	WaitAfterMinutes         int
 	MaxNoFeedbackChecks      int
 	WaitInstruction          string
@@ -84,8 +85,9 @@ func LoadWithMode(mode string) *Config {
 		ExecutionToken:           getEnv("RELAYMESH_EXECUTION_TOKEN", getEnv("TWH_LITE_EXECUTION_TOKEN", "")),
 		WebUsername:              getEnv("RELAYMESH_WEB_USERNAME", "admin"),
 		WebPassword:              getEnv("RELAYMESH_WEB_PASSWORD", ""),
-		JWTSecret:                getEnv("RELAYMESH_JWT_SECRET", "relaymesh-secret-key-change-in-production"),
+		JWTSecret:                getEnv("RELAYMESH_JWT_SECRET", DefaultJWTSecret),
 		AllowNonLoopback:         getEnvBool("RELAYMESH_ALLOW_NON_LOOPBACK", getEnvBool("TWH_LITE_ALLOW_NON_LOOPBACK", mode != "stdio")),
+		TrustedProxies:           getEnv("RELAYMESH_TRUSTED_PROXIES", ""),
 		WaitAfterMinutes:         getEnvInt("RELAYMESH_WAIT_AFTER_MINUTES", getEnvInt("TWH_LITE_WAIT_AFTER_MINUTES", 5)),
 		MaxNoFeedbackChecks:      getEnvInt("RELAYMESH_MAX_NO_FEEDBACK_CHECKS", getEnvInt("TWH_LITE_MAX_NO_FEEDBACK_CHECKS", 24)),
 		WaitInstruction:          getEnv("RELAYMESH_WAIT_INSTRUCTION", getEnv("TWH_LITE_WAIT_INSTRUCTION", "请等待 {minutes} 分钟后再次调用 MCP 获取反馈。")),

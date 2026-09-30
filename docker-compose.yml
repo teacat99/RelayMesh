@@ -19,7 +19,7 @@ services:
       # 生产环境安全认证（如需密码保护，请取消注释并设置强密码）
       # - RELAYMESH_WEB_USERNAME=admin
       # - RELAYMESH_WEB_PASSWORD=YourStrongWebPassword2026!
-      # - RELAYMESH_JWT_SECRET=YourRandomJWTSecretKeyAtLeast32CharsLong!
+      # JWT 签名密钥无需配置：留空时首次启动自动生成随机密钥并持久化到数据库（如需多实例共用，可设置不少于 32 字符的随机串 RELAYMESH_JWT_SECRET）
       # - RELAYMESH_MCP_TOKEN=rmk_prod_secret_token_8888
       - RELAYMESH_ALLOW_NON_LOOPBACK=true
       - RELAYMESH_WAIT_AFTER_MINUTES=5
