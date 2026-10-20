@@ -23,7 +23,21 @@
 
 - **下面的命令已经指向预览版**：Docker 用镜像标签 `2.0.0-rc.2`，安装脚本取标签 `v2.0.0-rc.2` 上的那一份，源码克隆用 `--branch v2.0.0-rc.2`；直接照着「5 分钟上手」做就能装到预览版。
 - **预览版须知**：功能与行为在正式版之前可能调整，用于生产请自行评估；Docker 的 `latest` 镜像与一键安装脚本默认安装的版本仍是上一个正式版（1.6.3），不会被预览版改动；2.0 正式版发布后，本页会统一整理。
-- **预览期间的一处限制**：没有自带安装源的部署（单二进制 / `go run`）在「接入主机」面板里生成的命令，仍指向公开库 `main` 上的 `install.sh`，那还是 1.x 的脚本、不认识 `agent` 子命令。请用 Docker 部署（镜像自带安装源，命令由服务端生成，不受影响），或把命令里的 `…/RelayMesh/main/install.sh` 换成 `…/RelayMesh/v2.0.0-rc.2/install.sh`。
+- **单二进制 / `go run` 起的 Hub，装 Agent 要换一种写法（预览期的已知限制，下一个预览版会修）**：这类 Hub 没有自带安装源，「接入主机」面板里生成的命令指向公开库 `main` 上 1.x 的 `install.sh`，它不认识 `agent` 子命令。请把命令里的 `main` 换成 `v2.0.0-rc.2`，并在 `sh` 前用 `env` 指定同一个版本——只换地址、不指定版本，脚本会去取「最新正式版」，那里没有 Agent。Docker 部署自带安装源、命令由服务端生成，不受影响。
+  ```sh
+  # Linux / macOS，系统级常驻（已经是 root 就去掉 sudo）。想先临时跑一下：把 agent install 换成 agent run --temp；只装给当前用户：去掉 sudo、改用 agent install --user
+  curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.2/install.sh | sudo env RELAYMESH_VERSION=v2.0.0-rc.2 sh -s -- agent install --server https://<Hub 地址>
+  ```
+  Windows PowerShell 的写法如下；它按脚本逻辑给出，作者还没有在真实的 Windows 主机上跑过，遇到问题请提 Issue：
+  ```powershell
+  $env:RELAYMESH_VERSION='v2.0.0-rc.2'; & ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.2/install.ps1').TrimStart([char]0xFEFF))) agent install --server 'https://<Hub 地址>'
+  ```
+  Hub 用的是自签名证书（内置 HTTPS）时，照面板里生成的命令保留 `--pin sha256:…` 等参数即可。
+- **Cursor hook（含 `go run` 起的 Hub）**：面板里复制的 hook 安装命令照常使用；单二进制的 Hub 会自动从 GitHub 取与自己同一版本的 hook 程序。`go run` 起的 Hub 版本号显示为 `dev`，hook 脚本不知道该取哪个版本，会去取「最新正式版」而失败，请在命令里补上版本：
+  ```sh
+  curl -fsSL 'https://<Hub 地址>/hooks/cursor/install.sh' | RELAYMESH_HOOK_INSTALL_BASE='https://<Hub 地址>' RELAYMESH_VERSION=v2.0.0-rc.2 sh -s -- --workflow '<workflow_id>'
+  ```
+  PowerShell 则在面板里的命令最前面加一句 `$env:RELAYMESH_VERSION='v2.0.0-rc.2'; `（同样没有在真实的 Windows 主机上验证过）。
 - **正在使用 1.x？** 1.x 的文档在这里：[v1.6.3 的 README](https://github.com/teacat99/RelayMesh/blob/v1.6.3/README.md)。升级到 2.x 之前请先读更新日志里的「升级须知」（例如 Go 模块路径从 2.0 起带 `/v2`）。
 - 下载与发布说明：[GitHub Release v2.0.0-rc.2](https://github.com/teacat99/RelayMesh/releases/tag/v2.0.0-rc.2)；问题与建议欢迎提 [Issue](https://github.com/teacat99/RelayMesh/issues)。
 
