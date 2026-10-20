@@ -7,27 +7,68 @@ import (
 	"strings"
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/asyncmode"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 type workflowContextArgs struct {
-	Action               string                  `json:"action"`
-	WorkflowID           string                  `json:"workflow_id,omitempty"`
-	Checkpoint           *model.CheckpointContent `json:"checkpoint,omitempty"`
-	Revision             int                     `json:"revision,omitempty"`
-	SessionID            string                  `json:"session_id,omitempty"`
-	NoteKey              string                  `json:"note_key,omitempty"`
-	NoteID               uint                    `json:"note_id,omitempty"`
-	Content              string                  `json:"content,omitempty"`
-	Limit                int                     `json:"limit,omitempty"`
-	ReplayAfterCheckpoint bool                   `json:"replay_after_checkpoint,omitempty"`
-	MaxBytes             int                     `json:"max_bytes,omitempty"`
-	PhaseID              string                  `json:"phase_id,omitempty"`
-	ProjectDirectory     string                  `json:"project_directory,omitempty"`
-	HostName             string                  `json:"host_name,omitempty"`
+	Action                string                   `json:"action"`
+	WorkflowID            string                   `json:"workflow_id,omitempty"`
+	Checkpoint            *model.CheckpointContent `json:"checkpoint,omitempty"`
+	Revision              int                      `json:"revision,omitempty"`
+	SessionID             string                   `json:"session_id,omitempty"`
+	NoteKey               string                   `json:"note_key,omitempty"`
+	NoteID                uint                     `json:"note_id,omitempty"`
+	Content               string                   `json:"content,omitempty"`
+	Limit                 int                      `json:"limit,omitempty"`
+	ReplayAfterCheckpoint bool                     `json:"replay_after_checkpoint,omitempty"`
+	MaxBytes              int                      `json:"max_bytes,omitempty"`
+	PhaseID               string                   `json:"phase_id,omitempty"`
+	ProjectDirectory      string                   `json:"project_directory,omitempty"`
+	HostName              string                   `json:"host_name,omitempty"`
+
+	// task_* 动作（独立于会话的任务清单）。指针字段区分「没传」与「传了空值」：progress 传空串表示清空，labels 传 [] 表示清空。
+	TaskID        int       `json:"task_id,omitempty"` // 工作流内的任务序号（#12 → 12）
+	Title         string    `json:"title,omitempty"`
+	Kind          string    `json:"kind,omitempty"`
+	State         string    `json:"state,omitempty"`
+	States        []string  `json:"states,omitempty"`
+	Labels        *[]string `json:"labels,omitempty"`
+	Refs          *[]string `json:"refs,omitempty"`
+	Description   *string   `json:"description,omitempty"` // 任务内容说明（这件事是什么、做到什么算完成）；task_update 传 "" 清除
+	Progress      *string   `json:"progress,omitempty"`
+	Conclusion    *string   `json:"conclusion,omitempty"`
+	Note          string    `json:"note,omitempty"`
+	ParentTaskID  *int      `json:"parent_task_id,omitempty"` // 0 = 解除父任务
+	Query         string    `json:"query,omitempty"`
+	IncludeClosed bool      `json:"include_closed,omitempty"`
+	Module        *string   `json:"module,omitempty"`  // 模块路径（须是已存在的，如 终端/历史日志）；task_update 传 "" 取消归类
+	Percent       *looseInt `json:"percent,omitempty"` // 完成度 0–100；-1 清除（回到由状态推导）
+	Stage         *string   `json:"stage,omitempty"`   // 阶段 assess / plan / dev / improve；task_update 传 "" 清除（回到未标注）
+	// 共享任务板的协作（#175 B2）：assignee 在 task_create / task_update 里是指派（"" 撤销），在 task_list 里是过滤（me / none / 工作流编号）；
+	// claim 是 task_update 的显式协作动作（accept / decline / deliver / accept_delivery / reject_delivery）。
+	Assignee *string `json:"assignee,omitempty"`
+	Claim    string  `json:"claim,omitempty"`
+
+	// inbox / inbox_peek / inbox_ack 动作（追加指令收件箱，见 inbox.go）。
+	IDs      looseIDList `json:"ids,omitempty"`      // inbox_ack：只确认这几条；不传就确认全部已读取的
+	Reminder bool        `json:"reminder,omitempty"` // inbox_peek：这是 hook 在问「该不该提醒」，要按节奏记提醒次数
+	Recent   bool        `json:"recent,omitempty"`   // inbox：同时列出最近已确认的几条
+	Source   string      `json:"source,omitempty"`   // inbox_peek：调用方自报来源——hook（编辑器 hook 的轮询）/ check（安装检查）；智能体自己调用时不用填
+	// inbox_peek（source=hook）：hook 所在的 Cursor 对话编号。对话被 Hub 发起的运行认领时，提醒要查认领它的工作流的收件箱（#182）。
+	ConversationID string `json:"conversation_id,omitempty"`
+
+	// wake_permit：唤醒许可（0 = 标记任务全部完成，1 = 取消标记）。
+	Permit flexInt `json:"permit,omitempty"`
 }
 
 func (s *Server) handleWorkflowContext(ctx context.Context, raw json.RawMessage) (any, error) {
+	return s.handleWorkflowContextWith(ctx, nil, raw)
+}
+
+// handleWorkflowContextWith 与 handleWorkflowContext 相同，另带凭据上下文（收件箱里的图片要用它拼下载链接）。
+func (s *Server) handleWorkflowContextWith(ctx context.Context, credCtx *CredentialContext, raw json.RawMessage) (any, error) {
 	var args workflowContextArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -78,6 +119,22 @@ func (s *Server) handleWorkflowContext(ctx context.Context, raw json.RawMessage)
 		return s.handleListWorkflows(ctx, args)
 	case "set_phase":
 		return s.handleSetPhase(ctx, args)
+	case "task_create":
+		return s.handleTaskCreate(ctx, args)
+	case "task_update":
+		return s.handleTaskUpdate(ctx, args)
+	case "task_get":
+		return s.handleTaskGet(ctx, args)
+	case "task_list":
+		return s.handleTaskList(ctx, args)
+	case "inbox":
+		return s.handleInbox(ctx, credCtx, args)
+	case "inbox_peek":
+		return s.handleInboxPeek(ctx, args)
+	case "inbox_ack":
+		return s.handleInboxAck(ctx, args)
+	case "wake_permit":
+		return s.handleWakePermit(ctx, args)
 	default:
 		return nil, fmt.Errorf("unknown action: %s", args.Action)
 	}
@@ -90,6 +147,9 @@ func (s *Server) handleCheckpointSave(ctx context.Context, args workflowContextA
 	if args.Checkpoint == nil {
 		return nil, fmt.Errorf("checkpoint content is required for checkpoint_save")
 	}
+
+	// 恢复胶囊与交付锚点联动：缺省基准取本工作流最近一次带锚点的交付，并记下它所属的会话。
+	basisDefaulted := s.linkCheckpointToAnchor(ctx, args.WorkflowID, args.Checkpoint)
 
 	contentJSON, err := json.Marshal(args.Checkpoint)
 	if err != nil {
@@ -114,12 +174,50 @@ func (s *Server) handleCheckpointSave(ctx context.Context, args workflowContextA
 		// non-fatal
 	}
 
-	return map[string]any{
+	if s.onUpdate != nil {
+		s.onUpdate("checkpoint_saved", map[string]any{"workflow_id": args.WorkflowID, "revision": cp.Revision})
+	}
+
+	result := map[string]any{
 		"status":      "saved",
 		"workflow_id": args.WorkflowID,
 		"revision":    cp.Revision,
 		"created_at":  cp.CreatedAt,
-	}, nil
+		"basis":       args.Checkpoint.Basis,
+	}
+	if basisDefaulted {
+		result["basis_defaulted"] = true
+	}
+	return result, nil
+}
+
+// linkCheckpointToAnchor 把胶囊的基准与交付锚点关联起来，返回是否使用了缺省基准。
+//
+//   - 没有显式给 basis.git_commit：取本工作流最近一次交付锚点的哈希作缺省基准，
+//     并把那次交付的会话 ID 记进 basis.anchor_session_id；工作流里没有任何锚点则保持原样。
+//   - 显式给了哈希：尽力在本工作流的交付里找到同一提交，找到就记下 anchor_session_id。
+//
+// 任何查询失败都静默跳过——胶囊保存本身永远不能因为锚点联动而失败。
+func (s *Server) linkCheckpointToAnchor(ctx context.Context, workflowID string, content *model.CheckpointContent) bool {
+	if content == nil {
+		return false
+	}
+	basis := &content.Basis
+	if strings.TrimSpace(basis.GitCommit) == "" {
+		anchored, err := s.store.GetLatestAnchoredSession(ctx, workflowID, "")
+		if err != nil || anchored == nil {
+			return false
+		}
+		basis.GitCommit = anchored.GitCommit
+		basis.AnchorSessionID = anchored.ID
+		return true
+	}
+	if basis.AnchorSessionID == "" {
+		if anchored, err := s.store.FindAnchoredSessionByCommit(ctx, workflowID, basis.GitCommit); err == nil && anchored != nil {
+			basis.AnchorSessionID = anchored.ID
+		}
+	}
+	return false
 }
 
 func (s *Server) handleCheckpointGet(ctx context.Context, args workflowContextArgs) (any, error) {
@@ -211,7 +309,7 @@ func (s *Server) handleCheckpointVerify(ctx context.Context, args workflowContex
 	if cp == nil {
 		return map[string]any{
 			"workflow_id": args.WorkflowID,
-			"freshness":  map[string]any{"status": "missing", "reasons": []string{"no checkpoint exists"}},
+			"freshness":   map[string]any{"status": "missing", "reasons": []string{"no checkpoint exists"}},
 		}, nil
 	}
 
@@ -360,7 +458,11 @@ func (s *Server) handleSetPhase(ctx context.Context, args workflowContextArgs) (
 		return nil, fmt.Errorf("phase_id is required for set_phase")
 	}
 
-	if err := s.store.SetWorkflowPhase(ctx, args.WorkflowID, args.PhaseID, false); err != nil {
+	// 旧五段式的阶段 id（assess / verify / done）仍被接受，落库时换成对应的新 id（讨论 / 开发 / 开发）。
+	requested := strings.TrimSpace(args.PhaseID)
+	canonical := model.CanonicalPhaseID(requested)
+
+	if err := s.store.SetWorkflowPhase(ctx, args.WorkflowID, canonical, false); err != nil {
 		return nil, fmt.Errorf("failed to set phase: %w", err)
 	}
 
@@ -369,32 +471,50 @@ func (s *Server) handleSetPhase(ctx context.Context, args workflowContextArgs) (
 	if s.onUpdate != nil {
 		s.onUpdate("phase_changed", map[string]string{
 			"workflow_id": args.WorkflowID,
-			"phase":       args.PhaseID,
+			"phase":       canonical,
 		})
 	}
 
 	currentPhase, phaseItems, _ := s.store.GetWorkflowPhaseWithDefaults(ctx, args.WorkflowID)
+	store.BackfillPhasePrompts(phaseItems)
 	var currentPrompt string
+	available := make([]string, 0, len(phaseItems))
+	known := false
 	for _, p := range phaseItems {
+		available = append(available, p.ID)
 		if p.ID == currentPhase {
 			currentPrompt = p.Prompt
-			break
+			known = true
 		}
 	}
 
-	return map[string]any{
-		"status":        "updated",
-		"workflow_id":   args.WorkflowID,
-		"current_phase": currentPhase,
-		"phase_prompt":  currentPrompt,
-	}, nil
+	result := map[string]any{
+		"status":           "updated",
+		"workflow_id":      args.WorkflowID,
+		"current_phase":    currentPhase,
+		"phase_prompt":     currentPrompt,
+		"available_phases": available,
+	}
+	if canonical != requested {
+		result["phase_alias"] = fmt.Sprintf("旧阶段「%s」已并入「%s」，实际生效的阶段是 %s；之后请直接使用新的阶段 id。", requested, canonical, canonical)
+	}
+	if !known {
+		result["warning"] = fmt.Sprintf("阶段「%s」不在当前工作流的阶段列表里（可用：%s），已按原样记录，但没有对应的阶段提示词。", currentPhase, strings.Join(available, " / "))
+	}
+	// 异步对话生效时，授权档位取代阶段提示词（与回执头一致）；同步工作流的返回不变（INV-2）。
+	if info, mErr := s.store.WorkflowModeInfo(ctx, args.WorkflowID, time.Now()); mErr == nil && info.State.Effective {
+		delete(result, "phase_prompt")
+		result["mode"] = "async"
+		result["auth"] = asyncmode.AuthLine(authProfileOf(info.Profile))
+	}
+	return result, nil
 }
 
 // collectDeltasAfterCheckpoint gathers reports/feedback that arrived after the checkpoint basis
 func (s *Server) collectDeltasAfterCheckpoint(ctx context.Context, workflowID string, basis model.CheckpointBasis) ([]map[string]any, error) {
 	var deltas []map[string]any
 
-	sessions, err := s.store.GetSessionsByWorkflow(ctx, workflowID, 10)
+	sessions, err := s.store.GetFeedbackRoundsByWorkflow(ctx, workflowID, 10)
 	if err != nil {
 		return nil, err
 	}
@@ -420,7 +540,7 @@ func (s *Server) checkFreshness(ctx context.Context, workflowID string, basis mo
 		reasons = append(reasons, fmt.Sprintf("checkpoint is %s old", age.Round(time.Minute)))
 	}
 
-	sessions, _ := s.store.GetSessionsByWorkflow(ctx, workflowID, 5)
+	sessions, _ := s.store.GetFeedbackRoundsByWorkflow(ctx, workflowID, 5)
 	newSessions := 0
 	for _, sess := range sessions {
 		if sess.CreatedAt.After(cp.CreatedAt) {
@@ -429,6 +549,14 @@ func (s *Server) checkFreshness(ctx context.Context, workflowID string, basis mo
 	}
 	if newSessions > 0 {
 		reasons = append(reasons, fmt.Sprintf("%d new session(s) since checkpoint", newSessions))
+	}
+
+	// 交付锚点对比：胶囊基准的提交与本工作流最近一次交付锚点不一致，说明胶囊保存之后仓库又有了新提交。
+	if strings.TrimSpace(basis.GitCommit) != "" {
+		if latest, err := s.store.GetLatestAnchoredSession(ctx, workflowID, ""); err == nil && latest != nil &&
+			!sameCommit(latest.GitCommit, basis.GitCommit) {
+			reasons = append(reasons, fmt.Sprintf("delivery anchor moved: %s -> %s (new commits since the checkpoint basis)", basis.GitCommit, latest.GitCommit))
+		}
 	}
 
 	return reasons

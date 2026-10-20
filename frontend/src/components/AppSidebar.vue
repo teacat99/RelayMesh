@@ -1,16 +1,28 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
+import { computed, nextTick, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import dayjs from 'dayjs'
 import { useSessionStore } from '../stores/session'
 import { useTaskStore } from '../stores/task'
 import { useNotifyStore } from '../stores/notify'
+import { useNotifyPrefsStore } from '../stores/notifyPrefs'
 import { useThemeStore } from '../stores/theme'
 import { useSettingsStore } from '../stores/settings'
+import { useAuthStore } from '../stores/auth'
+import { useTerminalStore } from '../stores/terminal'
+import { useWorkItemStore } from '../stores/workItems'
+import { useAgentStateStore } from '../stores/agentState'
+import { useChatStore } from '../stores/chat'
+import SidebarSessions from './sidebar/SidebarSessions.vue'
+import SidebarGroups from './sidebar/SidebarGroups.vue'
+import SidebarProjects from './sidebar/SidebarProjects.vue'
+import { usePreviewView } from '../composables/usePreviewView'
+import { summarizeCounts } from '../lib/workItems'
+import { displayRounds } from '../lib/workflowRounds'
 import Button from './ui/button/Button.vue'
 import Badge from './ui/badge/Badge.vue'
 import ThemeAutoIcon from './ThemeAutoIcon.vue'
-import RelayMeshLogo from './icons/RelayMeshLogo.vue'
+import ProjectSwitcher from './ProjectSwitcher.vue'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -25,6 +37,7 @@ import {
   Moon,
   Laptop,
   Bell,
+  BellMinus,
   BellOff,
   Volume2,
   VolumeX,
@@ -45,11 +58,14 @@ import {
   ChevronDown,
   X,
   PanelLeftClose,
-  Hash
+  Hash,
+  ListChecks,
+  MessageSquarePlus
 } from 'lucide-vue-next'
 import type { FeedbackSession, TaskSummary } from '../api/types'
 import SidebarItemCard from './sidebar/SidebarItemCard.vue'
 import RenameSessionDialog from './sidebar/RenameSessionDialog.vue'
+import NewSessionDialog from './sidebar/NewSessionDialog.vue'
 import { toast } from 'vue-sonner'
 
 export interface UnifiedItem {
@@ -59,7 +75,6 @@ export interface UnifiedItem {
   subtitle?: string
   summary: string
   status: string
-  user_presence?: 'online' | 'away' | 'autopilot'
   created_at: string
   first_created_at?: string
   updated_at?: string
@@ -69,23 +84,45 @@ export interface UnifiedItem {
   revision?: number
   sequence?: number
   rounds_count?: number
+  /** 该工作流最近一次带交付锚点的那轮所申报的提交哈希（从未申报过则为空）。 */
+  latest_git_commit?: string
   raw: FeedbackSession | TaskSummary
 }
 
 const sessionStore = useSessionStore()
 const taskStore = useTaskStore()
 const notifyStore = useNotifyStore()
+const notifyPrefs = useNotifyPrefsStore()
 const themeStore = useThemeStore()
 const settingsStore = useSettingsStore()
+const authStore = useAuthStore()
+const terminalStore = useTerminalStore()
+const workStore = useWorkItemStore()
+const agentStateStore = useAgentStateStore()
+const workSummary = computed(() => summarizeCounts(workStore.globalCounts))
 const router = useRouter()
+
+// ExecMesh 模式切换器只在服务端总闸开启（已设登录密码等）时出现；登录态确认后再读取，避免未登录时触发 401。
+watch(
+  () => authStore.isAuthenticated,
+  ok => {
+    if (ok) void terminalStore.loadStatus()
+  },
+  { immediate: true }
+)
 
 function handleOpenSettings() {
   emit('closeMobile')
   if (window.innerWidth < 768) {
-    router.push('/settings')
+    router.push({ path: '/settings', query: { module: 'relay' } })
   } else {
     settingsStore.openSettings()
   }
+}
+
+function handleOpenWork() {
+  emit('closeMobile')
+  emit('openWork')
 }
 
 function handleOpenArchive() {
@@ -100,20 +137,27 @@ function handleOpenArchive() {
 const props = defineProps<{
   activeItemId?: string | null
   activeItemType?: 'feedback' | 'task' | null
-  elapsedFormatted?: string
   mobileOpen?: boolean
   collapsed?: boolean
+  /** 右侧正在显示任务清单：此时侧栏里的会话都不应显示为选中。 */
+  workActive?: boolean
+  /** 右侧是群聊页：会话列表里没有选中项（任务清单入口也不高亮）。 */
+  groupActive?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'selectItem', item: UnifiedItem): void
   (e: 'openArchive'): void
+  (e: 'openWork'): void
   (e: 'closeMobile'): void
   (e: 'toggleCollapse'): void
 }>()
 
+// 网页手动新建会话（#174）：底部工具栏的「新建会话」按钮打开弹窗；建好并关闭弹窗后进入新会话
+const newSessionOpen = ref(false)
+
 const searchQuery = ref('')
-const filterType = ref<'all' | 'pending' | 'feedback' | 'task' | 'completed'>('all')
+const filterType = ref<'all' | 'pending' | 'feedback' | 'task' | 'completed' | 'archived'>('all')
 
 // Pinned Session IDs (localStorage managed)
 const pinnedIds = ref<string[]>(JSON.parse(localStorage.getItem('relaymesh_pinned_ids') || '[]'))
@@ -210,6 +254,11 @@ async function handleContextArchive() {
   const item = contextMenu.value.item
   closeContextMenu()
   if (!item || item.type !== 'feedback') return
+  // 在「已归档」过滤下右键同一个位置是「取消归档」：直接放回日常列表，不需要确认
+  if (item.status === 'archived') {
+    await sessionStore.unarchiveSession(item.id)
+    return
+  }
   if (confirm(`确认归档 "${item.title}"？`)) {
     await sessionStore.archiveSession(item.id)
   }
@@ -262,16 +311,18 @@ const allItems = computed<UnifiedItem[]>(() => {
     }
   }
 
+  // 已归档的会话不混在日常列表里，只在过滤芯片「已归档」下出现（#156 批 1；整页的归档库与底部归档图标仍保留）
+  const archivedGroups = new Map<string, FeedbackSession[]>()
   for (const s of allFeedbackList) {
-    if (s.status === 'archived') continue
+    const bucket = s.status === 'archived' ? archivedGroups : feedbackGroups
     const key = s.workflow_id || s.session_id
-    if (!feedbackGroups.has(key)) {
-      feedbackGroups.set(key, [])
+    if (!bucket.has(key)) {
+      bucket.set(key, [])
     }
-    feedbackGroups.get(key)!.push(s)
+    bucket.get(key)!.push(s)
   }
 
-  for (const [key, group] of feedbackGroups.entries()) {
+  for (const [key, group] of [...feedbackGroups.entries(), ...archivedGroups.entries()]) {
     // 找出该工作流下创建时间最新的 session 作为展示基准
     const sorted = [...group].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
     const latest = sorted[0]
@@ -289,13 +340,14 @@ const allItems = computed<UnifiedItem[]>(() => {
       subtitle: latest.workflow_id || latest.project_directory,
       summary: latest.summary || '',
       status: pendingSession ? 'pending' : latest.status,
-      user_presence: activeSess.user_presence,
       created_at: latest.created_at,
       first_created_at: earliest?.created_at || latest.created_at,
       updated_at: latest.updated_at,
       project_directory: latest.project_directory,
       workflow_id: latest.workflow_id,
-      rounds_count: group.length,
+      // 轮数取整个工作流的总数（服务端聚合）：列表只带最新一批会话行，老工作流在列表里往往只有一行（#173）
+      rounds_count: displayRounds(sessionStore.workflowRounds[key], group.length),
+      latest_git_commit: sorted.find(s => s.git_commit)?.git_commit || undefined,
       raw: activeSess
     })
   }
@@ -352,8 +404,24 @@ const allItems = computed<UnifiedItem[]>(() => {
   })
 })
 
+// 新建会话弹窗关闭后进入新会话：走与点侧栏卡片同一条路径（FeedbackView 的 handleSelectItem 负责回到会话页、选中、滚到底部、
+// 手机上收起抽屉）。占位会话在弹窗建好时就已补丁进列表，这里等一帧让侧栏条目算出来再找它。
+async function handleNewSessionOpened(session: FeedbackSession) {
+  await nextTick()
+  const key = session.workflow_id || session.session_id
+  const item = allItems.value.find(i => i.type === 'feedback' && i.id === key)
+  if (item) emit('selectItem', item)
+}
+
 const filteredItems = computed(() => {
   return allItems.value.filter(item => {
+    // 已归档只在「已归档」芯片下出现；别的过滤一律不含它们（与原来「归档的不进列表」一致）
+    const archived = item.type === 'feedback' && item.status === 'archived'
+    if (filterType.value === 'archived') {
+      if (!archived) return false
+    } else if (archived) {
+      return false
+    }
     // Type/Status filter
     if (filterType.value === 'pending') {
       if (item.type === 'feedback' && item.status !== 'pending') return false
@@ -382,44 +450,7 @@ const filteredItems = computed(() => {
   })
 })
 
-function getStatusBadge(item: UnifiedItem) {
-  if (item.type === 'task') {
-    if (item.status === 'active') {
-      if ((item.unread_count || 0) > 0) {
-        return { label: `${item.unread_count} 新报告`, variant: 'default' }
-      }
-      return { label: '执行中', variant: 'secondary' }
-    }
-    return { label: item.status === 'completed' ? '已完工' : item.status, variant: 'outline' }
-  }
-
-  switch (item.status) {
-    case 'completed': {
-      const raw = item.raw as any
-      if (raw && !raw.consumed_by_ai) {
-        return { label: '待提取', variant: 'secondary' }
-      }
-      return { label: '已完成', variant: 'default' }
-    }
-    case 'pending': return { label: '等待确认', variant: 'secondary' }
-    case 'cancelled': return { label: '已取消', variant: 'outline' }
-    case 'timeout': return { label: '已超时', variant: 'destructive' }
-    case 'archived': return { label: '已归档', variant: 'outline' }
-    default: return { label: item.status, variant: 'outline' }
-  }
-}
-
-function getItemPresence(item: UnifiedItem): { label: string; dotClass: string } {
-  const rawSession = sessionStore.sessions.find(s => s.session_id === item.id)
-  const p = item.user_presence || rawSession?.user_presence || 'online'
-  if (p === 'away') {
-    return { label: '暂离', dotClass: 'bg-amber-500 shadow-[0_0_4px_rgba(245,158,11,0.6)]' }
-  }
-  if (p === 'autopilot') {
-    return { label: '托管', dotClass: 'bg-indigo-500 shadow-[0_0_4px_rgba(99,102,241,0.6)]' }
-  }
-  return { label: '在线', dotClass: 'bg-emerald-500 shadow-[0_0_4px_rgba(16,185,129,0.6)]' }
-}
+// （条目的状态徽标与「我的状态」提示点由 SidebarItemCard 渲染，这里不再保留一份重复实现）
 
 // 动态增量/分批加载 (优化大量会话/工单下的渲染性能)
 const visibleCount = ref(25)
@@ -430,6 +461,15 @@ const displayedItems = computed(() => {
 watch(() => [searchQuery.value, filterType.value], () => {
   visibleCount.value = 25
 })
+
+// 预览视图（#120 阶段 E-c2，#165 起默认开）开启时，侧栏要显示各会话的未读数：关注当前列表里能看到的工作流，由 conversation_updated 事件刷新。
+const chatStore = useChatStore()
+const previewView = usePreviewView()
+watch(
+  () => (previewView.enabled.value ? displayedItems.value.filter(i => i.type === 'feedback' && i.workflow_id).map(i => i.workflow_id as string).join('\n') : ''),
+  ids => chatStore.watchSummaries(ids ? ids.split('\n') : []),
+  { immediate: true },
+)
 
 function handleListScroll(e: Event) {
   const el = e.target as HTMLElement
@@ -530,6 +570,7 @@ function formatItemProjectDirectory(item: UnifiedItem): string {
 }
 
 function isItemActive(item: UnifiedItem): boolean {
+  if (props.workActive || props.groupActive) return false
   if (props.activeItemId && props.activeItemType) {
     if (props.activeItemType !== item.type) return false
     if (props.activeItemId === item.id) return true
@@ -550,10 +591,14 @@ function isItemActive(item: UnifiedItem): boolean {
 }
 
 onMounted(async () => {
+  // 会话卡的会话级状态（#159）要用 Agent 状态（hook）：页头 / 工具栏没挂载的页面里也得有人去取一次；已取到过不会重复请求
+  agentStateStore.ensureFresh()
   await Promise.all([
-    sessionStore.fetchSessions(),
-    sessionStore.fetchCurrentSession(),
-    taskStore.fetchTasks()
+    // fresh:false：与布局 / 会话页同一时刻的挂载取数合并成一次请求（#177）
+    sessionStore.fetchSessions(undefined, { fresh: false }),
+    sessionStore.fetchCurrentSession({ fresh: false }),
+    taskStore.fetchTasks(),
+    workStore.refreshCounts()
   ])
   timer = window.setInterval(() => {
     nowRef.value = Date.now()
@@ -587,41 +632,33 @@ onUnmounted(() => {
   <aside
     class="sidebar-container fixed inset-y-0 left-0 z-50 h-full h-[100dvh] flex flex-col bg-card/95 backdrop-blur-md md:static md:z-10 md:bg-muted/15 md:h-full shrink-0 select-none overflow-hidden border-r border-border/70"
     :class="[
-      props.mobileOpen ? 'w-4/5 sm:w-72 translate-x-0 shadow-float' : 'w-4/5 sm:w-72 -translate-x-full md:translate-x-0',
+      // 抽屉宽度：手机上占屏幕的 85%、最宽 18rem；md 以上由 globals.css 的 .sidebar-container 固定宽度接管（max-w-none 放开上限）。
+      'w-[85vw] max-w-72 md:max-w-none',
+      props.mobileOpen ? 'translate-x-0 shadow-float' : '-translate-x-full md:translate-x-0',
       props.collapsed ? 'is-collapsed' : ''
     ]"
   >
-    <!-- Fixed-width inner container ensuring zero layout reflow or wrapping during smooth collapse/expand -->
-    <div class="w-72 sm:w-72 md:w-64 lg:w-80 h-full flex flex-col shrink-0">
+    <!-- 内层始终撑满侧栏自己的宽度：侧栏宽度恒定（折叠只动 margin-left），折叠 / 展开动画里内容不会重排；也避免了「内层比侧栏窄」造成的右侧空白。 -->
+    <div class="w-full h-full flex flex-col shrink-0">
       <!-- 1. Top Brand & App Title (高度 h-14 与主工作区顶栏严格一致) -->
       <div class="h-14 px-3.5 border-b border-border/60 flex items-center justify-between shrink-0">
-        <div class="flex items-center gap-2 min-w-0">
-          <div class="w-6 h-6 rounded-xs bg-primary text-primary-foreground flex items-center justify-center shadow-2xs shrink-0">
-            <RelayMeshLogo class="w-3.5 h-3.5" />
-          </div>
-          <div class="flex flex-col min-w-0">
-            <div class="flex items-center gap-1.5 min-w-0">
-              <span class="font-bold text-sm tracking-tight text-foreground font-mono leading-none truncate">
-                RelayMesh
-              </span>
-              <!-- SSE 实时流服务连接状态指示图标 (纯净指示服务本身健康度) -->
-              <span
-                class="inline-flex items-center justify-center cursor-help shrink-0"
-                :title="`SSE 实时流服务: ${sessionStore.sseConnected ? '已连接 (LIVE)' : '未连接 (OFFLINE)'}`"
-              >
-                <Radio
-                  class="w-3 h-3 transition-colors duration-200"
-                  :class="[
-                    sessionStore.sseConnected ? 'text-emerald-500 animate-pulse' : 'text-muted-foreground/40'
-                  ]"
-                />
-              </span>
-            </div>
-            <span class="text-[10px] text-muted-foreground font-mono mt-0.5 truncate">
-              Agent Relay Hub
+        <!-- 品牌区同时是项目切换器（RelayMesh | ExecMesh）：仅终端总闸开启时可切换，总闸关闭时与以前完全一致 -->
+        <ProjectSwitcher @switched="emit('closeMobile')">
+          <template #extra>
+            <!-- SSE 实时流服务连接状态指示图标 (纯净指示服务本身健康度) -->
+            <span
+              class="inline-flex items-center justify-center cursor-help shrink-0"
+              :title="`SSE 实时流服务: ${sessionStore.sseConnected ? '已连接 (LIVE)' : '未连接 (OFFLINE)'}`"
+            >
+              <Radio
+                class="w-3 h-3 transition-colors duration-200"
+                :class="[
+                  sessionStore.sseConnected ? 'text-emerald-500 animate-pulse' : 'text-muted-foreground/40'
+                ]"
+              />
             </span>
-          </div>
-        </div>
+          </template>
+        </ProjectSwitcher>
 
         <div class="flex items-center gap-1 shrink-0">
           <!-- PC Collapsible Toggle Button (PC 端侧边栏折叠缩进按钮) -->
@@ -629,6 +666,7 @@ onUnmounted(() => {
             type="button"
             class="p-1 rounded-xs text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors hidden md:flex items-center justify-center cursor-pointer"
             title="折叠侧边栏"
+            data-testid="sidebar-collapse"
             @click="emit('toggleCollapse')"
           >
             <PanelLeftClose class="w-4 h-4" />
@@ -644,6 +682,32 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
+
+      <!-- 任务清单入口：独立于会话的工作清单；常驻一句进度概览（进行中 / 验证中） -->
+      <!-- 导航：会话 / 任务清单 / 群聊 / 项目 四项并列，当前所在的一项高亮；手机上点哪一项都先收起抽屉（#156 批 1） -->
+      <SidebarSessions @navigate="emit('closeMobile')" />
+
+      <div class="px-2.5 pt-1.5">
+        <button
+          type="button"
+          class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-sm border text-xs transition-colors cursor-pointer"
+          :aria-current="props.workActive ? 'page' : undefined"
+          :class="props.workActive
+            ? 'bg-primary/10 border-primary/30 text-foreground'
+            : 'border-border/60 bg-background/60 text-muted-foreground hover:text-foreground hover:bg-muted/60'"
+          title="任务清单：独立于会话的工作清单"
+          data-testid="sidebar-work-entry"
+          @click="handleOpenWork"
+        >
+          <ListChecks class="w-3.5 h-3.5 shrink-0" />
+          <span class="font-medium">任务清单</span>
+          <span v-if="workSummary" class="ml-auto font-mono text-[10px] text-muted-foreground" data-testid="sidebar-work-summary">{{ workSummary }}</span>
+        </button>
+      </div>
+
+      <!-- 群聊入口：总入口 + 最近有动静的几个群 -->
+      <SidebarGroups @navigate="emit('closeMobile')" />
+      <SidebarProjects @navigate="emit('closeMobile')" />
 
       <!-- 2. Search & Category Filter Bar (替代独立分页，融于统一列表) -->
       <div class="p-2.5 border-b border-border/60 space-y-2">
@@ -666,11 +730,13 @@ onUnmounted(() => {
               { id: 'pending', label: '待处理' },
               { id: 'feedback', label: '工作流' },
               { id: 'task', label: '托管自驾' },
-              { id: 'completed', label: '已完成' }
+              { id: 'completed', label: '已完成' },
+              { id: 'archived', label: '已归档' }
             ]"
             :key="ft.id"
             type="button"
             class="text-[10px] px-2 py-0.5 rounded-xs transition-all font-medium"
+            :data-testid="`sidebar-filter-${ft.id}`"
             :class="filterType === ft.id
               ? 'bg-primary text-primary-foreground font-medium shadow-2xs'
               : 'text-muted-foreground hover:bg-muted/70'"
@@ -757,7 +823,7 @@ onUnmounted(() => {
           @click="handleContextArchive"
         >
           <Archive class="w-3.5 h-3.5 text-muted-foreground" />
-          <span>归档</span>
+          <span>{{ contextMenu.item.status === 'archived' ? '取消归档' : '归档' }}</span>
         </button>
 
         <div class="h-[1px] bg-border/60 my-1"></div>
@@ -797,6 +863,9 @@ onUnmounted(() => {
       </div>
     </Teleport>
 
+    <!-- 新建会话弹窗（#174） -->
+    <NewSessionDialog v-model:open="newSessionOpen" @opened="handleNewSessionOpened" />
+
     <!-- Controlled Rename Dialog -->
     <RenameSessionDialog
       v-model:open="renameDialogOpen"
@@ -813,14 +882,27 @@ onUnmounted(() => {
           variant="ghost"
           size="sm"
           class="w-7 h-7 p-0 text-muted-foreground hover:text-foreground"
-          title="系统偏好与交互设置"
+          title="设置"
           @click="handleOpenSettings"
         >
           <Settings class="w-3.5 h-3.5" />
         </Button>
 
-        <!-- Right Utility Actions (按用户指定顺序：①通知 -> ②声音 -> ③明暗 -> ④归档) -->
+        <!-- Right Utility Actions (按用户指定顺序：①通知 -> ②声音 -> ③明暗 -> ④归档；#174 在最左边加「新建会话」) -->
         <div class="flex items-center gap-1">
+          <!-- 0. 新建会话（#174）：网页里先建好会话，再把启动提示词发给要使用的智能体 -->
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-7 h-7 p-0 text-muted-foreground hover:text-foreground"
+            data-testid="sidebar-new-session"
+            title="新建会话：先在网页里建好会话，再启用对应的智能体"
+            aria-label="新建会话"
+            @click="newSessionOpen = true"
+          >
+            <MessageSquarePlus class="w-3.5 h-3.5" />
+          </Button>
+
           <!-- 1. Desktop Notification Toggle (通知) -->
           <Button
             variant="ghost"
@@ -843,6 +925,21 @@ onUnmounted(() => {
           >
             <Volume2 v-if="notifyStore.soundEnabled" class="w-3.5 h-3.5 text-foreground" />
             <VolumeX v-else class="w-3.5 h-3.5" />
+          </Button>
+
+          <!-- 2.5 免打扰（#115）：一键拦下非紧急的提醒（浏览器与 ntfy 一起）；阻塞待答、@ 你、终端审批与守护告警不受影响。开关在服务端，各设备共享 -->
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-7 h-7 p-0 text-muted-foreground hover:text-foreground"
+            data-testid="sidebar-dnd"
+            :aria-pressed="notifyPrefs.dnd"
+            :title="notifyPrefs.dnd
+              ? '免打扰已开启：除阻塞待答、@ 你、终端审批与守护告警外，浏览器与手机推送都不再提醒（点击关闭）'
+              : '开启免打扰：拦下非紧急的提醒，阻塞待答与 @ 你仍会通知'"
+            @click="notifyPrefs.toggleDnd"
+          >
+            <BellMinus class="w-3.5 h-3.5" :class="notifyPrefs.dnd ? 'text-amber-500' : ''" />
           </Button>
 
           <!-- 3. Theme 3-State Toggle (跟随系统 auto · 浅色 light · 深色 dark) -->

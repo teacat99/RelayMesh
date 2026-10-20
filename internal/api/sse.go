@@ -13,12 +13,28 @@ import (
 type SSEBroker struct {
 	clientsMu sync.Mutex
 	clients   map[chan string]bool
+
+	// done 在进程关停时关闭：http.Server.Shutdown 不会取消请求上下文，不通知的话每条 SSE 长连接都会把关停拖满超时。
+	done      chan struct{}
+	closeOnce sync.Once
+
+	// touch 记录「某个工作流的聊天消息有变化、正等防抖结束」；见 conversation.go。
+	touchMu sync.Mutex
+	touch   map[string]*time.Timer
+	// sessionWorkflow 把会话编号换成工作流编号（只带 session_id 的事件用它补全）；未接线时这类事件不产生聊天更新。
+	sessionWorkflow func(sessionID string) string
 }
 
 func NewSSEBroker() *SSEBroker {
 	return &SSEBroker{
 		clients: make(map[chan string]bool),
+		done:    make(chan struct{}),
 	}
+}
+
+// Close 让所有 SSE 连接立即结束；关停后新接入的连接也会马上结束。可重复调用。
+func (b *SSEBroker) Close() {
+	b.closeOnce.Do(func() { close(b.done) })
 }
 
 func (b *SSEBroker) Broadcast(eventType string, data any) {
@@ -40,6 +56,10 @@ func (b *SSEBroker) Broadcast(eventType string, data any) {
 		case ch <- msg:
 		default:
 		}
+	}
+	// 聊天消息流是这些事件的派生视图：在这里集中产出 conversation_updated，各个产生事件的地方不用改。
+	if conversationEvents[eventType] {
+		b.touchConversation(dataStr)
 	}
 }
 
@@ -73,6 +93,8 @@ func (b *SSEBroker) HandleSSE(c *gin.Context) {
 	c.Stream(func(w io.Writer) bool {
 		select {
 		case <-c.Request.Context().Done():
+			return false
+		case <-b.done:
 			return false
 		case <-heartbeat.C:
 			// 双通道心跳保障：

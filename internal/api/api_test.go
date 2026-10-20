@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/mcp"
-	"github.com/teacat99/RelayMesh/internal/model"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/mcp"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 func setupTestAPIServer(t *testing.T) (*Server, *store.Store) {
@@ -146,7 +146,7 @@ func TestAPI_WorkflowDrafts(t *testing.T) {
 func TestAPI_UsernamePasswordAuth(t *testing.T) {
 	cfg := &config.Config{
 		ProjectID:   "test-proj",
-		WebUsername: "teacat_admin",
+		WebUsername: "test_admin",
 		WebPassword: "strong_password_999",
 		JWTSecret:   "test-jwt-secret-123456",
 	}
@@ -174,7 +174,7 @@ func TestAPI_UsernamePasswordAuth(t *testing.T) {
 		t.Fatalf("expected 401 for wrong username, got %d", w.Code)
 	}
 
-	loginBody = `{"username":"teacat_admin","password":"wrong_password"}`
+	loginBody = `{"username":"test_admin","password":"wrong_password"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
@@ -184,7 +184,7 @@ func TestAPI_UsernamePasswordAuth(t *testing.T) {
 	}
 
 	// 3. 正确账号与密码登录 -> 应该返回 200 并签发 Token
-	loginBody = `{"username":"teacat_admin","password":"strong_password_999"}`
+	loginBody = `{"username":"test_admin","password":"strong_password_999"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
@@ -222,7 +222,7 @@ func TestAPI_UsernamePasswordAuth(t *testing.T) {
 	}
 
 	// 6. 用旧账号密码登录 -> 应失败 (401)
-	loginBody = `{"username":"teacat_admin","password":"strong_password_999"}`
+	loginBody = `{"username":"test_admin","password":"strong_password_999"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
@@ -251,7 +251,7 @@ func TestAPI_UsernamePasswordAuth(t *testing.T) {
 	}
 
 	// 9. 再次用原环境变量账号密码登录 -> 应恢复成功 (200)
-	loginBody = `{"username":"teacat_admin","password":"strong_password_999"}`
+	loginBody = `{"username":"test_admin","password":"strong_password_999"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
@@ -654,5 +654,56 @@ func TestAPI_DeleteSession_And_TokenRenewal(t *testing.T) {
 	renewed := wRenewal.Header().Get("X-Renewed-Token")
 	if renewed == "" {
 		t.Fatalf("expected X-Renewed-Token header to be present for expiring token")
+	}
+}
+
+// 阶段收敛为 讨论 / 方案 / 开发 之后：新工作流从讨论开始；旧阶段 id 仍可提交并被换算；
+// 旧版前端缓存提交的五段式阶段列表也会被收敛。
+func TestAPI_WorkflowPhaseThreeStage(t *testing.T) {
+	srv, _ := setupTestAPIServer(t)
+
+	do := func(method, body string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(method, "/api/v1/workflows/wf-three-stage/phase", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Engine().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s %s: %d %s", method, body, w.Code, w.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	idsOf := func(res map[string]any) string {
+		var ids []string
+		for _, p := range res["phases"].([]any) {
+			ids = append(ids, p.(map[string]any)["id"].(string))
+		}
+		return strings.Join(ids, ",")
+	}
+
+	res := do(http.MethodGet, "")
+	if res["current_phase_id"] != "discuss" || idsOf(res) != "discuss,plan,dev" {
+		t.Fatalf("新工作流应从讨论开始、共三段: %v", res)
+	}
+	if dp, _ := res["default_prompts"].(map[string]any); len(dp) != 3 {
+		t.Errorf("default_prompts 应包含三段的默认提示词: %v", res["default_prompts"])
+	}
+
+	res = do(http.MethodPut, `{"phase_id":"done","source":"human"}`)
+	if res["current_phase_id"] != "dev" {
+		t.Errorf("旧的 done 应换算成 dev: %v", res["current_phase_id"])
+	}
+	res = do(http.MethodPut, `{"phase_id":"assess"}`)
+	if res["current_phase_id"] != "discuss" {
+		t.Errorf("旧的 assess 应换算成 discuss: %v", res["current_phase_id"])
+	}
+
+	res = do(http.MethodPut, `{"phases":[{"id":"assess","label":"评估"},{"id":"plan","label":"方案"},{"id":"dev","label":"开发"},{"id":"verify","label":"验证"},{"id":"done","label":"完成"}]}`)
+	if got := idsOf(res); got != "discuss,plan,dev" {
+		t.Errorf("提交五段式阶段列表时应收敛为三段: %s", got)
 	}
 }

@@ -14,7 +14,9 @@
  *   取回内容；回调返回 null 表示绑定已失效（组件已经切到别的工作流），此时丢弃而不是写错地方；
  * - INV-D2 不丢草稿：本地写入去抖 300ms（最长 3s），任何切换 / 隐藏 / 卸载都可以调用 flush 立即落盘；
  * - INV-D3 内容没有变化就不写、不传：以内容签名（忽略 updated_at）比较；
- * - INV-D4 同一工作流的上传串行，在途期间的新变化在其结束后再比较一次，总以最新内容为准，不会被乱序响应覆盖。
+ * - INV-D4 同一工作流的上传串行，在途期间的新变化在其结束后再比较一次，总以最新内容为准，不会被乱序响应覆盖；
+ * - INV-D5 正文还没有载入的图片（本地副本为了配额把大图正文剥掉了）绝不上传：否则一次普通的打字就会把服务端
+ *   那份完整的图片整个覆盖成「空图」，图片从此在所有设备上都找不回来。必须等图片正文载入完毕再上传。
  */
 
 export interface DraftImageLike {
@@ -26,6 +28,15 @@ export interface DraftImageLike {
   height?: number
   data?: string
   url?: string
+  /** 内容键：整段正文的哈希 + 长度，本地大图仓库与服务端草稿都以它认图（旧草稿里没有，载入时按指纹兜底）。 */
+  key?: string
+  /** 本机与服务端都找不到正文：只在内存里存在，用于界面提示，永远不写盘、不上传。 */
+  lost?: boolean
+  /**
+   * 正文已经在服务器的草稿图片存储里（粘贴即上传）：上传草稿 JSON 时只带引用、不再带正文。
+   * 只存在于内存，不写进本地存储，也不进入草稿 JSON；是否已上传的事实以云存储登记为准，这里只是它的镜像。
+   */
+  synced?: boolean
 }
 
 export interface DraftSlotLike {
@@ -78,8 +89,41 @@ export function draftStateHash(state: MultiDraftLike): string {
   return hashString(draftSignature(state))
 }
 
-/** 小于该长度（字符数）的图片 Base64 才允许落进 localStorage，大图只在内存与服务端草稿里保留。 */
+/** 小于该长度（字符数）的图片 Base64 才允许落进 localStorage，大图只在内存、本地大图仓库与服务端草稿里保留。 */
 export const MAX_INLINE_IMAGE_CHARS = 100 * 1024
+
+/**
+ * 整段正文的内容键。旧的 hash 只取前 64KB 并在不安全上下文（HTTP 局域网访问没有 crypto.subtle）下退化为随机数，
+ * 不能当作内容身份；这里对整段 Base64 做 53 位哈希并带上长度，足以在一份草稿（至多几十张图）里区分图片，
+ * 且同步、确定、不依赖任何浏览器能力。
+ */
+export function computeImageKey(data: string): string {
+  return `${data.length.toString(36)}-${hashString(data)}`
+}
+
+/** 给还没有内容键的图片补上（图片加入后不会被就地修改，补一次即可；返回新补了几张）。 */
+export function ensureImageKeys(state: MultiDraftLike): number {
+  let added = 0
+  for (const slot of state.drafts) {
+    for (const img of slot.images || []) {
+      if (!img.key && img.data) {
+        img.key = computeImageKey(img.data)
+        added++
+      }
+    }
+  }
+  return added
+}
+
+/** 图片是否「正文缺失」：既没有内联正文也没有直链，且没有被确认丢失（丢失的是另一种终态）。 */
+export function isImageUnloaded(img: DraftImageLike): boolean {
+  return !img.data && !img.url && !img.lost
+}
+
+/** 草稿里是否还有正文没载入的图片（INV-D5：有就不能上传服务端，也不能提交）。 */
+export function hasUnloadedImages(state: MultiDraftLike): boolean {
+  return state.drafts.some(slot => (slot.images || []).some(isImageUnloaded))
+}
 
 /** 写入 localStorage 前的瘦身：只保留必要字段，大图正文不落盘（杜绝 5MB 配额溢出与序列化卡顿）。 */
 export function sanitizeDraftsForStorage(state: MultiDraftLike): MultiDraftLike {
@@ -96,6 +140,9 @@ export function sanitizeDraftsForStorage(state: MultiDraftLike): MultiDraftLike 
         hash: img.hash,
         width: img.width,
         height: img.height,
+        key: img.key,
+        // 直链很短，必须保留：旧实现把它一并丢掉，撤回排队消息带回来的「只有直链」的图片一刷新就变成空图
+        url: img.url,
         data: img.data && img.data.length < MAX_INLINE_IMAGE_CHARS ? img.data : '',
       })),
       updated_at: slot.updated_at,
@@ -170,8 +217,15 @@ export interface DraftPersisterOptions {
   serializeLocal?: (state: MultiDraftLike) => string
   /** 服务端序列化，默认完整 JSON。 */
   serializeRemote?: (state: MultiDraftLike) => string
-  /** 上传成功后回调，携带该状态的哈希，用于持久化「已同步」标记。 */
-  onUploaded?: (workflowId: string, stateHash: string) => void
+  /** 上传成功后回调，携带该状态的哈希，用于持久化「已同步」标记；result 是 upload 的返回值（例如服务端记录的更新时间）。 */
+  onUploaded?: (workflowId: string, stateHash: string, result?: unknown) => void
+  /** 本地写入成功后回调，携带完整内容（含大图正文），用于把大图同步进本地大图仓库。回调抛错不影响主流程。 */
+  afterLocal?: (workflowId: string, state: MultiDraftLike) => void
+  /**
+   * 上传前的闸门（INV-D5）：返回 false 表示暂不满足上传条件（例如还有图片正文没载入）。
+   * 此时保持「待上传」，条件满足后的下一次 touch / flush 会再比较一次，不会丢变化也不会传坏数据。
+   */
+  canUpload?: (state: MultiDraftLike, workflowId: string) => boolean
   onError?: (kind: 'local' | 'remote', workflowId: string, error: unknown) => void
   localDelayMs?: number
   localMaxWaitMs?: number
@@ -248,6 +302,13 @@ export function createDraftPersister(options: DraftPersisterOptions): DraftPersi
     } catch (error) {
       entry.localDirty = true
       options.onError?.('local', id, error)
+      return
+    }
+    try {
+      options.afterLocal?.(id, state)
+    } catch (error) {
+      // 大图仓库同步失败不影响草稿本身已经写入的事实
+      options.onError?.('local', id, error)
     }
   }
 
@@ -261,6 +322,10 @@ export function createDraftPersister(options: DraftPersisterOptions): DraftPersi
     entry.remoteDirty = false
     const state = entry.read()
     if (!state) return
+    if (options.canUpload && !options.canUpload(state, id)) {
+      entry.remoteDirty = true
+      return
+    }
     const hash = draftStateHash(state)
     if (remoteHashes.get(id) === hash) return
 
@@ -277,10 +342,10 @@ export function createDraftPersister(options: DraftPersisterOptions): DraftPersi
     remoteInflight.set(id, false)
     void (async () => {
       try {
-        await options.upload(id, activeIndex, json)
+        const result = await options.upload(id, activeIndex, json)
         remoteHashes.set(id, hash)
         try {
-          options.onUploaded?.(id, hash)
+          options.onUploaded?.(id, hash, result)
         } catch {
           // 「已同步」标记写入失败不影响主流程
         }

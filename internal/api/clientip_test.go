@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 func TestResolveTrustedProxies(t *testing.T) {

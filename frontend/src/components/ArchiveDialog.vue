@@ -24,7 +24,9 @@ function handleSelectSession(s: FeedbackSession) {
 
 <template>
   <Dialog :open="props.open" @update:open="(v) => emit('update:open', v)">
-    <DialogContent class="sm:max-w-4xl lg:max-w-5xl w-[94vw] h-[86vh] max-h-[88vh] flex flex-col p-0 gap-0 overflow-hidden shadow-2xl rounded-md border-border/80 bg-card">
+    <!-- 这个弹窗没有底栏按钮，标题栏右侧已经给关闭按钮留了位置（pr-12）；showClose 是布尔属性，不写就是 false，必须显式打开，
+         否则除了 Esc 和点遮罩之外没有任何看得见的关闭方式。（窄屏不用这个弹窗，直接进 /archive 页面。） -->
+    <DialogContent :show-close="true" class="sm:max-w-4xl lg:max-w-5xl w-[94vw] h-[86vh] max-h-[88vh] flex flex-col p-0 gap-0 overflow-hidden shadow-2xl rounded-md border-border/80 bg-card" data-testid="archive-dialog">
       <!-- Header (文字靠左，适宜紧凑高度 h-11) -->
       <div class="px-5 h-11 border-b border-border/70 flex flex-row items-center justify-between shrink-0 bg-card/90 backdrop-blur-xs pr-12">
         <DialogTitle class="flex items-center gap-2 text-xs sm:text-sm font-bold font-mono tracking-tight text-foreground text-left">

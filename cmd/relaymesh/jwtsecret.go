@@ -4,8 +4,8 @@ import (
 	"context"
 	"log"
 
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 // applyJWTSecret 解析本次运行使用的 JWT 签名密钥并写回 cfg.JWTSecret，必须在 api.NewServer 之前调用。

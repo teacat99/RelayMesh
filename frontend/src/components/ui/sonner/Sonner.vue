@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Toaster, type ToasterProps } from 'vue-sonner'
 import { useThemeStore } from '@/stores/theme'
+import { useAppMode } from '@/composables/useAppMode'
 import { computed } from 'vue'
 
 const props = withDefaults(
@@ -18,11 +19,21 @@ const theme = useThemeStore()
 const resolvedTheme = computed<ToasterProps['theme']>(() =>
   theme.isDark ? 'dark' : 'light'
 )
+
+// 消息提示的位置随项目而变：
+//   RelayMesh：贴着输入区上方、与悬浮操作栏左对齐（位置由 globals.css 按输入区高度动态算出）；
+//   ExecMesh：没有输入区，终端占满右侧，消息贴在终端区域的底边、靠右——不压住左侧栏底部的状态与按钮，
+//   也不盖住通常靠左的命令行；动画方向随之改成从底边升起、沉回底边（见 globals.css 的 .toaster-exec）。
+const mode = useAppMode()
+const isExec = computed(() => mode.value === 'exec')
+const position = computed<ToasterProps['position']>(() => (isExec.value ? 'bottom-right' : props.position))
 </script>
 
 <template>
   <Toaster
     v-bind="props"
+    :position="position"
+    :class="isExec ? 'toaster-exec' : ''"
     :theme="resolvedTheme"
     :toast-options="{
       classes: {

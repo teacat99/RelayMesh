@@ -2,20 +2,8 @@
 import { ref, computed } from 'vue'
 import { useSettingsStore } from '../stores/settings'
 import {
-  Sparkles,
   Clock,
   CheckCircle2,
-  ArrowRight,
-  ArrowDown,
-  RotateCcw,
-  PauseCircle,
-  Zap,
-  Info,
-  ShieldCheck,
-  Radio,
-  Terminal,
-  Activity,
-  Workflow,
   Split,
   CircleDot,
   ChevronDown,
@@ -25,7 +13,6 @@ import {
 const settingsStore = useSettingsStore()
 
 const isOpen = ref(false)
-const activeMode = ref<'online' | 'away' | 'autopilot'>('online')
 
 const promptWaitMinutes = computed(() => settingsStore.settings.promptWaitMinutes || 2)
 const countdownMinutes = computed(() => settingsStore.settings.defaultWaitCountdownMinutes ?? 2)
@@ -50,50 +37,14 @@ const totalHours = computed(() => {
         <span class="font-bold text-xs sm:text-sm text-foreground tracking-tight">状态流转与生命周期矩阵</span>
         <span class="text-[10px] text-muted-foreground font-normal ml-1.5">/ Lifecycle Matrix</span>
         <p class="text-[10px] text-muted-foreground font-sans mt-0.5">
-          SSE 实时事件 + MCP v1.0 · 模式: <strong class="text-foreground font-mono uppercase">{{ activeMode }}</strong>
+          SSE 实时事件 + MCP v1.0 · 在线值守的等待与超时流转
         </p>
       </div>
     </button>
 
     <div v-show="isOpen" class="space-y-4 px-4 pb-4 border-t border-border/70 pt-3">
-      <!-- 三态模式切换线框胶囊 -->
-      <div class="flex items-center gap-1 bg-background p-0.5 rounded-xs border border-border/80 w-fit">
-        <button
-          type="button"
-          class="px-2.5 py-1 rounded-2xs text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 border"
-          :class="activeMode === 'online'
-            ? 'bg-primary text-primary-foreground border-primary font-bold shadow-2xs'
-            : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted'"
-          @click="activeMode = 'online'"
-        >
-          <span>在线模式</span>
-        </button>
-
-        <button
-          type="button"
-          class="px-2.5 py-1 rounded-2xs text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 border"
-          :class="activeMode === 'away'
-            ? 'bg-primary text-primary-foreground border-primary font-bold shadow-2xs'
-            : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted'"
-          @click="activeMode = 'away'"
-        >
-          <span>暂离模式</span>
-        </button>
-
-        <button
-          type="button"
-          class="px-2.5 py-1 rounded-2xs text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 border"
-          :class="activeMode === 'autopilot'
-            ? 'bg-primary text-primary-foreground border-primary font-bold shadow-2xs'
-            : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted'"
-          @click="activeMode = 'autopilot'"
-        >
-          <span>托管模式</span>
-        </button>
-      </div>
-
-    <!-- ==================== 1. 在线模式 (Online / M-A) 纯线框矩阵 ==================== -->
-    <div v-if="activeMode === 'online'" class="space-y-3.5 pt-0.5">
+    <!-- ==================== 在线值守的等待与超时流转 纯线框矩阵 ==================== -->
+    <div class="space-y-3.5 pt-0.5">
       <!-- 极简四列参数指示微格 (去色纯正线框) -->
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono">
         <div class="p-2 rounded-xs border border-border/70 bg-background flex flex-col justify-between">
@@ -244,72 +195,6 @@ const totalHours = computed(() => {
               <span class="text-muted-foreground">达到最大探测次数（{{ maxChecks }} 次），返回「=== 反馈超时 ===」，指令 AI 安全挂起。</span>
             </div>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ==================== 2. 暂离模式 (Away / M-B) 纯线框矩阵 ==================== -->
-    <div v-else-if="activeMode === 'away'" class="space-y-3.5 pt-0.5">
-      <div class="p-3 rounded-xs border border-border/80 bg-background text-xs space-y-1">
-        <div class="font-bold text-foreground font-mono">半值守离线模式流转策略 (Away / M-B Mode)</div>
-        <p class="text-[11px] text-muted-foreground font-sans leading-relaxed">
-          用户处于开会、离席或短休状态。AI 遇到非关键问题优先批量暂存，不以高频弹窗中断用户；探测休眠周期自适应拉长。
-        </p>
-      </div>
-
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 font-sans text-xs">
-        <div class="p-3 rounded-xs border border-border/70 bg-background space-y-1">
-          <span class="font-bold font-mono text-foreground block">1. 识别暂离标记</span>
-          <p class="text-[11px] text-muted-foreground leading-relaxed">
-            AI 识别暂离状态，自动将非阻塞歧义记录至待决清单，不频繁发起强打断。
-          </p>
-        </div>
-
-        <div class="p-3 rounded-xs border border-border/70 bg-background space-y-1">
-          <span class="font-bold font-mono text-foreground block">2. 探针低频巡检</span>
-          <p class="text-[11px] text-muted-foreground leading-relaxed">
-            MCP 回执自动延长探测间隔至 5~10 分钟，减少无谓的轮询开销。
-          </p>
-        </div>
-
-        <div class="p-3 rounded-xs border border-border/70 bg-background space-y-1">
-          <span class="font-bold font-mono text-foreground block">3. 归来一键批复</span>
-          <p class="text-[11px] text-muted-foreground leading-relaxed">
-            用户上线后在 Web 界面集中审阅多条汇总项，一次性批量批复并唤醒。
-          </p>
-        </div>
-      </div>
-    </div>
-
-    <!-- ==================== 3. 托管模式 (Autopilot / M-C) 纯线框矩阵 ==================== -->
-    <div v-else class="space-y-3.5 pt-0.5">
-      <div class="p-3 rounded-xs border border-border/80 bg-background text-xs space-y-1">
-        <div class="font-bold text-foreground font-mono">全自主无人值守流转策略 (Autopilot / M-C Mode)</div>
-        <p class="text-[11px] text-muted-foreground font-sans leading-relaxed">
-          用户长离前已锁定清晰的终点与范围边界。AI 自主跨阶段推进，每阶段强制执行三件套严苛校验，命中不可逆操作硬停点即刻安全终止。
-        </p>
-      </div>
-
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 font-sans text-xs">
-        <div class="p-3 rounded-xs border border-border/70 bg-background space-y-1">
-          <span class="font-bold font-mono text-foreground block">1. 边界准入与复述</span>
-          <p class="text-[11px] text-muted-foreground leading-relaxed">
-            进入托管前必须严格复述「终点线 + 范围边界 + 命中即停清单」，未获授权绝不越界。
-          </p>
-        </div>
-
-        <div class="p-3 rounded-xs border border-border/70 bg-background space-y-1">
-          <span class="font-bold font-mono text-foreground block">2. 强制三件套严苛验证</span>
-          <p class="text-[11px] text-muted-foreground leading-relaxed">
-            每个特性开发完成后强制执行 lint/type-check ➔ build ➔ 测试，绝不带病推进。
-          </p>
-        </div>
-
-        <div class="p-3 rounded-xs border border-border/70 bg-background space-y-1">
-          <span class="font-bold font-mono text-foreground block">3. 硬停点自律与总结</span>
-          <p class="text-[11px] text-muted-foreground leading-relaxed">
-            遇到生产发布、删库、假设被推翻或全部验收完成时，主动停止并提交全景汇报。
-          </p>
         </div>
       </div>
     </div>

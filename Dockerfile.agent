@@ -1,0 +1,58 @@
+# ------------------------------------------------------------
+# RelayMesh Agent 专用镜像（可选）
+#
+# 只含终端 Agent（relaymesh-agent），不含服务端与 Web 前端，镜像很小。典型用途：放在能到达内网 SSH 目标的机器上，
+# 作为「SSH 网关」运行——默认命令就是 `run`，而 SSH 网关是 Agent 的标配能力、默认开启（不分版本）；
+# 想只当普通的容器内 Agent 用，把 command 改成 ["run", "--no-ssh-gateway"]（或设环境变量 RELAYMESH_AGENT_SSH_GATEWAY=off）。
+#
+# 本地构建： docker build -f Dockerfile.agent -t relaymesh-agent:local .
+# 多架构构建（发布流水线）： docker buildx build -f Dockerfile.agent --platform linux/amd64,linux/arm64 ...
+# ------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+WORKDIR /src
+
+RUN apk add --no-cache git ca-certificates
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Agent 只依赖 cmd/relaymesh-agent 与 internal/：不需要前端产物，也不需要服务端。
+# cmd/agentrev 只用来算「Agent 侧代码指纹」（见 internal/agentrev），不进镜像。
+COPY cmd/relaymesh-agent ./cmd/relaymesh-agent
+COPY cmd/agentrev ./cmd/agentrev
+COPY internal ./internal
+
+ARG VERSION=dev
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+# 固定在构建机的原生平台上交叉编译：多架构镜像不用在 QEMU 里跑编译器。
+# 指纹随 Agent 自报，服务端据此判断「要不要升级」：与服务端自带的 Agent 代码一致就不再提醒。
+# 算指纹的 go run 不带 GOOS/GOARCH（在构建机原生平台上跑）；计算失败即退出（set -e），不能悄悄退回空指纹。
+RUN set -eu; \
+    REV="$(go run ./cmd/agentrev)"; \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+        -ldflags="-s -w -X main.version=${VERSION} -X main.rev=${REV}" \
+        -o /out/relaymesh-agent ./cmd/relaymesh-agent
+
+FROM alpine:3.21 AS runner
+
+# 固定的 uid/gid：挂载宿主机目录作为数据卷时，可以提前 chown 成同一个 uid。
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S -g 10001 relaymesh && adduser -S -u 10001 -G relaymesh -h /data relaymesh \
+    && mkdir -p /data && chown -R relaymesh:relaymesh /data
+
+COPY --from=builder /out/relaymesh-agent /usr/local/bin/relaymesh-agent
+
+USER relaymesh
+WORKDIR /data
+
+# 身份（机器码）、网关的加密凭据库（ssh-gateway/）、终端记录等都在数据目录里：请把它放在持久卷上，
+# 重建容器不会换机器码，也不会丢掉网关保存的登录凭据。
+ENV RELAYMESH_AGENT_DATA_DIR=/data
+
+VOLUME ["/data"]
+
+# RELAYMESH_AGENT_SERVER / RELAYMESH_AGENT_PIN / RELAYMESH_AGENT_SSH_ALLOW 等选项用环境变量传入（见 README）。
+# 容器里没有 systemd，会话由 Agent 进程内嵌持有：会话随容器进程结束，所以请保持容器常驻。
+ENTRYPOINT ["/usr/local/bin/relaymesh-agent"]
+CMD ["run"]

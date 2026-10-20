@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
 	"gorm.io/gorm"
 )
 
@@ -28,6 +28,14 @@ func GenerateToken() (string, error) {
 	return CredentialTokenPrefix + hex.EncodeToString(b), nil
 }
 
+// generateTokenFor 按凭据类型生成令牌：能力 URL 凭据用专用前缀，其余用普通前缀。
+func generateTokenFor(capability bool) (string, error) {
+	if capability {
+		return GenerateCapabilityToken()
+	}
+	return GenerateToken()
+}
+
 func MaskToken(token string) string {
 	if len(token) <= 10 {
 		return "****"
@@ -43,6 +51,9 @@ func (s *Store) FindCredentialByToken(ctx context.Context, token string) (*model
 	}
 	if err != nil {
 		return nil, err
+	}
+	if cred.Hidden {
+		return nil, nil
 	}
 	return &cred, nil
 }
@@ -144,10 +155,19 @@ func (s *Store) CreateCredential(ctx context.Context, cred *model.MCPCredential)
 	if len(cred.Note) > CredentialNoteMaxLen {
 		return NewInvalidInputError(fmt.Sprintf("note exceeds %d characters", CredentialNoteMaxLen))
 	}
+	if err := ValidateCredentialTerminal(cred); err != nil {
+		return err
+	}
+	if err := validateCapabilityOnCreate(cred); err != nil {
+		return err
+	}
+	// 使用统计由服务端维护，创建时不接受客户端预填。
+	cred.LastUsedAt = nil
+	cred.LastUsedIP = ""
 
 	return s.WithTx(ctx, func(tx *gorm.DB) error {
 		var count int64
-		if err := tx.Model(&model.MCPCredential{}).Count(&count).Error; err != nil {
+		if err := tx.Model(&model.MCPCredential{}).Where("hidden = ? OR hidden IS NULL", false).Count(&count).Error; err != nil {
 			return err
 		}
 		if count >= CredentialMaxCount {
@@ -155,11 +175,14 @@ func (s *Store) CreateCredential(ctx context.Context, cred *model.MCPCredential)
 		}
 
 		if cred.Token == "" {
-			token, err := GenerateToken()
+			token, err := generateTokenFor(cred.Capability)
 			if err != nil {
 				return fmt.Errorf("failed to generate token: %w", err)
 			}
 			cred.Token = token
+		}
+		if err := CredentialTerminalTokenError(cred); err != nil {
+			return err
 		}
 
 		now := time.Now()
@@ -171,6 +194,10 @@ func (s *Store) CreateCredential(ctx context.Context, cred *model.MCPCredential)
 }
 
 func (s *Store) UpdateCredential(ctx context.Context, id uint, updates map[string]any) (*model.MCPCredential, error) {
+	updates, err := SanitizeCredentialUpdates(updates)
+	if err != nil {
+		return nil, err
+	}
 	if v, ok := updates["name"]; ok {
 		name, _ := v.(string)
 		if strings.TrimSpace(name) == "" {
@@ -188,12 +215,42 @@ func (s *Store) UpdateCredential(ctx context.Context, id uint, updates map[strin
 	}
 
 	var cred model.MCPCredential
-	err := s.WithTx(ctx, func(tx *gorm.DB) error {
+	err = s.WithTx(ctx, func(tx *gorm.DB) error {
 		if err := tx.Where("id = ?", id).First(&cred).Error; err != nil {
 			if err == gorm.ErrRecordNotFound {
 				return NewNotFoundError(fmt.Sprintf("credential %d not found", id))
 			}
 			return err
+		}
+		if err := validateCapabilityOnUpdate(&cred, updates); err != nil {
+			return err
+		}
+		// 本次更新会写入权限时，若结果带终端权限，则令牌必须足够强（服务端生成的令牌始终合格）。
+		if permVal, ok := updates["permissions"]; ok {
+			if perms, isPerms := permVal.(model.Permissions); isPerms {
+				probe := cred
+				probe.Permissions = perms
+				if err := CredentialTerminalTokenError(&probe); err != nil {
+					return err
+				}
+			}
+		}
+		// 文件权限与允许目录必须同时成立：按「更新之后的样子」整体校验，避免分两次请求绕过。
+		{
+			probe := cred
+			if permVal, ok := updates["permissions"]; ok {
+				if perms, isPerms := permVal.(model.Permissions); isPerms {
+					probe.Permissions = perms
+				}
+			}
+			if limVal, ok := updates["terminal_limits"]; ok {
+				if lim, isLim := limVal.(model.TerminalLimits); isLim {
+					probe.TerminalLimits = lim
+				}
+			}
+			if err := CredentialFilesError(&probe); err != nil {
+				return err
+			}
 		}
 		updates["updated_at"] = time.Now()
 		if err := tx.Model(&cred).Updates(updates).Error; err != nil {
@@ -234,18 +291,18 @@ func (s *Store) DeleteCredential(ctx context.Context, id uint) error {
 }
 
 func (s *Store) RegenerateCredentialToken(ctx context.Context, id uint) (*model.MCPCredential, string, error) {
-	token, err := GenerateToken()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to generate token: %w", err)
-	}
-
 	var cred model.MCPCredential
-	err = s.WithTx(ctx, func(tx *gorm.DB) error {
+	var token string
+	err := s.WithTx(ctx, func(tx *gorm.DB) error {
 		if err := tx.Where("id = ?", id).First(&cred).Error; err != nil {
 			if err == gorm.ErrRecordNotFound {
 				return NewNotFoundError(fmt.Sprintf("credential %d not found", id))
 			}
 			return err
+		}
+		var genErr error
+		if token, genErr = generateTokenFor(cred.Capability); genErr != nil {
+			return fmt.Errorf("failed to generate token: %w", genErr)
 		}
 		cred.Token = token
 		cred.UpdatedAt = time.Now()

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { credentialsApi, type MCPCredential, type MCPPermissions, type EnvCredential } from '../api/client'
+import { credentialsApi, type MCPCredential, type CredentialInput, type EnvCredential } from '../api/client'
 
 export const useCredentialsStore = defineStore('credentials', () => {
   const credentials = ref<MCPCredential[]>([])
@@ -22,13 +22,13 @@ export const useCredentialsStore = defineStore('credentials', () => {
     }
   }
 
-  async function createCredential(data: { name: string; host_name?: string; is_active?: boolean; permissions?: Partial<MCPPermissions>; note?: string }) {
+  async function createCredential(data: CredentialInput & { name: string }) {
     const res = await credentialsApi.create(data)
     await fetchCredentials()
-    return { credential: res.credential, token: res.token }
+    return { credential: res.credential, token: res.token, capabilityPath: res.capability_path ?? '' }
   }
 
-  async function updateCredential(id: number, updates: Partial<Pick<MCPCredential, 'name' | 'host_name' | 'is_active' | 'permissions' | 'note'>>) {
+  async function updateCredential(id: number, updates: CredentialInput) {
     const res = await credentialsApi.update(id, updates)
     await fetchCredentials()
     return res.credential
@@ -42,7 +42,13 @@ export const useCredentialsStore = defineStore('credentials', () => {
   async function regenerateToken(id: number) {
     const res = await credentialsApi.regenerateToken(id)
     await fetchCredentials()
-    return res.token
+    return { token: res.token, capabilityPath: res.capability_path ?? '' }
+  }
+
+  /** 验证密码后读出令牌明文；只读，不会改动列表，也不缓存明文。 */
+  async function revealToken(id: number, password: string) {
+    const res = await credentialsApi.revealToken(id, password)
+    return { token: res.token, capabilityPath: res.capability_path ?? '' }
   }
 
   async function toggleActive(id: number, isActive: boolean) {
@@ -63,6 +69,7 @@ export const useCredentialsStore = defineStore('credentials', () => {
     updateCredential,
     deleteCredential,
     regenerateToken,
+    revealToken,
     toggleActive
   }
 })
