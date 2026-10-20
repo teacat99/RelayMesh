@@ -12,6 +12,9 @@ import {
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 
+// backup：配置备份（通用）；sessionData：本地草稿缓存与图片限速（RelayMesh 专属）
+const props = defineProps<{ scope: 'backup' | 'sessionData' }>()
+
 const settingsStore = useSettingsStore()
 const isExporting = ref(false)
 const isClearing = ref(false)
@@ -81,13 +84,13 @@ function handleClearLocalCache() {
     <div class="flex items-center justify-between pb-1.5 border-b border-border/70">
       <div class="flex items-center gap-1.5">
         <Database class="w-3.5 h-3.5 text-primary" />
-        <span class="text-xs font-bold font-mono text-foreground">数据备份与缓存维护</span>
+        <span class="text-xs font-bold font-mono text-foreground">{{ props.scope === 'backup' ? '配置备份' : '会话数据与缓存' }}</span>
       </div>
     </div>
 
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
       <!-- 导出配置 -->
-      <div class="p-3.5 rounded-xs border border-border/70 bg-card/60 space-y-2.5 flex flex-col justify-between">
+      <div v-if="props.scope === 'backup'" class="p-3.5 rounded-xs border border-border/70 bg-card/60 space-y-2.5 flex flex-col justify-between">
         <div class="space-y-1">
           <div class="text-xs font-mono font-semibold text-foreground flex items-center gap-1.5">
             <Download class="w-3.5 h-3.5 text-primary" />
@@ -108,7 +111,7 @@ function handleClearLocalCache() {
       </div>
 
       <!-- 清理临时缓存 -->
-      <div class="p-3.5 rounded-xs border border-border/70 bg-card/60 space-y-2.5 flex flex-col justify-between">
+      <div v-if="props.scope === 'sessionData'" class="p-3.5 rounded-xs border border-border/70 bg-card/60 space-y-2.5 flex flex-col justify-between">
         <div class="space-y-1">
           <div class="text-xs font-mono font-semibold text-foreground flex items-center gap-1.5">
             <Trash2 class="w-3.5 h-3.5 text-destructive" />
@@ -130,7 +133,7 @@ function handleClearLocalCache() {
     </div>
 
     <!-- 网络传输与图片限速控制 (QoS 保护) -->
-    <div class="mt-4 pt-4 border-t border-border/70 space-y-3">
+    <div v-if="props.scope === 'sessionData'" class="mt-4 pt-4 border-t border-border/70 space-y-3">
       <div class="flex items-center justify-between pb-1">
         <div class="flex items-center gap-1.5">
           <Gauge class="w-3.5 h-3.5 text-primary" />

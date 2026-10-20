@@ -1,0 +1,12 @@
+[
+  {"name": "simple agent", "command": "agent --trust", "ok": true, "exec": "exec agent --trust"},
+  {"name": "env prefix", "command": "A=1 B=2 agent", "ok": true, "exec": "exec env A=1 B=2 agent"},
+  {"name": "pipe rejected", "command": "agent | tee log", "ok": false},
+  {"name": "and rejected", "command": "agent && echo x", "ok": false},
+  {"name": "cd builtin", "command": "cd /tmp && agent", "ok": false},
+  {"name": "source builtin", "command": "source foo.sh", "ok": false},
+  {"name": "redirect", "command": "agent > /tmp/x", "ok": false},
+  {"name": "substitution", "command": "agent $(date)", "ok": false},
+  {"name": "quoted args", "command": "agent 'hello world'", "ok": true, "exec": "exec agent 'hello world'"},
+  {"name": "only env", "command": "FOO=bar", "ok": false}
+]

@@ -1,0 +1,85 @@
+name: Build and Publish Agent Docker Image
+
+# Agent 专用镜像（可选，只含 relaymesh-agent，默认以 SSH 网关方式运行）。
+# 只随正式版本标签（v*.*.*）或手动触发构建：日常推送 main 不会触发它，避免每次提交都重建发布。
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: relaymesh-agent
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || 'teacat99' }}
+
+jobs:
+  build-and-push:
+    # 只在公开库构建并推送镜像：私有库没有 Docker Hub 凭据
+    if: ${{ github.repository == 'teacat99/RelayMesh' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU for multi-arch
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+            ghcr.io/${{ github.repository }}-agent
+          # 预发布标签（v2.0.0-rc.1）只打完整版本标签；「主.次」短标签与 latest 只给正式版（预览版不能顶掉 latest）。
+          # 注意：不要把注释写进下面的 tags 块（块标量里的 # 行会原样交给元数据动作）。
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+
+      - name: Determine version string
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=dev-$(echo ${{ github.sha }} | head -c 7)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push multi-arch Agent image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.agent
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent

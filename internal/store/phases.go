@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
 	"gorm.io/gorm"
 )
 
@@ -21,15 +21,19 @@ func (s *Store) GetWorkflowPhase(ctx context.Context, workflowID string) (*model
 	return &state, nil
 }
 
+// SetWorkflowPhase 设置工作流当前阶段。旧五段式的阶段 id（assess / verify / done）仍被接受，
+// 落库前统一换成对应的新 id（见 model.CanonicalPhaseID）。
 func (s *Store) SetWorkflowPhase(ctx context.Context, workflowID, phaseID string, isHumanClick bool) error {
+	phaseID = model.CanonicalPhaseID(phaseID)
 	return s.WithTx(ctx, func(tx *gorm.DB) error {
 		var existing model.WorkflowPhaseState
 		err := tx.Where("workflow_id = ?", workflowID).First(&existing).Error
 		if err == gorm.ErrRecordNotFound {
 			state := model.WorkflowPhaseState{
-				WorkflowID:     workflowID,
-				CurrentPhaseID: phaseID,
-				UpdatedAt:      time.Now(),
+				WorkflowID:            workflowID,
+				CurrentPhaseID:        phaseID,
+				HumanPreferredPhaseID: model.DefaultPhaseID,
+				UpdatedAt:             time.Now(),
 			}
 			if isHumanClick {
 				state.HumanPreferredPhaseID = phaseID
@@ -50,18 +54,8 @@ func (s *Store) SetWorkflowPhase(ctx context.Context, workflowID, phaseID string
 	})
 }
 
-func (s *Store) GetHumanPreferredPhase(ctx context.Context, workflowID string) (string, error) {
-	state, err := s.GetWorkflowPhase(ctx, workflowID)
-	if err != nil {
-		return "", err
-	}
-	if state != nil && state.HumanPreferredPhaseID != "" {
-		return state.HumanPreferredPhaseID, nil
-	}
-	return "assess", nil
-}
-
 func (s *Store) SetWorkflowPhaseConfig(ctx context.Context, workflowID string, phases []model.PhaseItem) error {
+	phases, _ = model.MigratePhaseItems(phases) // 旧版前端缓存可能还在提交五段式列表
 	phasesJSON, err := json.Marshal(phases)
 	if err != nil {
 		return err
@@ -71,10 +65,11 @@ func (s *Store) SetWorkflowPhaseConfig(ctx context.Context, workflowID string, p
 		e := tx.Where("workflow_id = ?", workflowID).First(&existing).Error
 		if e == gorm.ErrRecordNotFound {
 			return tx.Create(&model.WorkflowPhaseState{
-				WorkflowID:     workflowID,
-				CurrentPhaseID: "assess",
-				PhasesJSON:     string(phasesJSON),
-				UpdatedAt:      time.Now(),
+				WorkflowID:            workflowID,
+				CurrentPhaseID:        model.DefaultPhaseID,
+				HumanPreferredPhaseID: model.DefaultPhaseID,
+				PhasesJSON:            string(phasesJSON),
+				UpdatedAt:             time.Now(),
 			}).Error
 		}
 		if e != nil {
@@ -96,20 +91,22 @@ func (s *Store) GetWorkflowPhaseWithDefaults(ctx context.Context, workflowID str
 	if state != nil && state.PhasesJSON != "" {
 		if e := json.Unmarshal([]byte(state.PhasesJSON), &phases); e != nil {
 			phases = nil
+		} else {
+			phases, _ = model.MigratePhaseItems(phases) // 存量五段式在读取时也收敛，不依赖迁移是否已跑
 		}
 	}
 
 	if len(phases) == 0 {
 		globalSettings, e := s.GetGlobalAppSettings(ctx)
 		if e == nil && globalSettings != nil && len(globalSettings.PhaseTemplate) > 0 {
-			phases = globalSettings.PhaseTemplate
+			phases, _ = model.MigratePhaseItems(globalSettings.PhaseTemplate)
 		} else {
 			phases = model.DefaultPhaseTemplate()
 		}
 	}
 
 	if state != nil {
-		currentPhaseID = state.CurrentPhaseID
+		currentPhaseID = model.CanonicalPhaseID(state.CurrentPhaseID)
 	}
 	if currentPhaseID == "" && len(phases) > 0 {
 		currentPhaseID = phases[0].ID

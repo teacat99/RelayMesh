@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 func TestStdioTransport_EndToEnd(t *testing.T) {
@@ -93,8 +93,8 @@ func TestStdioTransport_EndToEnd(t *testing.T) {
 	}
 	resMap2 := resp2.Result.(map[string]any)
 	toolsList := resMap2["tools"].([]any)
-	if len(toolsList) != 10 {
-		t.Fatalf("expected 10 tools in tools/list, got %d", len(toolsList))
+	if len(toolsList) != 15 {
+		t.Fatalf("expected 15 tools in tools/list, got %d", len(toolsList))
 	}
 
 	// Check response 3 (tools/call get_system_info)

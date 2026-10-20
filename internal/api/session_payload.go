@@ -3,7 +3,7 @@ package api
 import (
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
 )
 
 // sessionLiveSource 提供只存在于内存中的会话实时状态：MCP 等待者与最近一次保活响应时间。

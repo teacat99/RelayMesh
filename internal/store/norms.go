@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
 	"gorm.io/gorm"
 )
 
@@ -27,7 +27,7 @@ description: 会话场景模式 playbook（online 值守 / away 安全兜底 / a
 # agent-modes · 会话场景模式 + 开发工作流
 
 > **定位**：本 Skill 是 L0 路由契约的〈模式 + Phase〉兜底实现档。
-> **RelayMesh 为主**：模式行为指令优先由 RelayMesh flowPrompts 在 MCP 回执中动态注入；本规范作为系统级常驻规范。
+> **RelayMesh 为主**：在线值守的等待 / 超时指令由 RelayMesh flowPrompts 在 MCP 回执中动态注入；away / autopilot 是智能体按场景自行进入的行为约定（Hub 里没有「我的状态」开关，也不再注入对应回执），以本规范为准。
 > **模式判定**：online 在线值守（默认）/ away 安全兜底（MCP 通信异常自动降级）/ autopilot 外部编排（Task API 编排）。
 > **全模式底线**：生产部署、DB 迁移、删数据、破坏性命令、push main、发布 release/tag 等不可逆或高风险操作，必须二次确认。
 

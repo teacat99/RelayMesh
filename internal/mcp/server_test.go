@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/model"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 func setupTestMCPServer(t *testing.T) *Server {
@@ -23,7 +23,6 @@ func setupTestMCPServer(t *testing.T) *Server {
 		FeedbackTimeoutSeconds: 1,
 		WaitAfterMinutes:       5,
 		MaxNoFeedbackChecks:    3,
-		WaitCountdownMinutes:   0,
 	}
 	st, err := store.New(":memory:")
 	if err != nil {
@@ -68,8 +67,9 @@ func TestMCPServer_InitializeAndToolsList(t *testing.T) {
 	}
 	resMap := toolsResp.Result.(map[string]any)
 	toolsList := resMap["tools"].([]any)
-	if len(toolsList) != 10 {
-		t.Fatalf("expected 10 tools, got %d", len(toolsList))
+	// 14 个原有工具 + 只读使用手册 usage_guide
+	if len(toolsList) != 15 {
+		t.Fatalf("expected 15 tools, got %d", len(toolsList))
 	}
 
 	// 3. Configure token tools list
@@ -83,6 +83,24 @@ func TestMCPServer_InitializeAndToolsList(t *testing.T) {
 	toolsList = resMap["tools"].([]any)
 	if len(toolsList) != 1 {
 		t.Fatalf("expected 1 tool for configure token, got %d", len(toolsList))
+	}
+}
+
+// 「我的状态」（在线 / 暂离 / 托管）已整体下线：工具说明里不该再出现对应的回执标记，
+// 也不该再有写入这种状态的参数（智能体看到就会照着去用）。
+func TestMCPServer_ToolDescriptionsHaveNoPresenceLeftovers(t *testing.T) {
+	srv := setupTestMCPServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}`))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, banned := range []string{"=== 用户暂离 ===", "=== 托管自驾 ===", "user_presence"} {
+		if strings.Contains(body, banned) {
+			t.Fatalf("工具说明里不该再出现 %q", banned)
+		}
 	}
 }
 
@@ -645,19 +663,20 @@ func TestMCPServer_ConsumedAtAndPhaseGuard(t *testing.T) {
 		t.Fatalf("expected ConsumedAt to be non-nil")
 	}
 
-	// 验证处于 dev 阶段时不应该被重置为 assess
+	// 验证处于 dev 阶段时消费反馈不会改变阶段
 	currentPhase, _, _ := srv.store.GetWorkflowPhaseWithDefaults(ctx, "wf-phase-guard-test")
 	if currentPhase != "dev" {
 		t.Fatalf("expected phase to remain 'dev', got %q", currentPhase)
 	}
 
-	// 2. 将阶段设为 done 并再次消费新轮次
+	// 2. 旧五段式的「完成」被接受并并入 dev；消费新一轮反馈后不再像以前那样自动回到评估
+	//    （三段式没有终点阶段，话题切换由智能体按开发阶段提示词的约定切回讨论）
 	_ = srv.store.SetWorkflowPhase(ctx, "wf-phase-guard-test", "done", false)
 	sess2, _ := srv.store.CreateFeedbackSession(ctx, store.CreateSessionInput{
 		WorkflowID:       "wf-phase-guard-test",
 		ProjectDirectory: "/test",
 		Title:            "Phase Guard Test 2",
-		Summary:          "Checking done to assess transition",
+		Summary:          "Checking legacy done is mapped and never auto-reset",
 	})
 	_, _ = srv.store.SubmitFeedback(ctx, store.SubmitFeedbackInput{
 		SessionID:    sess2.ID,
@@ -666,10 +685,68 @@ func TestMCPServer_ConsumedAtAndPhaseGuard(t *testing.T) {
 	updatedSess2, _ := srv.store.GetFeedbackSession(ctx, sess2.ID)
 	srv.markConsumedAndBroadcast(ctx, updatedSess2)
 
-	// 处于 done 阶段时，消费后应该自动流转回 assess
 	currentPhase2, _, _ := srv.store.GetWorkflowPhaseWithDefaults(ctx, "wf-phase-guard-test")
-	if currentPhase2 != "assess" {
-		t.Fatalf("expected phase to reset to 'assess' from 'done', got %q", currentPhase2)
+	if currentPhase2 != "dev" {
+		t.Fatalf("legacy 'done' should be stored as 'dev' and stay there after consuming feedback, got %q", currentPhase2)
+	}
+}
+
+func TestMCPServer_SetPhaseReceipt(t *testing.T) {
+	srv := setupTestMCPServer(t)
+	ctx := context.Background()
+	const wf = "wf-set-phase-receipt"
+
+	call := func(phase string) map[string]any {
+		t.Helper()
+		out, err := srv.handleSetPhase(ctx, workflowContextArgs{WorkflowID: wf, PhaseID: phase})
+		if err != nil {
+			t.Fatalf("set_phase(%q): %v", phase, err)
+		}
+		res, ok := out.(map[string]any)
+		if !ok {
+			t.Fatalf("set_phase(%q) returned %T", phase, out)
+		}
+		return res
+	}
+
+	// 新阶段 id：原样生效，附带阶段提示词和可用阶段列表，没有别名提示与告警
+	res := call("plan")
+	if res["current_phase"] != "plan" {
+		t.Fatalf("current_phase = %v", res["current_phase"])
+	}
+	if p, _ := res["phase_prompt"].(string); !strings.Contains(p, "方案阶段") {
+		t.Errorf("phase_prompt should be the plan prompt, got %q", p)
+	}
+	avail, _ := res["available_phases"].([]string)
+	if strings.Join(avail, ",") != "discuss,plan,dev" {
+		t.Errorf("available_phases = %v", avail)
+	}
+	if _, has := res["phase_alias"]; has {
+		t.Error("new phase ids must not carry an alias note")
+	}
+	if _, has := res["warning"]; has {
+		t.Error("known phases must not carry a warning")
+	}
+
+	// 旧 id：映射到新阶段，回执里说明实际生效的 id
+	for legacy, want := range map[string]string{"assess": "discuss", "verify": "dev", "done": "dev"} {
+		res := call(legacy)
+		if res["current_phase"] != want {
+			t.Errorf("set_phase(%q): current_phase = %v, want %s", legacy, res["current_phase"], want)
+		}
+		note, _ := res["phase_alias"].(string)
+		if !strings.Contains(note, legacy) || !strings.Contains(note, want) {
+			t.Errorf("set_phase(%q): alias note should mention both ids, got %q", legacy, note)
+		}
+	}
+
+	// 不在阶段列表里的 id：照常记录，但给出告警和可用列表
+	res = call("review")
+	if res["current_phase"] != "review" {
+		t.Errorf("unknown ids are stored as given, got %v", res["current_phase"])
+	}
+	if w, _ := res["warning"].(string); !strings.Contains(w, "review") || !strings.Contains(w, "discuss / plan / dev") {
+		t.Errorf("unknown phase should warn with the available list, got %q", w)
 	}
 }
 
@@ -1097,4 +1174,3 @@ func TestMCPServer_D165_ListSessionsScopingAndSecurityTrimming(t *testing.T) {
 		t.Fatalf("expected wf-proj-a, got %v", wfItem0["workflow_id"])
 	}
 }
-

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
 	"gorm.io/gorm"
 )
 

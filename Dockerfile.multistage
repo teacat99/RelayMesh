@@ -10,8 +10,14 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM golang:1.25-alpine AS backend-builder
+FROM golang:1.26-alpine AS backend-builder
 WORKDIR /app
+
+# Go 依赖从哪个代理下载可以用构建参数覆盖（默认与 Go 官方一致）：构建机所在网络访问不了 proxy.golang.org 时，
+# 传 --build-arg GOPROXY=https://goproxy.cn,direct 之类即可。构建容器的流量不一定走宿主机的透明代理，
+# 所以宿主机上 go 能下载，不代表这里也能。
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 
 RUN apk add --no-cache git ca-certificates tzdata
 
@@ -22,7 +28,48 @@ COPY . .
 COPY --from=frontend-builder /app/web/dist /app/web/dist
 
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION}" -o /app/relaymesh ./cmd/relaymesh
+# 「Agent 侧代码指纹」（见 internal/agentrev）：编进服务端二进制，供 `relaymesh agent` 子命令自报；整个仓库已 COPY 进来。
+# 计算失败要让构建失败（单条 RUN 里 REV=$(…) 失败即退出），不能悄悄退回空指纹。
+RUN set -eu; \
+    REV="$(go run ./cmd/agentrev)"; \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION} -X main.rev=${REV}" -o /app/relaymesh ./cmd/relaymesh
+
+# Agent 安装源：服务端自带各平台的终端 Agent，发现窗口开启期间 Web 生成的安装命令直接从服务端下载，
+# 不再依赖 GitHub。Agent 与镜像的 CPU 架构无关，所以固定在构建机的原生平台上交叉编译
+# （多架构镜像只编译一次，也不用在 QEMU 里跑编译器）。
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS agent-builder
+WORKDIR /app
+
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+
+RUN apk add --no-cache git ca-certificates
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG VERSION=dev
+# 版本号跟着整个仓库的构建走（每次热更服务端都变），「Agent 侧代码指纹」只在 Agent 依赖的代码真的变了才变（算法见 internal/agentrev）。
+# 它既编进各平台的 Agent（-X main.rev），也写进 /out/REV：服务端据此判断主机要不要升级——指纹一致就不提醒，
+# 而不是每次热更服务端都让所有主机亮「可升级」。算指纹在构建机原生平台上 go run，不受下面 GOOS/GOARCH 影响；
+# 计算失败即退出（set -e），不能悄悄退回空指纹让这个功能无声失效。
+RUN set -eu; \
+    mkdir -p /out; \
+    REV="$(go run ./cmd/agentrev)"; \
+    for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do \
+        os="${target%/*}"; arch="${target#*/}"; ext=""; \
+        if [ "${os}" = "windows" ]; then ext=".exe"; fi; \
+        CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION} -X main.rev=${REV}" \
+            -o "/out/relaymesh-agent-${os}-${arch}${ext}" ./cmd/relaymesh-agent; \
+        CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o "/out/relaymesh-hook-${os}-${arch}${ext}" ./cmd/relaymesh-hook; \
+    done; \
+    printf '%s\n' "${VERSION}" > /out/VERSION; \
+    printf '%s\n' "${REV}" > /out/REV
 
 FROM alpine:3.21 AS runner
 WORKDIR /app
@@ -32,6 +79,8 @@ RUN apk add --no-cache ca-certificates tzdata \
     && mkdir -p /app/data && chown -R relaymesh:relaymesh /app
 
 COPY --from=backend-builder /app/relaymesh /app/relaymesh
+# 默认就是服务端查找 Agent 的目录之一（RELAYMESH_AGENT_DIST_DIR 可改）；文件名固定为 relaymesh-agent-<系统>-<架构>[.exe]
+COPY --from=agent-builder /out /app/agent-dist
 
 USER relaymesh
 

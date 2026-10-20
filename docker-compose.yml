@@ -1,34 +1,67 @@
 # ============================================================
-# RelayMesh - Production Docker Compose Stack
+# RelayMesh - Docker Compose 标准部署文件（公开仓库的 docker-compose.yml 由本文件生成）
+#
+# 三步跑起来：
+#   1. 在本文件旁边创建 .env（强烈建议；README「5 分钟上手」里有一键生成随机口令的命令。什么都不写也能启动，但那样是「免登录 + 所有网卡都能访问」）
+#   2. docker compose up -d
+#   3. 浏览器打开 http://localhost:18775/
+#
+# ⚠️ 默认监听所有网卡：局域网里（云服务器上就是整个互联网）的人都能连到 18775 / 18776。
+#    没设 Web 密码与 MCP 令牌 = 任何人都能读写你的会话、给智能体下指令。请先设置口令；只想本机用就写 RELAYMESH_PUBLISH_BIND=127.0.0.1。
+#
+# .env 里可以设置的变量（全部有默认值）：
+#   RELAYMESH_PUBLISH_BIND        宿主机对外监听的地址。默认 0.0.0.0（所有网卡：局域网 / 手机 / 其他机器都能访问，所以请务必设好下面的密码与令牌）；
+#                                 只在本机用、或放在反向代理后面时写 127.0.0.1
+#   RELAYMESH_PUBLISH_HTTP_PORT   宿主机上的 HTTP 端口（Web 控制台 + /mcp），默认 18775
+#   RELAYMESH_PUBLISH_HTTPS_PORT  宿主机上的 HTTPS 端口（自签名证书，浏览器麦克风录音需要），默认 18776
+#   RELAYMESH_WEB_USERNAME        Web 控制台管理员账号，默认 admin
+#   RELAYMESH_WEB_PASSWORD        Web 控制台密码；留空 = 免登录（只适合仅本机访问：留空时请同时写 RELAYMESH_PUBLISH_BIND=127.0.0.1）。远程终端功能要求设置密码
+#   RELAYMESH_MCP_TOKEN           MCP 访问令牌；留空 = /mcp 免鉴权（同样只适合仅本机访问）。建议 rmk_ 开头 + 随机串（openssl rand -hex 24）
+#   RELAYMESH_HOST_NAME           主机名标识，多台机器接入同一个中枢时用来区分，默认 relaymesh-hub
+#   RELAYMESH_TAG                 镜像版本，默认 latest；想固定版本或回滚时写成具体版本号，例如 2.0.0（预览版如 2.0.0-rc.1；Docker Hub 上的标签不带 v）
+#   提示：口令里不要出现 $ 字符（compose 会把它当作变量展开）；.env 请设置权限 600，不要提交到 Git。
+#
+# 公网访问：不要直接把 18775 暴露到公网（密码会以明文传输），请放在 HTTPS 反向代理后面（README「反向代理配置」），
+#          此时务必写 RELAYMESH_PUBLISH_BIND=127.0.0.1，由同机的反向代理转发即可。
 # ============================================================
 services:
   relaymesh:
-    image: teacat99/relaymesh:latest
+    image: teacat99/relaymesh:${RELAYMESH_TAG:-latest}
     container_name: relaymesh
     restart: unless-stopped
+    # 以 root 运行，避免 ./data 绑定挂载在不同系统上的权限问题（Alpine 最小镜像 + 单二进制，风险极低）
     user: "0:0"
     ports:
-      # 如配合 Nginx/1Panel 等反向代理，可绑定到 127.0.0.1:18775；如直接暴露可使用 18775:18775
-      - "18775:18775"
+      - "${RELAYMESH_PUBLISH_BIND:-0.0.0.0}:${RELAYMESH_PUBLISH_HTTP_PORT:-18775}:18775"
+      - "${RELAYMESH_PUBLISH_BIND:-0.0.0.0}:${RELAYMESH_PUBLISH_HTTPS_PORT:-18776}:18776"
     environment:
-      - RELAYMESH_HOST=0.0.0.0
-      - RELAYMESH_PORT=18775
-      - RELAYMESH_HOST_NAME=relaymesh-hub
-      - RELAYMESH_DB_PATH=/app/data/relaymesh.db
-      - RELAYMESH_PROJECT_ID=default
-      # 生产环境安全认证（如需密码保护，请取消注释并设置强密码）
-      # - RELAYMESH_WEB_USERNAME=admin
-      # - RELAYMESH_WEB_PASSWORD=YourStrongWebPassword2026!
-      # JWT 签名密钥无需配置：留空时首次启动自动生成随机密钥并持久化到数据库（如需多实例共用，可设置不少于 32 字符的随机串 RELAYMESH_JWT_SECRET）
-      # - RELAYMESH_MCP_TOKEN=rmk_prod_secret_token_8888
-      - RELAYMESH_ALLOW_NON_LOOPBACK=true
-      - RELAYMESH_WAIT_AFTER_MINUTES=5
-      - RELAYMESH_MAX_NO_FEEDBACK_CHECKS=24
-      - GIN_MODE=release
+      RELAYMESH_HOST: 0.0.0.0
+      RELAYMESH_PORT: "18775"
+      RELAYMESH_HTTPS_PORT: "18776"
+      RELAYMESH_HOST_NAME: ${RELAYMESH_HOST_NAME:-relaymesh-hub}
+      RELAYMESH_DB_PATH: /app/data/relaymesh.db
+      RELAYMESH_PROJECT_ID: default
+      RELAYMESH_WEB_USERNAME: ${RELAYMESH_WEB_USERNAME:-admin}
+      RELAYMESH_WEB_PASSWORD: ${RELAYMESH_WEB_PASSWORD:-}
+      RELAYMESH_MCP_TOKEN: ${RELAYMESH_MCP_TOKEN:-}
+      RELAYMESH_WAIT_AFTER_MINUTES: "5"
+      RELAYMESH_MAX_NO_FEEDBACK_CHECKS: "24"
+      # JWT 签名密钥无需配置：首次启动自动生成随机密钥并持久化到数据库（保留 ./data 即可跨重启保持登录态）。
+      # 多实例共用同一密钥时才需要设置 RELAYMESH_JWT_SECRET（不少于 32 字符的随机串）。
+      GIN_MODE: release
     volumes:
+      # 数据库、证书、身份都在这里；备份 / 迁移就是复制这个目录
       - ./data:/app/data
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18775/mcp"]
-      interval: 30s
+      # 探活地址与 README 里「验证部署」用的是同一个接口（不需要登录，也不受 MCP 令牌影响）；
+      # 间隔取 10 秒，这样 docker compose up -d 之后十来秒就能看到 healthy，不必干等
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18775/api/v1/auth/status"]
+      interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

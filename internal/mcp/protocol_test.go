@@ -3,10 +3,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 func TestProtocol_NotificationHandling(t *testing.T) {
@@ -74,8 +75,9 @@ func TestProtocol_NotificationHandling(t *testing.T) {
 	})
 	initResCustom := srv.HandleRPCRequest(context.Background(), credCtx, &initReq)
 	customMap := initResCustom.Response.Result.(map[string]any)
-	if customMap["instructions"] != customInstructions {
-		t.Fatalf("expected custom instructions %q, got: %v", customInstructions, customMap["instructions"])
+	// 自定义指引原样打头；能用 task_board 的令牌，末尾会再追加固定的「任务清单」章节（不受自定义文本影响）。
+	if got, _ := customMap["instructions"].(string); !strings.HasPrefix(got, customInstructions) || !strings.Contains(got, "task_board") {
+		t.Fatalf("expected custom instructions %q followed by the task board section, got: %v", customInstructions, customMap["instructions"])
 	}
 
 	// 3. Tools list via LocalStdioCredential
@@ -89,12 +91,12 @@ func TestProtocol_NotificationHandling(t *testing.T) {
 	}
 	resMap := toolsRes.Response.Result.(map[string]any)
 	if toolsList, ok := resMap["tools"].([]ToolDefinition); ok {
-		if len(toolsList) != 10 {
-			t.Fatalf("expected 10 tools for stdio credential, got %d", len(toolsList))
+		if len(toolsList) != 15 {
+			t.Fatalf("expected 15 tools for stdio credential, got %d", len(toolsList))
 		}
 	} else if toolsAny, ok := resMap["tools"].([]any); ok {
-		if len(toolsAny) != 10 {
-			t.Fatalf("expected 10 tools for stdio credential, got %d", len(toolsAny))
+		if len(toolsAny) != 15 {
+			t.Fatalf("expected 15 tools for stdio credential, got %d", len(toolsAny))
 		}
 	} else {
 		t.Fatalf("unexpected type for tools in result: %T", resMap["tools"])

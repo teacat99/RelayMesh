@@ -6,9 +6,11 @@ import {
   createDraftPersister,
   draftSignature,
   draftStateHash,
+  hasUnloadedImages,
   hashString,
   sanitizeDraftsForStorage,
   type DraftImageLike,
+  type DraftPersisterOptions,
   type MultiDraftLike,
 } from './draftSync'
 
@@ -78,7 +80,7 @@ interface UploadCall {
   reject: (error: unknown) => void
 }
 
-function harness() {
+function harness(extra: Partial<DraftPersisterOptions> = {}) {
   const clock = new FakeClock()
   const localWrites: Array<{ id: string; json: string; at: number }> = []
   const uploads: UploadCall[] = []
@@ -100,6 +102,7 @@ function harness() {
     now: clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
+    ...extra,
   })
   return { clock, persister, localWrites, uploads, uploaded, errors, flags }
 }
@@ -150,7 +153,8 @@ describe('sanitizeDraftsForStorage', () => {
     assert.equal(images[0].data, 'S'.repeat(1000))
     assert.equal(images[1].data, '')
     assert.equal(images[1].name, 'big.png')
-    assert.equal('url' in images[1], false)
+    // 直链很短，必须保留：旧实现把它丢掉，只有直链的图片刷新后就成了空图
+    assert.equal(images[1].url, '/api/x')
   })
 })
 
@@ -426,5 +430,101 @@ describe('createDraftPersister · 载入登记与异常', () => {
     clock.advance(20_000)
     assert.equal(localWrites.length, 0)
     assert.equal(uploads.length, 0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 上传闸门（INV-D5）与本地写入后回调（D-201）
+// ---------------------------------------------------------------------------
+
+/** 刷新后载入的「空壳」图片：正文被本地副本剥掉了。 */
+function shellImage(name: string): DraftImageLike {
+  return { name, format: 'png', data_type: 'base64', hash: 'h-' + name, width: 10, height: 10, data: '', key: 'k-' + name }
+}
+
+describe('createDraftPersister · 上传闸门（INV-D5）', () => {
+  it('图片正文还没载入时：本地照常写，但绝不上传（否则空壳会覆盖服务端完整的图片）', () => {
+    const { persister, localWrites, uploads } = harness({ canUpload: s => !hasUnloadedImages(s) })
+    const loading = state('刷新后敲了一个字', { images: [shellImage('a')] })
+    persister.touch('wf-1', () => loading)
+    persister.flush('wf-1')
+    assert.equal(localWrites.length, 1, '本地写入不受影响')
+    assert.equal(uploads.length, 0, '闸门挡住上传')
+    assert.equal(persister.hasPending('wf-1'), true, '仍标记为待上传')
+  })
+
+  it('载入完成后再冲刷：上传的是带完整正文的最新内容', () => {
+    const { persister, uploads } = harness({ canUpload: s => !hasUnloadedImages(s) })
+    const img = shellImage('a')
+    const current = state('文字', { images: [img] })
+    persister.touch('wf-1', () => current)
+    persister.flush('wf-1')
+    assert.equal(uploads.length, 0)
+
+    img.data = 'FULLBODY'
+    persister.flush('wf-1')
+    assert.equal(uploads.length, 1)
+    assert.match(uploads[0].json, /FULLBODY/)
+  })
+
+  it('确认丢失（lost）的图片不再挡住上传，否则一张永远找不回的图会让整份草稿永远传不上去', () => {
+    const { persister, uploads } = harness({ canUpload: s => !hasUnloadedImages(s) })
+    const img = shellImage('gone')
+    img.lost = true
+    persister.touch('wf-1', () => state('文字', { images: [img] }))
+    persister.flush('wf-1')
+    assert.equal(uploads.length, 1)
+  })
+
+  it('没有配置闸门时行为不变', () => {
+    const { persister, uploads } = harness()
+    persister.touch('wf-1', () => state('x', { images: [shellImage('a')] }))
+    persister.flush('wf-1')
+    assert.equal(uploads.length, 1)
+  })
+})
+
+describe('createDraftPersister · afterLocal', () => {
+  it('本地写入成功后收到完整状态（含大图正文，供同步进大图仓库）', () => {
+    const seen: Array<{ id: string; data: string | undefined }> = []
+    const big = image('big.png', 'B'.repeat(MAX_INLINE_IMAGE_CHARS + 5))
+    const { persister, localWrites } = harness({
+      afterLocal: (id, s) => seen.push({ id, data: s.drafts[0].images[0].data }),
+    })
+    persister.touch('wf-1', () => state('t', { images: [big] }))
+    persister.flush('wf-1')
+    assert.equal(localWrites.length, 1)
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].id, 'wf-1')
+    assert.equal(seen[0].data, big.data, '回调拿到的是完整正文，落盘的 JSON 里才被剥掉')
+    assert.equal(JSON.parse(localWrites[0].json).drafts[0].images[0].data, '')
+  })
+
+  it('本地写入失败时不调用；内容没变化时也不重复调用', () => {
+    let calls = 0
+    const { persister, flags } = harness({ afterLocal: () => void calls++ })
+    flags.failLocal = true
+    persister.touch('wf-1', () => state('q'))
+    persister.flush('wf-1')
+    assert.equal(calls, 0)
+    flags.failLocal = false
+    persister.flush('wf-1')
+    assert.equal(calls, 1)
+    persister.touch('wf-1', () => state('q'))
+    persister.flush('wf-1')
+    assert.equal(calls, 1)
+  })
+
+  it('回调抛错只上报为本地错误，不影响已经写入的事实，也不抛出', () => {
+    const { persister, localWrites, errors } = harness({
+      afterLocal: () => {
+        throw new Error('idb boom')
+      },
+    })
+    persister.touch('wf-1', () => state('t'))
+    persister.flush('wf-1')
+    assert.equal(localWrites.length, 1)
+    assert.deepEqual(errors, [{ kind: 'local', id: 'wf-1' }])
+    assert.equal(persister.hasPending('wf-1'), false, '本地副本已写入，不应反复重写')
   })
 })

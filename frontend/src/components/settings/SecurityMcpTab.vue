@@ -1,9 +1,27 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useSettingsStore } from '../../stores/settings'
 import { useAuthStore } from '../../stores/auth'
 import { useCredentialsStore } from '../../stores/credentials'
 import type { MCPCredential, MCPPermissions } from '../../api/client'
+import CredentialPolicyEditor from './CredentialPolicyEditor.vue'
+import OAuthSettingsPanel from './OAuthSettingsPanel.vue'
+import {
+  GOVERNANCE_OPTIONS,
+  LAUNCHER_OPTIONS,
+  TERMINAL_OPTIONS,
+  capabilityUrl,
+  defaultPolicyForm,
+  fileScopeSummary,
+  formFromCredential,
+  grantsWholeFs,
+  hasWholeFs,
+  modeCapLabel,
+  payloadFromForm,
+  tierLabel,
+  validatePolicyForm,
+  type PolicyForm
+} from '../../lib/credentialPolicy'
 import {
   Shield,
   Key,
@@ -34,14 +52,30 @@ import {
   X,
   ToggleLeft,
   ToggleRight,
-  AlertCircle
+  AlertCircle,
+  SquareTerminal
 } from 'lucide-vue-next'
 import Button from '../ui/button/Button.vue'
 import { toast } from 'vue-sonner'
+import { useRouter } from 'vue-router'
+import { useTerminalStore } from '../../stores/terminal'
+import { UnlockCancelled } from '../../api/terminal'
+import { gateReasonInfo, relativeTime } from '../../lib/terminal/format'
+import { REVEAL_AUTO_HIDE_MS, revealErrorInfo } from '../../lib/credentialReveal'
 
 const settingsStore = useSettingsStore()
 const authStore = useAuthStore()
 const credStore = useCredentialsStore()
+const terminalStore = useTerminalStore()
+const router = useRouter()
+
+// 远程终端是否可用取决于服务端总闸（已设登录密码 + JWT 密钥合格 + 未被运维关闭），这里只做状态展示与入口。
+const terminalGate = computed(() => gateReasonInfo(terminalStore.gateReason))
+
+function openTerminalPage() {
+  settingsStore.closeSettings()
+  router.push('/exec')
+}
 
 const activeClientType = ref<'cursor' | 'claude' | 'cline'>('cursor')
 const customMcpToken = ref('')
@@ -66,20 +100,57 @@ const credForm = ref({
   host_name: '',
   note: '',
   is_active: true,
-  permissions: { feedback: true, sessions: true, system_info: true, skills: true, configure: true, execute: true } as MCPPermissions
+  policy: defaultPolicyForm() as PolicyForm
 })
 const credFormError = ref('')
+// 表单很长，保存按钮在最底部：错误必须出现在按钮旁边（并滚到可见处），否则用户只会觉得「点了没反应」。
+const credErrorEl = ref<HTMLElement | null>(null)
+// 错误条紧挨着保存按钮行的上方。滚动时以按钮行为准：错误条出现会把按钮往下推，只让错误条可见的话，按钮可能被推出视口。
+const credActionsEl = ref<HTMLElement | null>(null)
+function credFail(message: string) {
+  credFormError.value = message
+  toast.error(message, { duration: 6000 })
+  void nextTick(() => (credActionsEl.value ?? credErrorEl.value)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }))
+}
+// 用户动手改表单，说明已经在处理上一次的问题：旧的错误提示不再留着误导。
+watch(credForm, () => { credFormError.value = '' }, { deep: true })
 const credRevealedToken = ref<string | null>(null)
+// 能力 URL 凭据创建 / 重新生成 / 验证密码查看后给出的完整网址。有值时横幅展示它，而不是单独的令牌。
+const credRevealedUrl = ref<string | null>(null)
+const credRevealedSecret = computed(() => credRevealedUrl.value ?? credRevealedToken.value)
 const credCopiedId = ref<number | null>(null)
 
-const credPermLabels: { key: keyof MCPPermissions; label: string; tools: string }[] = [
-  { key: 'feedback', label: '沟通反馈', tools: 'interactive_feedback, continue_feedback_session' },
-  { key: 'sessions', label: '会话查询', tools: 'list_sessions, get_session_history' },
-  { key: 'system_info', label: '系统信息', tools: 'get_system_info' },
-  { key: 'skills', label: '规范管理', tools: 'manage_skills' },
-  { key: 'configure', label: '任务指挥', tools: 'configure_task' },
-  { key: 'execute', label: '任务执行', tools: 'report_progress' },
-]
+// 「查看旧令牌」：先在列表里输入 Web 密码，验证通过后复用下方的令牌横幅展示，到点自动隐藏。
+// fresh = 刚创建 / 重新生成；viewed = 验证密码后查看的已有令牌（横幅文案与自动隐藏据此区分）。
+const credRevealKind = ref<'fresh' | 'viewed'>('fresh')
+const credRevealedName = ref('')
+const credViewTarget = ref<MCPCredential | null>(null)
+const credViewPassword = ref('')
+const credViewBusy = ref(false)
+const credViewError = ref('')
+const credViewLocked = ref(false)
+const credViewInput = ref<HTMLInputElement | null>(null)
+const credAutoHideSeconds = REVEAL_AUTO_HIDE_MS / 1000
+let credViewHideTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 清掉屏幕上的令牌明文与相关状态（含自动隐藏计时器）。 */
+function credClearRevealed() {
+  credRevealedToken.value = null
+  credRevealedUrl.value = null
+  credRevealKind.value = 'fresh'
+  credRevealedName.value = ''
+  if (credViewHideTimer) {
+    clearTimeout(credViewHideTimer)
+    credViewHideTimer = null
+  }
+}
+
+onBeforeUnmount(() => {
+  credClearRevealed()
+  credViewPassword.value = ''
+})
+// 编辑已有令牌时记录服务端判定的令牌强度原因，权限页据此提示「先重新生成令牌」。
+const credTokenWeakness = ref('')
 
 const currentHost = computed(() => {
   return window.location.hostname || 'localhost'
@@ -244,6 +315,7 @@ onMounted(() => {
   if (authStore.isAuthenticated) {
     settingsStore.fetchBlockedIPs()
     authStore.checkAuthStatus()
+    void terminalStore.loadStatus()
   }
   credStore.fetchCredentials()
 })
@@ -258,10 +330,12 @@ function credOpenCreate() {
     host_name: '',
     note: '',
     is_active: true,
-    permissions: { feedback: true, sessions: true, system_info: true, skills: true, configure: true, execute: true }
+    policy: defaultPolicyForm()
   }
+  credTokenWeakness.value = ''
   credFormError.value = ''
-  credRevealedToken.value = null
+  credCancelView()
+  credClearRevealed()
   credIsEditing.value = true
 }
 
@@ -273,10 +347,12 @@ function credOpenEdit(cred: MCPCredential) {
     host_name: cred.host_name || '',
     note: cred.note || '',
     is_active: cred.is_active,
-    permissions: { ...cred.permissions }
+    policy: formFromCredential(cred)
   }
+  credTokenWeakness.value = cred.token_weakness || ''
   credFormError.value = ''
-  credRevealedToken.value = null
+  credCancelView()
+  credClearRevealed()
   credIsEditing.value = true
 }
 
@@ -285,26 +361,51 @@ function credCloseEditor() {
   credEditTarget.value = null
   credTargetIsEnv.value = false
   credFormError.value = ''
-  credRevealedToken.value = null
+  credClearRevealed()
 }
 
 async function credHandleSave() {
   credFormError.value = ''
-  const { name, host_name, note, is_active, permissions } = credForm.value
-  if (!name.trim()) { credFormError.value = '凭据名称不能为空'; return }
+  const { name, host_name, note, is_active, policy } = credForm.value
+  if (!name.trim()) { credFail('凭据名称不能为空'); return }
+  const policyError = validatePolicyForm(policy)
+  if (policyError) { credFail(policyError); return }
+  // 凭据类型（能力 URL / 普通）只在创建时决定，更新载荷里不带。
+  const policyPayload = payloadFromForm(policy, { creating: credEditTarget.value === null })
+  // 「允许整个文件系统」是高风险授权：这次保存若是把它从无效变成有效，必须刚刚重新输入过密码（服务端强制），
+  // 已经解锁并不够——所以这里在发请求之前就强制弹出密码框，不白挨一次 403。
+  const before = credEditTarget.value === null ? null : credStore.credentials.find(c => c.id === credEditTarget.value)
+  const wholeFsGrant = grantsWholeFs(before, policy)
+  const freshOpts = { force: wholeFsGrant }
+  const freshReason = '开启「允许整个文件系统」会让这把令牌读写主机上的任意文件，请重新输入登录密码确认'
 
   try {
+    // 授予或放宽终端能力等同于授予远程执行权限：服务端要求再次验证密码时才弹出解锁，不涉及终端的令牌不受影响。
     if (credEditTarget.value !== null) {
-      await credStore.updateCredential(credEditTarget.value, { name, host_name, note, is_active, permissions })
+      const id = credEditTarget.value
+      await terminalStore.freshUnlock(
+        () => credStore.updateCredential(id, { name, host_name, note, is_active, ...policyPayload }),
+        wholeFsGrant ? freshReason : '修改令牌的终端或「运行预设」授权需要再次验证密码',
+        freshOpts
+      )
       credCloseEditor()
       toast.success('凭据已更新', { duration: 2000 })
     } else {
-      const res = await credStore.createCredential({ name: name.trim(), host_name, note, is_active, permissions })
+      const res = await terminalStore.freshUnlock(
+        () => credStore.createCredential({ name: name.trim(), host_name, note, is_active, ...policyPayload }),
+        wholeFsGrant ? freshReason : '创建带终端或「运行预设」权限的令牌需要再次验证密码',
+        freshOpts
+      )
       credRevealedToken.value = res.token
+      credRevealedUrl.value = res.capabilityPath ? capabilityUrl(window.location.origin, res.capabilityPath) : null
       toast.success('凭据已创建', { duration: 2000 })
     }
   } catch (e: any) {
-    credFormError.value = e?.response?.data?.error || e.message || '保存失败'
+    if (e instanceof UnlockCancelled) {
+      credFail('已取消解锁，这次修改没有保存。')
+      return
+    }
+    credFail(e?.response?.data?.error || e.message || '保存失败')
   }
 }
 
@@ -319,17 +420,84 @@ async function credHandleDelete(id: number, name: string) {
 }
 
 async function credHandleToggle(cred: MCPCredential) {
-  await credStore.toggleActive(cred.id, !cred.is_active)
+  try {
+    // 停用只需登录（刹车）；重新启用一个带终端能力的令牌等同于放开，服务端会要求再次验证密码。
+    await terminalStore.unlockOnDemand(() => credStore.toggleActive(cred.id, !cred.is_active), '启用带终端或「运行预设」权限的令牌需要再次验证密码')
+  } catch (e: any) {
+    if (e instanceof UnlockCancelled) return
+    toast.error(e?.response?.data?.error || '操作失败', { duration: 3000 })
+  }
 }
 
 async function credHandleRegenerate(id: number) {
-  if (!confirm('确认重新生成 Token？旧 Token 将立即失效，使用旧 Token 的 MCP 客户端需要更新配置。')) return
+  const target = credStore.credentials.find(c => c.id === id)
+  const prompt = target?.capability
+    ? '确认重新生成能力 URL？旧网址将立即失效，使用旧网址的连接器需要换成新网址。'
+    : '确认重新生成 Token？旧 Token 将立即失效，使用旧 Token 的 MCP 客户端需要更新配置。'
+  if (!confirm(prompt)) return
   try {
-    const token = await credStore.regenerateToken(id)
-    credRevealedToken.value = token
+    const res = await terminalStore.unlockOnDemand(() => credStore.regenerateToken(id), '重新生成带终端或「运行预设」权限的令牌需要再次验证密码')
+    credClearRevealed()
+    credRevealedToken.value = res.token
+    credRevealedUrl.value = res.capabilityPath ? capabilityUrl(window.location.origin, res.capabilityPath) : null
     toast.success('Token 已重新生成', { duration: 2000 })
   } catch (e: any) {
+    if (e instanceof UnlockCancelled) return
     toast.error(e?.response?.data?.error || '重新生成失败', { duration: 3000 })
+  }
+}
+
+/** 点「查看 Token」：开启了登录保护就先在行内输入 Web 密码；开放模式（没有密码可验）直接查看。 */
+function credStartView(cred: MCPCredential) {
+  credClearRevealed()
+  credViewError.value = ''
+  credViewLocked.value = false
+  credViewPassword.value = ''
+  credViewTarget.value = cred
+  if (!authStore.authRequired) {
+    void credSubmitView()
+    return
+  }
+  void nextTick(() => credViewInput.value?.focus())
+}
+
+function credCancelView() {
+  credViewTarget.value = null
+  credViewPassword.value = ''
+  credViewError.value = ''
+  credViewLocked.value = false
+}
+
+async function credSubmitView() {
+  const target = credViewTarget.value
+  if (!target || credViewBusy.value || credViewLocked.value) return
+  credViewBusy.value = true
+  credViewError.value = ''
+  try {
+    const res = await credStore.revealToken(target.id, credViewPassword.value)
+    credClearRevealed()
+    credRevealedToken.value = res.token
+    credRevealedUrl.value = res.capabilityPath ? capabilityUrl(window.location.origin, res.capabilityPath) : null
+    credRevealKind.value = 'viewed'
+    credRevealedName.value = target.name
+    credCancelView()
+    // 令牌明文只在屏幕上停留一小会儿，人走开后自动收起。
+    credViewHideTimer = setTimeout(credClearRevealed, REVEAL_AUTO_HIDE_MS)
+  } catch (e: unknown) {
+    const info = revealErrorInfo(e)
+    credViewError.value = info.message
+    credViewLocked.value = info.locked
+    // 无论什么原因失败，都不要把刚输入的密码留在输入框里。
+    credViewPassword.value = ''
+    if (info.gone) {
+      credCancelView()
+      toast.error(info.message, { duration: 3000 })
+      void credStore.fetchCredentials()
+    } else {
+      void nextTick(() => credViewInput.value?.focus())
+    }
+  } finally {
+    credViewBusy.value = false
   }
 }
 
@@ -345,10 +513,33 @@ async function credCopyToken(token: string, id: number) {
 }
 
 function credPermSummary(perms: MCPPermissions): string {
-  const all = Object.values(perms).every(v => v)
-  if (all) return '全部权限'
-  const active = credPermLabels.filter(p => perms[p.key]).map(p => p.label)
-  return active.length ? active.join('、') : '无权限'
+  const governance = GOVERNANCE_OPTIONS.filter(p => perms[p.key])
+  const terminal = TERMINAL_OPTIONS.filter(p => perms[p.key])
+  const launcher = LAUNCHER_OPTIONS.filter(p => perms[p.key])
+  const parts: string[] = []
+  if (governance.length === GOVERNANCE_OPTIONS.length) parts.push('全部治理工具')
+  else if (governance.length) parts.push(governance.map(p => p.label).join('、'))
+  if (terminal.length) parts.push(terminal.map(p => p.label).join('、'))
+  if (launcher.length) parts.push(launcher.map(p => p.label).join('、'))
+  return parts.length ? parts.join(' + ') : '无权限'
+}
+
+function credExpiryInfo(cred: MCPCredential): { text: string; expired: boolean } | null {
+  if (!cred.expires_at) return null
+  const t = Date.parse(cred.expires_at)
+  if (!Number.isFinite(t)) return null
+  const expired = t <= Date.now()
+  return { text: expired ? '已过期' : `${new Date(t).toLocaleString('zh-CN', { hour12: false })} 到期`, expired }
+}
+
+function credTerminalSummary(cred: MCPCredential): string {
+  if (!cred.permissions.terminal && !cred.permissions.terminal_files) return ''
+  const hosts = cred.terminal_hosts ?? []
+  const hostText = hosts.includes('*') ? '全部主机' : hosts.length ? `${hosts.length} 台主机` : '未选择主机'
+  const compat = cred.permissions.terminal && cred.permissions.terminal_compat ? ' · ExecMesh 兼容命名' : ''
+  const scope = fileScopeSummary(cred)
+  const files = scope ? ` · ${scope}` : ''
+  return `${hostText} · ${modeCapLabel(cred.terminal_mode_cap)}${compat}${files}`
 }
 </script>
 
@@ -548,6 +739,53 @@ function credPermSummary(perms: MCPPermissions): string {
       </div>
     </div>
 
+    <!-- 2.5 远程终端访问条件 -->
+    <div class="p-3.5 rounded-xs border border-border/80 bg-card/40 space-y-3">
+      <div class="flex items-center justify-between border-b border-border/60 pb-2.5">
+        <div class="flex items-center gap-2">
+          <SquareTerminal class="w-4 h-4 text-foreground shrink-0" />
+          <div>
+            <h3 class="font-bold text-xs sm:text-sm text-foreground tracking-tight">远程终端</h3>
+            <p class="text-[10px] text-muted-foreground font-sans mt-0.5">
+              在已接入的主机上打开持久终端；必须设置登录密码才会启用
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="p-2.5 rounded-xs border border-border/60 bg-background flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div class="space-y-0.5 min-w-0">
+          <span class="text-xs font-bold text-foreground">
+            {{ terminalStore.status === null ? '正在读取终端状态…' : terminalStore.gateOpen ? '终端已启用' : terminalGate.title }}
+          </span>
+          <p class="text-[10px] text-muted-foreground font-sans leading-relaxed">
+            <template v-if="terminalStore.status === null">{{ terminalStore.statusError || '请稍候' }}</template>
+            <template v-else-if="terminalStore.gateOpen">已满足启用条件：登录密码与令牌签名密钥均合格。主机的启用、会话创建与连接都需要再次输入密码解锁，并会记入审计日志。</template>
+            <template v-else>{{ terminalGate.body }}</template>
+          </p>
+        </div>
+        <div class="flex items-center gap-2 shrink-0 self-start sm:self-center">
+          <span
+            v-if="terminalStore.status !== null"
+            class="px-2 py-0.5 text-[10px] font-mono rounded-2xs border flex items-center gap-1"
+            :class="terminalStore.gateOpen ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20' : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'"
+          >
+            {{ terminalStore.gateOpen ? '● 可用' : '未启用' }}
+          </span>
+          <Button
+            v-if="terminalStore.gateOpen"
+            variant="outline"
+            size="sm"
+            class="h-6 text-[10px] px-2 cursor-pointer"
+            @click="openTerminalPage"
+          >
+            <SquareTerminal class="w-2.5 h-2.5 mr-1" />
+            <span>打开终端</span>
+          </Button>
+        </div>
+      </div>
+    </div>
+
     <!-- 3. 防暴力破解与 IP 锁定防护 (Brute-force Protection) -->
     <div class="p-3.5 rounded-xs border border-border/80 bg-card/40 space-y-3">
       <div class="flex items-center justify-between border-b border-border/60 pb-2.5">
@@ -744,6 +982,8 @@ function credPermSummary(perms: MCPPermissions): string {
       </div>
     </div>
 
+    <OAuthSettingsPanel class="mt-4" />
+
     <!-- 5. MCP 凭据管理 (Credential Management) -->
     <div class="p-3.5 rounded-xs border border-border/80 bg-card/40 space-y-3">
       <div class="flex items-center justify-between border-b border-border/60 pb-2.5">
@@ -752,7 +992,8 @@ function credPermSummary(perms: MCPPermissions): string {
           <div>
             <h3 class="font-bold text-xs sm:text-sm text-foreground tracking-tight">MCP 凭据管理</h3>
             <p class="text-[10px] text-muted-foreground font-sans mt-0.5">
-              为 AI 客户端分发独立 Token，每条凭据可绑定主机名（<code class="text-primary/80">host_name</code>）和细粒度权限
+              为 AI 客户端分发独立 Token，每条凭据可绑定主机名（<code class="text-primary/80">host_name</code>）和细粒度权限。
+              MCP 令牌只用于 <code class="text-primary/80">/mcp</code> 端点，不能访问 Web 管理接口；令牌分 RelayMesh（默认）、ExecMesh（只含终端执行）与自定义三档。
             </p>
           </div>
         </div>
@@ -772,19 +1013,24 @@ function credPermSummary(perms: MCPPermissions): string {
         <div v-if="credRevealedToken && credIsEditing" class="p-3 rounded-xs border border-primary/40 bg-primary/5 space-y-2">
           <div class="flex items-center gap-2">
             <Eye class="w-3.5 h-3.5 text-primary" />
-            <span class="text-xs font-mono font-bold text-primary">Token 已生成 — 请立即复制，关闭后不再显示</span>
+            <span class="text-xs font-mono font-bold text-primary" data-testid="reveal-title">{{ credRevealedUrl ? '能力 URL 已生成 — 请立即复制；之后也可在验证 Web 密码后重新查看' : 'Token 已生成 — 请立即复制；之后也可在验证 Web 密码后重新查看' }}</span>
           </div>
           <div class="flex items-center gap-2 bg-card p-2 rounded-xs border border-border/80">
-            <code class="flex-1 text-xs font-mono text-foreground break-all select-all">{{ credRevealedToken }}</code>
+            <code class="flex-1 text-xs font-mono text-foreground break-all select-all" data-testid="reveal-secret">{{ credRevealedSecret }}</code>
             <button
               type="button"
               class="shrink-0 p-1.5 rounded-sm hover:bg-muted cursor-pointer"
               title="复制"
-              @click="credCopyToken(credRevealedToken!, 0)"
+              data-testid="reveal-copy"
+              @click="credCopyToken(credRevealedSecret!, 0)"
             >
               <Copy class="w-3.5 h-3.5" :class="credCopiedId === 0 ? 'text-primary' : 'text-muted-foreground'" />
             </button>
           </div>
+          <p v-if="credRevealedUrl" class="text-[10px] text-amber-600 dark:text-amber-400 font-sans leading-relaxed" data-testid="reveal-url-hint">
+            把这个完整网址填进连接器，不要贴进聊天或工单。网址以当前访问地址生成；如果连接器需要公网 HTTPS 地址，把前缀换成对外域名即可，
+            后面的 /mcp/c/… 保持不变。泄露后在列表里删除或重新生成，旧网址立即失效。
+          </p>
           <button
             type="button"
             class="px-3 py-1.5 rounded-xs text-xs font-mono bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer"
@@ -804,11 +1050,6 @@ function credPermSummary(perms: MCPPermissions): string {
           <div v-if="credTargetIsEnv" class="p-2.5 rounded-xs bg-primary/10 border border-primary/30 text-[11px] font-mono text-primary flex items-start gap-2">
             <Info class="w-3.5 h-3.5 mt-0.5 shrink-0" />
             <span>此凭据来自环境变量 RELAYMESH_MCP_TOKEN。可在此自定义名称、主机名、权限及启停状态；Token 自身受环境只读保护。</span>
-          </div>
-
-          <div v-if="credFormError" class="flex items-center gap-1.5 text-xs text-destructive font-mono">
-            <AlertCircle class="w-3 h-3 shrink-0" />
-            {{ credFormError }}
           </div>
 
           <div class="grid gap-2.5">
@@ -845,27 +1086,7 @@ function credPermSummary(perms: MCPPermissions): string {
               />
             </div>
 
-            <div>
-              <label class="block text-[10px] text-muted-foreground font-mono mb-1.5">工具权限</label>
-              <div class="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                <label
-                  v-for="p in credPermLabels"
-                  :key="p.key"
-                  class="flex items-start gap-2 p-2 rounded-xs border border-border/60 hover:border-border cursor-pointer transition-colors"
-                  :class="credForm.permissions[p.key] ? 'bg-primary/5 border-primary/30' : 'bg-background'"
-                >
-                  <input
-                    v-model="credForm.permissions[p.key]"
-                    type="checkbox"
-                    class="mt-0.5 accent-primary"
-                  />
-                  <div>
-                    <span class="text-[11px] font-mono font-medium" :class="credForm.permissions[p.key] ? 'text-foreground' : 'text-muted-foreground'">{{ p.label }}</span>
-                    <p class="text-[9px] text-muted-foreground/60 font-mono mt-0.5 hidden sm:block">{{ p.tools }}</p>
-                  </div>
-                </label>
-              </div>
-            </div>
+            <CredentialPolicyEditor v-model="credForm.policy" :token-weakness="credTokenWeakness" :is-new="credEditTarget === null" />
 
             <div class="flex items-center gap-2">
               <button type="button" class="p-0.5 rounded-sm cursor-pointer" @click="credForm.is_active = !credForm.is_active">
@@ -881,7 +1102,18 @@ function credPermSummary(perms: MCPPermissions): string {
             </div>
           </div>
 
-          <div class="flex items-center justify-end gap-2 pt-2 border-t border-border/70">
+          <div
+            v-if="credFormError"
+            ref="credErrorEl"
+            class="flex items-start gap-1.5 rounded-xs border border-destructive/40 bg-destructive/10 px-2.5 py-2 text-xs text-destructive font-mono leading-relaxed"
+            role="alert"
+            data-testid="cred-form-error"
+          >
+            <AlertCircle class="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            <span class="min-w-0 break-words">{{ credFormError }}</span>
+          </div>
+
+          <div ref="credActionsEl" class="flex items-center justify-end gap-2 pt-2 border-t border-border/70">
             <button
               type="button"
               class="px-3 py-1.5 rounded-xs text-xs font-mono text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
@@ -890,6 +1122,7 @@ function credPermSummary(perms: MCPPermissions): string {
             <button
               type="button"
               class="flex items-center gap-1.5 px-3 py-1.5 rounded-xs text-xs font-mono bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer"
+              data-testid="cred-save"
               @click="credHandleSave"
             >
               <Check class="w-3 h-3" />
@@ -908,6 +1141,7 @@ function credPermSummary(perms: MCPPermissions): string {
             v-for="cred in credStore.credentials"
             :key="cred.id"
             class="flex items-start gap-3 p-2.5 hover:bg-card/80 transition-colors group"
+            :data-testid="`cred-row-${cred.id}`"
           >
             <button
               type="button"
@@ -926,6 +1160,18 @@ function credPermSummary(perms: MCPPermissions): string {
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="font-mono font-bold text-xs text-foreground">{{ cred.name }}</span>
                 <span
+                  v-if="cred.tier"
+                  class="text-[9px] px-1.5 py-0.5 rounded-xs font-mono font-medium shrink-0"
+                  :class="cred.tier === 'execmesh' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/30' : cred.tier === 'hybrid' ? 'bg-violet-500/10 text-violet-400 border border-violet-500/30' : 'bg-muted text-muted-foreground border border-border/60'"
+                  :data-testid="`tier-${cred.id}`"
+                >{{ tierLabel(cred.tier) }}</span>
+                <span
+                  v-if="cred.capability"
+                  class="text-[9px] px-1.5 py-0.5 rounded-xs bg-amber-500/10 text-amber-500 border border-amber-500/30 font-mono font-medium shrink-0"
+                  title="令牌写在专用网址 /mcp/c/… 里，只对这个网址有效；创建 / 重新生成时显示完整网址，之后可点眼睛图标、再次验证 Web 密码后重新查看"
+                  :data-testid="`capability-badge-${cred.id}`"
+                >能力 URL</span>
+                <span
                   v-if="cred.is_env"
                   class="text-[9px] px-1.5 py-0.5 rounded-xs bg-primary/10 text-primary border border-primary/20 font-mono font-medium shrink-0"
                 >ENV</span>
@@ -942,10 +1188,49 @@ function credPermSummary(perms: MCPPermissions): string {
                 <code class="text-[10px] font-mono text-muted-foreground">{{ cred.token }}</code>
               </div>
               <p class="text-[10px] text-muted-foreground/70 font-mono mt-0.5">{{ credPermSummary(cred.permissions) }}</p>
+              <p v-if="credTerminalSummary(cred)" class="text-[10px] text-amber-500/80 font-mono mt-0.5">终端：{{ credTerminalSummary(cred) }}</p>
+              <p v-if="cred.permissions.launcher" class="text-[10px] text-amber-500/80 font-mono mt-0.5" data-testid="cred-launcher-note">
+                运行预设：只对项目页「任务管理」里勾选的管理 Agent 生效，只能运行本项目已有的预设
+              </p>
+              <div class="flex items-center gap-2 flex-wrap mt-0.5">
+                <span
+                  v-if="hasWholeFs(cred)"
+                  class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full bg-destructive/10 text-destructive font-mono font-medium"
+                  title="这把令牌可以读写主机上 Agent 账户权限内的任意文件，不受目录限制；每次文件操作都会写入审计"
+                  data-testid="cred-whole-fs-badge"
+                ><AlertTriangle class="w-2.5 h-2.5" />整个文件系统</span>
+                <span
+                  v-if="cred.token_weakness && (cred.permissions.terminal || cred.permissions.terminal_files || cred.permissions.launcher)"
+                  class="text-[9px] px-1.5 py-0.5 rounded-full bg-destructive/10 text-destructive font-mono"
+                  :title="`令牌强度不足：${cred.token_weakness}`"
+                >令牌过弱</span>
+                <span
+                  v-if="credExpiryInfo(cred)"
+                  class="text-[9px] px-1.5 py-0.5 rounded-full font-mono"
+                  :class="credExpiryInfo(cred)!.expired ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground'"
+                >{{ credExpiryInfo(cred)!.text }}</span>
+                <span
+                  v-if="cred.allowed_cidrs && cred.allowed_cidrs.length"
+                  class="text-[9px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground font-mono"
+                  :title="cred.allowed_cidrs.join('\n')"
+                >限定来源 {{ cred.allowed_cidrs.length }}</span>
+                <span class="text-[10px] text-muted-foreground/60 font-mono" :data-testid="`last-used-${cred.id}`">
+                  {{ cred.last_used_at ? `最近使用 ${relativeTime(cred.last_used_at)}${cred.last_used_ip ? ' · ' + cred.last_used_ip : ''}` : '从未使用' }}
+                </span>
+              </div>
               <p v-if="cred.note" class="text-[10px] text-muted-foreground/60 font-sans mt-0.5 truncate">{{ cred.note }}</p>
             </div>
 
-            <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+            <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
+              <button
+                type="button"
+                class="p-1.5 rounded-sm hover:bg-muted cursor-pointer"
+                :title="cred.capability ? '查看能力 URL（需再次验证 Web 密码）' : '查看 Token（需再次验证 Web 密码）'"
+                :data-testid="`view-token-${cred.id}`"
+                @click="credStartView(cred)"
+              >
+                <Eye class="w-3 h-3 text-muted-foreground" />
+              </button>
               <button v-if="!cred.is_env" type="button" class="p-1.5 rounded-sm hover:bg-muted cursor-pointer" title="重新生成 Token" @click="credHandleRegenerate(cred.id)">
                 <RefreshCw class="w-3 h-3 text-muted-foreground" />
               </button>
@@ -959,18 +1244,58 @@ function credPermSummary(perms: MCPPermissions): string {
           </div>
         </div>
 
-        <!-- Regenerated Token Reveal -->
+        <!-- 查看旧令牌：先验证 Web 密码（开放模式没有密码可验，不会出现这个表单） -->
+        <form
+          v-if="credViewTarget && authStore.authRequired && !credIsEditing"
+          class="p-3 rounded-xs border border-border bg-card/60 space-y-2"
+          data-testid="reveal-verify"
+          @submit.prevent="credSubmitView"
+        >
+          <div class="flex items-center gap-2">
+            <KeyRound class="w-3.5 h-3.5 text-primary shrink-0" />
+            <span class="text-xs font-mono font-bold text-foreground">
+              查看「{{ credViewTarget.name }}」的{{ credViewTarget.capability ? '能力 URL' : ' Token' }}，需要再次验证 Web 登录密码
+            </span>
+          </div>
+          <div class="flex items-center gap-2">
+            <input
+              ref="credViewInput"
+              v-model="credViewPassword"
+              type="password"
+              autocomplete="current-password"
+              :disabled="credViewBusy || credViewLocked"
+              placeholder="输入当前 Web 登录密码…"
+              class="flex-1 min-w-0 h-8 px-2.5 rounded-xs bg-card border border-border/80 focus:border-primary focus:outline-none text-xs text-foreground placeholder:text-muted-foreground/60 transition-colors disabled:opacity-60"
+              data-testid="reveal-password"
+            />
+            <Button type="submit" size="sm" class="shrink-0 cursor-pointer" :disabled="!credViewPassword || credViewBusy || credViewLocked" data-testid="reveal-submit">
+              {{ credViewBusy ? '验证中…' : '验证并查看' }}
+            </Button>
+            <button type="button" class="shrink-0 text-xs font-mono text-muted-foreground hover:text-foreground cursor-pointer" data-testid="reveal-cancel" @click="credCancelView">取消</button>
+          </div>
+          <p v-if="credViewError" class="text-[11px] text-destructive font-sans leading-relaxed" role="alert" data-testid="reveal-error">{{ credViewError }}</p>
+          <p v-else class="text-[10px] text-muted-foreground/70 font-sans leading-relaxed">
+            连续输错会临时锁定当前来源 IP（与登录共用额度）；每次查看都会写入审计日志，日志里不含令牌本身。
+          </p>
+        </form>
+
+        <!-- Regenerated / Viewed Token Reveal -->
         <div v-if="credRevealedToken && !credIsEditing" class="p-3 rounded-xs border border-primary/40 bg-primary/5 space-y-2">
           <div class="flex items-center gap-2">
             <Eye class="w-3.5 h-3.5 text-primary" />
-            <span class="text-xs font-mono font-bold text-primary">新 Token 已生成 — 请立即复制</span>
+            <span class="text-xs font-mono font-bold text-primary" data-testid="reveal-title">{{
+              credRevealKind === 'viewed'
+                ? `${credRevealedUrl ? '能力 URL' : 'Token'}「${credRevealedName}」— 已验证密码，${credAutoHideSeconds} 秒后自动隐藏`
+                : credRevealedUrl ? '新的能力 URL 已生成 — 请立即复制，旧网址已失效' : '新 Token 已生成 — 请立即复制'
+            }}</span>
           </div>
           <div class="flex items-center gap-2 bg-card p-2 rounded-xs border border-border/80">
-            <code class="flex-1 text-xs font-mono text-foreground break-all select-all">{{ credRevealedToken }}</code>
+            <code class="flex-1 text-xs font-mono text-foreground break-all select-all" data-testid="reveal-secret">{{ credRevealedSecret }}</code>
             <button
               type="button"
               class="shrink-0 p-1.5 rounded-sm hover:bg-muted cursor-pointer"
-              @click="credCopyToken(credRevealedToken!, -1)"
+              data-testid="reveal-copy"
+              @click="credCopyToken(credRevealedSecret!, -1)"
             >
               <Copy class="w-3.5 h-3.5" :class="credCopiedId === -1 ? 'text-primary' : 'text-muted-foreground'" />
             </button>
@@ -978,7 +1303,7 @@ function credPermSummary(perms: MCPPermissions): string {
           <button
             type="button"
             class="text-xs font-mono text-muted-foreground hover:text-foreground cursor-pointer"
-            @click="credRevealedToken = null"
+            @click="credClearRevealed"
           >关闭</button>
         </div>
       </div>

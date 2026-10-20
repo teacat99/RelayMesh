@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api, authApi, setAuthToken } from '../api/client'
+import { RUN_MODE_KEY, parseRunMode, type RunMode } from '../lib/sidebarDefault'
 
 export interface AuthStatusResponse {
   auth_required: boolean
@@ -10,6 +11,8 @@ export interface AuthStatusResponse {
   current_username?: string
   is_customized?: boolean
   version?: string
+  // 运行方式：serve（常驻服务）/ stdio（由 AI 客户端拉起的直驱进程）；老服务端没有这个字段，按 serve 处理
+  run_mode?: string
 }
 
 export interface LoginResponse {
@@ -29,6 +32,8 @@ export const useAuthStore = defineStore('auth', () => {
   const currentUsername = ref<string>('admin')
   const isCustomized = ref<boolean>(false)
   const version = ref<string>('')
+  // 取最近一次看到的值作初值：刷新页面时第一帧就按对的布局画（stdio 单窗口默认收起侧栏），不会先展开再收起
+  const runMode = ref<RunMode>(parseRunMode(localStorage.getItem(RUN_MODE_KEY)))
   const isAuthenticated = ref<boolean>(false)
   const showLoginModal = ref<boolean>(false)
   const loginLoading = ref<boolean>(false)
@@ -63,6 +68,10 @@ export const useAuthStore = defineStore('auth', () => {
       currentUsername.value = res.data.current_username || 'admin'
       isCustomized.value = !!res.data.is_customized
       version.value = res.data.version || ''
+      runMode.value = parseRunMode(res.data.run_mode)
+      try {
+        localStorage.setItem(RUN_MODE_KEY, runMode.value)
+      } catch (_) {}
 
       if (!authRequired.value) {
         // 免密模式
@@ -197,6 +206,7 @@ export const useAuthStore = defineStore('auth', () => {
     currentUsername,
     isCustomized,
     version,
+    runMode,
     isAuthenticated,
     showLoginModal,
     loginLoading,

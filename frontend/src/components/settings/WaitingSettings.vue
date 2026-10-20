@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { useSettingsStore } from '@/stores/settings'
+import InboxSettings from './InboxSettings.vue'
 import {
   Laptop,
-  User,
   Clock,
   RotateCcw
 } from 'lucide-vue-next'
@@ -15,8 +15,9 @@ function handleInputSave(key: string, val: any) {
 
 function resetWaitingSettings() {
   settingsStore.updateSettings({
-    defaultWaitCountdownMinutes: 2,
-    maxNoFeedbackChecks: 24,
+    defaultWaitCountdownMinutes: 1,
+    defaultWaitCountdownSeconds: 60,
+    maxNoFeedbackChecks: 6,
     promptWaitMinutes: 2,
     defaultTimeoutSeconds: 120
   })
@@ -30,30 +31,37 @@ const timeoutOptions = [
 ]
 
 const maxChecksOptions = [
+  { label: '3 次', value: 3 },
   { label: '6 次', value: 6 },
-  { label: '12 次', value: 12 },
-  { label: '24 次', value: 24 },
-  { label: '36 次', value: 36 },
   { label: '∞ 无限', value: 0 }
 ]
 
+// 挂起倒计时按秒存（秒回 / 30 秒 / 1 分钟，#121）
 const waitCountdownOptions = [
-  { label: '0 分钟', value: 0, title: '无倒计时·直接正计时' },
-  { label: '1 分钟', value: 1, title: '倒计时 1 分钟' },
-  { label: '2 分钟', value: 2, title: '倒计时 2 分钟' }
+  { label: '秒回', value: 0, title: '几乎立刻发空回执' },
+  { label: '30 秒', value: 30, title: '挂起 30 秒' },
+  { label: '1 分钟', value: 60, title: '挂起 1 分钟' }
 ]
+
+function countdownSeconds(): number {
+  const st = settingsStore.settings
+  if (typeof st.defaultWaitCountdownSeconds === 'number' && st.defaultWaitCountdownSeconds >= 0) return st.defaultWaitCountdownSeconds
+  return (st.defaultWaitCountdownMinutes ?? 1) * 60
+}
+function countdownLabel(): string {
+  const sec = countdownSeconds()
+  if (sec <= 0) return '秒回'
+  return sec < 60 ? `${sec} 秒` : `${Math.round(sec / 60)} 分钟`
+}
+function pickCountdown(sec: number) {
+  settingsStore.updateSettings({ defaultWaitCountdownSeconds: sec, defaultWaitCountdownMinutes: Math.ceil(sec / 60) })
+}
 
 const promptWaitOptions = [
   { label: '1 分钟', value: 1 },
   { label: '2 分钟', value: 2 },
   { label: '5 分钟', value: 5 },
   { label: '10 分钟', value: 10 }
-]
-
-const userPresenceOptions = [
-  { id: 'online', label: '在线模式 (默认)', color: 'bg-emerald-500', desc: '正常等待回执与实时提醒' },
-  { id: 'away', label: '暂离模式', color: 'bg-amber-500', desc: '挂起超时自动延长，避免打扰' },
-  { id: 'autopilot', label: '托管模式', color: 'bg-indigo-500', desc: '按预定策略全自主推进' }
 ]
 </script>
 
@@ -89,43 +97,13 @@ const userPresenceOptions = [
       <input
         type="text"
         :value="settingsStore.settings.hostName || ''"
-        placeholder="例如: wsl, macbook, dev-server, aliyun"
+        placeholder="例如: wsl, macbook, dev-server, prod"
         class="w-full h-8 px-2.5 text-xs font-mono bg-background border border-border/80 rounded-xs focus:outline-none focus:border-primary text-foreground"
         @change="(e) => handleInputSave('hostName', (e.target as HTMLInputElement).value.trim())"
       />
       <p class="text-[10px] text-muted-foreground leading-relaxed">
         工作区路径将显示为 <code class="px-1 py-0.2 rounded-2xs bg-muted font-mono">{{ (settingsStore.settings.hostName || 'host') }}:/path/to/project</code>，便于多端辨识。
       </p>
-    </div>
-
-    <!-- 用户在线状态模式 -->
-    <div class="p-3 rounded-xs border border-border/70 bg-card/60 space-y-2">
-      <div class="flex items-center justify-between text-xs font-mono font-medium text-foreground">
-        <span class="flex items-center gap-1.5">
-          <User class="w-3.5 h-3.5 text-primary" />
-          <span>默认在线状态模式</span>
-        </span>
-        <span class="text-[10px] text-primary font-bold">
-          当前: {{ (settingsStore.settings.userPresence || 'online') === 'online' ? '在线' : settingsStore.settings.userPresence === 'away' ? '暂离' : '托管' }}
-        </span>
-      </div>
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
-        <button
-          v-for="opt in userPresenceOptions"
-          :key="opt.id"
-          type="button"
-          class="text-xs p-2 rounded-xs border text-left transition-all font-mono flex items-center justify-between cursor-pointer"
-          :class="(settingsStore.settings.userPresence || 'online') === opt.id
-            ? 'border-primary bg-primary/10 text-foreground font-bold shadow-2xs'
-            : 'border-border/70 bg-background/70 hover:bg-muted text-muted-foreground'"
-          @click="handleInputSave('userPresence', opt.id)"
-        >
-          <div class="flex items-center gap-1.5 min-w-0">
-            <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="opt.color"></span>
-            <span class="truncate">{{ opt.label }}</span>
-          </div>
-        </button>
-      </div>
     </div>
 
     <!-- 参数选择网格 -->
@@ -156,7 +134,7 @@ const userPresenceOptions = [
       <div class="p-3 rounded-xs border border-border/70 bg-card/60 space-y-2">
         <label class="text-xs font-mono font-medium text-foreground flex items-center justify-between">
           <span>默认倒计时时长</span>
-          <span class="text-[10px] text-primary font-bold">{{ settingsStore.settings.defaultWaitCountdownMinutes ?? 2 }} 分钟</span>
+          <span class="text-[10px] text-primary font-bold">{{ countdownLabel() }}</span>
         </label>
         <div class="grid grid-cols-3 gap-1">
           <button
@@ -164,10 +142,10 @@ const userPresenceOptions = [
             :key="opt.value"
             type="button"
             class="h-7 text-xs rounded-xs border font-mono transition-all cursor-pointer flex items-center justify-center"
-            :class="(settingsStore.settings.defaultWaitCountdownMinutes ?? 2) === opt.value
+            :class="countdownSeconds() === opt.value
               ? 'border-primary bg-primary text-primary-foreground font-bold shadow-2xs'
               : 'border-border/70 bg-background/70 hover:bg-muted text-muted-foreground'"
-            @click="handleInputSave('defaultWaitCountdownMinutes', opt.value)"
+            @click="pickCountdown(opt.value)"
           >
             {{ opt.label }}
           </button>
@@ -182,7 +160,7 @@ const userPresenceOptions = [
             {{ settingsStore.settings.maxNoFeedbackChecks === 0 ? '无限' : `${settingsStore.settings.maxNoFeedbackChecks ?? 24} 次` }}
           </span>
         </label>
-        <div class="grid grid-cols-5 gap-1">
+        <div class="grid grid-cols-3 gap-1">
           <button
             v-for="opt in maxChecksOptions"
             :key="opt.value"
@@ -220,5 +198,8 @@ const userPresenceOptions = [
         </div>
       </div>
     </div>
+
+    <!-- 追加指令收件箱：智能体工作期间（没在等反馈时）你追加的指令如何被它发现 -->
+    <InboxSettings />
   </div>
 </template>

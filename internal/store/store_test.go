@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
 	"gorm.io/gorm"
 )
 
@@ -305,7 +305,7 @@ func TestStore_WorkflowIDAutoDerivationAndSelfHealing(t *testing.T) {
 
 	// 4. 测试 D-153 同项目目录自愈继承能力：当后续调用遗漏 workflow_id 时，自动继承同项目目录活跃工作流
 	initialWorkflow := "relaymesh-continuation"
-	projAlpha := "/home/teacat/projects/alpha"
+	projAlpha := "/home/user/projects/alpha"
 	firstSess, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
 		WorkflowID:       initialWorkflow,
 		ProjectDirectory: projAlpha,
@@ -334,7 +334,7 @@ func TestStore_WorkflowIDAutoDerivationAndSelfHealing(t *testing.T) {
 	}
 
 	// 模拟全新未曾见过的独立项目目录，无历史记录时应派生全新的 wf-YYYYMMDD-xxxx
-	projBeta := "/home/teacat/projects/beta-brand-new"
+	projBeta := "/home/user/projects/beta-brand-new"
 	brandNewSess, err := st.CreateFeedbackSession(ctx, CreateSessionInput{
 		WorkflowID:       "",
 		ProjectDirectory: projBeta,
@@ -557,4 +557,3 @@ func TestStore_D165_ListWorkflowSummariesScoping(t *testing.T) {
 		t.Fatalf("expected only wf-project-beta, got: %+v", betaSummaries)
 	}
 }
-

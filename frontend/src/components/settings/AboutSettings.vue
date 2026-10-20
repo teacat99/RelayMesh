@@ -58,7 +58,7 @@ const isDev = computed(() => displayVersion.value.includes('dev'))
               <span class="text-[10px] text-muted-foreground font-normal font-sans">Agent Relay Hub</span>
             </div>
             <div class="text-[10px] text-muted-foreground">
-              Go 1.25+ · Vue 3.5 · Tailwind CSS v4 · Pure Go SQLite (No Cgo)
+              Go 1.26+ · Vue 3.5 · Tailwind CSS v4 · Pure Go SQLite (No Cgo)
             </div>
           </div>
         </div>

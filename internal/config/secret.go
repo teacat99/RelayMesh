@@ -69,3 +69,64 @@ func JWTSecretWeakness(secret string) string {
 func IsStrongJWTSecret(secret string) bool {
 	return JWTSecretWeakness(secret) == ""
 }
+
+const (
+	// MinMCPTokenLength 是被授予「远程执行」权限的 MCP 令牌的最小长度。
+	// 服务端自动生成的令牌（rm- + 64 位十六进制）远超此值；只有手工指定或来自环境变量的令牌才可能不合格。
+	MinMCPTokenLength   = 24
+	minMCPTokenDistinct = 8
+)
+
+// weakMCPTokenMarkers 收录常见占位写法与默认值（小写比较）。片段都足够特殊，随机生成的令牌不可能误命中。
+var weakMCPTokenMarkers = []string{
+	"change",
+	"example",
+	"your-token",
+	"your_token",
+	"yourtoken",
+	"mcp-token",
+	"mcp_token",
+	"test-token",
+	"password",
+	"passwd",
+	"default",
+	"secret",
+	"0123456789",
+	"abcdefghij",
+}
+
+// MCPTokenWeakness 判断 MCP 令牌是否足够强（用于「令牌能代表远程执行」的场景）。
+// 返回空字符串表示合格，否则返回不合格的原因（不含令牌内容，可安全写入日志与界面）。
+func MCPTokenWeakness(token string) string {
+	if token == "" {
+		return "为空"
+	}
+	if len(token) < MinMCPTokenLength {
+		return fmt.Sprintf("长度不足 %d 字符", MinMCPTokenLength)
+	}
+	lowered := strings.ToLower(token)
+	for _, marker := range weakMCPTokenMarkers {
+		if strings.Contains(lowered, marker) {
+			return "疑似默认值或占位符"
+		}
+	}
+	distinct := make(map[rune]struct{}, len(token))
+	for _, r := range token {
+		distinct[r] = struct{}{}
+	}
+	if len(distinct) < minMCPTokenDistinct {
+		return "字符种类过少，缺乏随机性"
+	}
+	return ""
+}
+
+// IsStrongMCPToken 是 MCPTokenWeakness 的布尔形式。
+func IsStrongMCPToken(token string) bool {
+	return MCPTokenWeakness(token) == ""
+}
+
+// SSHSecretKeyWeakness 判断 SSH 主机凭据的加密主密钥是否足够强，规则与 MCP 令牌一致（它保护的是同一类「可远程执行」的凭据）。
+// 返回空字符串表示合格，否则返回原因（不含密钥内容，可安全写入日志与界面）。
+func SSHSecretKeyWeakness(key string) string {
+	return MCPTokenWeakness(key)
+}

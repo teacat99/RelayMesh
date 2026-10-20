@@ -55,9 +55,12 @@ jobs:
           images: |
             ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
             ghcr.io/${{ github.repository }}
+          # 预发布标签（v2.0.0-rc.1）只打完整版本标签；「主.次」短标签只给正式版，不依赖元数据动作对预发布的默认处理。
+          # latest 只在推 main / master 时打（预发布只推标签，不推 main，见 scripts/sync-public-release.sh）。
+          # 注意：不要把注释写进下面的 tags 块（块标量里的 # 行会原样交给元数据动作）。
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
 
       - name: Determine version string
