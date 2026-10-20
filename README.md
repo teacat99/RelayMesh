@@ -17,29 +17,16 @@
 
 ---
 
-## 📣 推荐：试用 2.x 预览版（v2.0.0-rc.2）
+## 📣 推荐：试用 2.x 预览版（v2.0.0-rc.3）
 
 **RelayMesh 2.0 的预览版已经发布，推荐新用户直接从它开始。** 2.0 起它不止是「人与 AI 的交互中继」：同一个单二进制里还带着远程终端与模型执行（ExecMesh）、异步协作、项目 / 文档 / 任务，以及 Agent 自动升级与发布签名；完整清单见下文「核心特性」开头的「功能总览」，改动细节与升级须知见 [更新日志](CHANGELOG.md)。
 
-- **下面的命令已经指向预览版**：Docker 用镜像标签 `2.0.0-rc.2`，安装脚本取标签 `v2.0.0-rc.2` 上的那一份，源码克隆用 `--branch v2.0.0-rc.2`；直接照着「5 分钟上手」做就能装到预览版。
+- **下面的命令已经指向预览版**：Docker 用镜像标签 `2.0.0-rc.3`，安装脚本取标签 `v2.0.0-rc.3` 上的那一份，源码克隆用 `--branch v2.0.0-rc.3`；直接照着「5 分钟上手」做就能装到预览版。
 - **预览版须知**：功能与行为在正式版之前可能调整，用于生产请自行评估；Docker 的 `latest` 镜像与一键安装脚本默认安装的版本仍是上一个正式版（1.6.3），不会被预览版改动；2.0 正式版发布后，本页会统一整理。
-- **单二进制 / `go run` 起的 Hub，装 Agent 要换一种写法（预览期的已知限制，下一个预览版会修）**：这类 Hub 没有自带安装源，「接入主机」面板里生成的命令指向公开库 `main` 上 1.x 的 `install.sh`，它不认识 `agent` 子命令。请把命令里的 `main` 换成 `v2.0.0-rc.2`，并在 `sh` 前用 `env` 指定同一个版本——只换地址、不指定版本，脚本会去取「最新正式版」，那里没有 Agent。Docker 部署自带安装源、命令由服务端生成，不受影响。
-  ```sh
-  # Linux / macOS，系统级常驻（已经是 root 就去掉 sudo）。想先临时跑一下：把 agent install 换成 agent run --temp；只装给当前用户：去掉 sudo、改用 agent install --user
-  curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.2/install.sh | sudo env RELAYMESH_VERSION=v2.0.0-rc.2 sh -s -- agent install --server https://<Hub 地址>
-  ```
-  Windows PowerShell 的写法如下；它按脚本逻辑给出，作者还没有在真实的 Windows 主机上跑过，遇到问题请提 Issue：
-  ```powershell
-  $env:RELAYMESH_VERSION='v2.0.0-rc.2'; & ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.2/install.ps1').TrimStart([char]0xFEFF))) agent install --server 'https://<Hub 地址>'
-  ```
-  Hub 用的是自签名证书（内置 HTTPS）时，照面板里生成的命令保留 `--pin sha256:…` 等参数即可。
-- **Cursor hook（含 `go run` 起的 Hub）**：面板里复制的 hook 安装命令照常使用；单二进制的 Hub 会自动从 GitHub 取与自己同一版本的 hook 程序。`go run` 起的 Hub 版本号显示为 `dev`，hook 脚本不知道该取哪个版本，会去取「最新正式版」而失败，请在命令里补上版本：
-  ```sh
-  curl -fsSL 'https://<Hub 地址>/hooks/cursor/install.sh' | RELAYMESH_HOOK_INSTALL_BASE='https://<Hub 地址>' RELAYMESH_VERSION=v2.0.0-rc.2 sh -s -- --workflow '<workflow_id>'
-  ```
-  PowerShell 则在面板里的命令最前面加一句 `$env:RELAYMESH_VERSION='v2.0.0-rc.2'; `（同样没有在真实的 Windows 主机上验证过）。
+- **Agent 与 Cursor hook 的安装命令，Docker / 单二进制 / `go run` 起的 Hub 都可以直接从面板复制**（v2.0.0-rc.3 起）：Docker 部署的 Hub 自带安装源；单二进制与 `go run` 起的 Hub 没有安装源，面板会生成从 GitHub Release 下载的命令，并固定到这台 Hub 自己的版本（例如命令里带 `RELAYMESH_VERSION=v2.0.0-rc.3`），装上的 Agent 与 hook 和 Hub 同版本，下载后照样校验 SHA256。`go run github.com/teacat99/RelayMesh/v2/cmd/relaymesh@latest` 起的 Hub 也会如实显示自己的版本号：2.0 正式版发布之前，`/v2` 路径下只有预览版，`@latest` 就是最新的预览版；想固定版本，把 `@latest` 换成 `@v2.0.0-rc.3`。
+- **还在用 v2.0.0-rc.1 / rc.2 的 Hub？** 它们面板里生成的 Agent 命令（单二进制 / `go run` 起的 Hub）指向公开库 `main` 上 1.x 的 `install.sh`，不认识 `agent` 子命令，需要手工改：把命令里的 `main` 换成 `v2.0.0-rc.3`，并在 `sh` 前加 `env RELAYMESH_VERSION=v2.0.0-rc.3`；hook 的安装命令同样加上 `RELAYMESH_VERSION=v2.0.0-rc.3`。更省事的做法是先把 Hub 升级到 v2.0.0-rc.3。
 - **正在使用 1.x？** 1.x 的文档在这里：[v1.6.3 的 README](https://github.com/teacat99/RelayMesh/blob/v1.6.3/README.md)。升级到 2.x 之前请先读更新日志里的「升级须知」（例如 Go 模块路径从 2.0 起带 `/v2`）。
-- 下载与发布说明：[GitHub Release v2.0.0-rc.2](https://github.com/teacat99/RelayMesh/releases/tag/v2.0.0-rc.2)；问题与建议欢迎提 [Issue](https://github.com/teacat99/RelayMesh/issues)。
+- 下载与发布说明：[GitHub Release v2.0.0-rc.3](https://github.com/teacat99/RelayMesh/releases/tag/v2.0.0-rc.3)；问题与建议欢迎提 [Issue](https://github.com/teacat99/RelayMesh/issues)。
 
 ---
 
@@ -91,7 +78,7 @@ RelayMesh 基于 **Go 1.26** 与 **Vue 3.5** 纯原生重构，支持 **原生 s
 **没有 Go：先装单二进制**（自动识别系统与架构，下载后校验 SHA256）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.2/install.sh | sh -s -- v2.0.0-rc.2
+curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/install.sh | sh -s -- v2.0.0-rc.3
 relaymesh version      # 期望：RelayMesh v<版本号>
 ```
 
@@ -122,7 +109,7 @@ relaymesh version      # 期望：RelayMesh v<版本号>
 
 ```bash
 mkdir -p ~/relaymesh && cd ~/relaymesh
-curl -fsSLO https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.2/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/docker-compose.yml
 
 # 生成 .env：随机的 Web 密码与 MCP 令牌，权限 600（不要提交到 Git）
 cat > .env <<EOF
@@ -132,7 +119,7 @@ RELAYMESH_MCP_TOKEN=rmk_$(openssl rand -hex 24)
 # 监听地址：0.0.0.0（默认）= 所有网卡，局域网 / 手机也能访问；只想本机用、或要放在反向代理后面（公网），改成 127.0.0.1
 RELAYMESH_PUBLISH_BIND=0.0.0.0
 # 预览版：固定镜像版本（2.0 正式版发布后删掉这一行，镜像就会跟随 latest）
-RELAYMESH_TAG=2.0.0-rc.2
+RELAYMESH_TAG=2.0.0-rc.3
 EOF
 chmod 600 .env
 
@@ -372,7 +359,7 @@ relaymesh mcp stdio  # 启动原生 stdio MCP 服务
 
 #### 1. Linux / macOS 一键安装脚本
 ```bash
-curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.2/install.sh | bash -s -- v2.0.0-rc.2
+curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/install.sh | bash -s -- v2.0.0-rc.3
 ```
 
 #### 2. GitHub Releases 预编译单二进制直接下载
@@ -409,8 +396,8 @@ chmod +x relaymesh-*
 
 ```bash
 mkdir -p ~/relaymesh && cd ~/relaymesh
-curl -fsSLO https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.2/docker-compose.yml
-# 创建 .env（见上文 B，或只写你需要的几行；预览期间请包含 RELAYMESH_TAG=2.0.0-rc.2）后：
+curl -fsSLO https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/docker-compose.yml
+# 创建 .env（见上文 B，或只写你需要的几行；预览期间请包含 RELAYMESH_TAG=2.0.0-rc.3）后：
 docker compose up -d
 ```
 
@@ -438,7 +425,7 @@ docker compose up -d
 ```bash
 docker run -d --name relaymesh --restart unless-stopped --user 0:0 \
   -p 127.0.0.1:18775:18775 -p 127.0.0.1:18776:18776 \
-  -v "$PWD/data:/app/data" teacat99/relaymesh:2.0.0-rc.2
+  -v "$PWD/data:/app/data" teacat99/relaymesh:2.0.0-rc.3
 ```
 
 ---
@@ -447,7 +434,7 @@ docker run -d --name relaymesh --restart unless-stopped --user 0:0 \
 
 ```bash
 # 1. 克隆项目仓库
-git clone --branch v2.0.0-rc.2 --depth 1 https://github.com/teacat99/RelayMesh.git
+git clone --branch v2.0.0-rc.3 --depth 1 https://github.com/teacat99/RelayMesh.git
 cd RelayMesh
 
 # 2. 构建前端静态资源
@@ -545,7 +532,7 @@ Windows 使用 PowerShell 版安装脚本（Windows PowerShell 5.1 与 PowerShel
 ```
 
 - **服务端自带安装源**：两个安装脚本内嵌在服务端二进制里；各平台的 Agent 放在服务端的 `agent-dist/` 目录（**Docker 镜像已内置**，五个平台合计约 37 MB，单个约 7～8 MB）。下载入口是 `/i/<票据>/<文件名>`：票据是 128 位随机值，**随发现窗口同生共死**——开窗时生成，关窗或到期即失效，窗口关闭期间一律返回 404（不透露路径是否存在）；另有按来源 IP 的限速与并发下载上限，且只提供固定文件名清单内的文件。`checksums.txt` 由服务端按实际文件现算，安装脚本据此校验 SHA256，不匹配即中止。
-- **没有 `agent-dist/` 时**（单二进制 / `go run` / 源码运行）：页面自动改为 GitHub Release 来源的命令，例如 `curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/main/install.sh | sudo sh -s -- agent install --server https://relay.example.com`，并提示目标主机需要能访问 GitHub、且公开仓库已发布对应版本。想让单二进制部署也自带安装源，把各平台的 `relaymesh-agent-<os>-<arch>[.exe]` 放进可执行文件旁的 `agent-dist/`，或用 `RELAYMESH_AGENT_DIST_DIR` 指定目录；本地预览用 `bash scripts/build-agent-dist.sh` 生成 `bin/agent-dist/`（预览用的 `docker-compose.yml` 已挂载）。
+- **没有 `agent-dist/` 时**（单二进制 / `go run` / 源码运行）：页面自动改为 GitHub Release 来源的命令，并**固定到这台服务端自己的版本**。Release 二进制，以及用 `go run …@vX.Y.Z` / `go install …@vX.Y.Z` 起的服务端都知道自己是哪个版本（`relaymesh version` 显示 `vX.Y.Z`），命令取该标签上的安装脚本，并用 `RELAYMESH_VERSION` 指定同一个版本，例如 `curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0/install.sh | sudo env RELAYMESH_VERSION=v2.0.0 sh -s -- agent install --server https://relay.example.com`（Windows 是先设 `$env:RELAYMESH_VERSION` 再取该标签上的 `install.ps1`）；目标主机需要能访问 GitHub。开发版（本地 `go build` / 在源码目录 `go run`，版本显示 `dev`）对应不到具体的 Release，命令只能取 `main` 上的脚本与最新正式版，页面会提示「命令会失败」并建议改用 Docker 或带 `agent-dist/` 的部署。想让单二进制部署也自带安装源，把各平台的 `relaymesh-agent-<os>-<arch>[.exe]` 放进可执行文件旁的 `agent-dist/`，或用 `RELAYMESH_AGENT_DIST_DIR` 指定目录；本地预览用 `bash scripts/build-agent-dist.sh` 生成 `bin/agent-dist/`（预览用的 `docker-compose.yml` 已挂载）。
 - **证书**：页面按「你正在怎样访问这个页面」自动选择，并折叠成一行结论（可点「修改」）：经受信任证书（域名 / 反向代理）访问时无需额外参数；服务端启用了内置自签名 HTTPS 时按证书指纹校验——命令带 `--pin sha256:<指纹>`，下载脚本时 Linux / macOS 用 `curl -k --pinnedpubkey '<公钥指纹>'`（`-k` 只跳过证书链，公钥指纹仍强制校验，curl 不支持该选项时直接失败而不会降级），Windows 用 PowerShell 的证书指纹回调完成同样的校验；有内置 HTTPS 时不会自动选择明文。明文内网才用 `--insecure`（仅限完全可控的网络）。
 - **完整性**：服务端来源时由 `checksums.txt` 校验；GitHub 来源时脚本会从 GitHub Release 下载 `relaymesh-agent-<os>-<arch>`，并用同一 Release 的 `checksums.txt` 校验 SHA256，同样不匹配即中止。
 - **日常管理**：`relaymesh-agent id`（打印机器码）、`relaymesh-agent status`（机器码与服务状态）、`relaymesh-agent uninstall [--purge]`（卸载服务，`--purge` 同时删除身份）。Windows 上同样可以用安装脚本转交，例如 `… agent status`、`… agent uninstall --user`。
@@ -577,7 +564,7 @@ Windows 使用 PowerShell 版安装脚本（Windows PowerShell 5.1 与 PowerShel
   ```yaml
   services:
     relaymesh-gateway:
-      image: teacat99/relaymesh-agent:2.0.0-rc.2
+      image: teacat99/relaymesh-agent:2.0.0-rc.3
       container_name: relaymesh-gateway
       restart: unless-stopped
       # 不写 command：镜像默认就是 ["run", "--ssh-gateway"]。网关现在是 Agent 的默认能力；想关闭，改成 command: ["run", "--no-ssh-gateway"]
@@ -596,7 +583,7 @@ Windows 使用 PowerShell 版安装脚本（Windows PowerShell 5.1 与 PowerShel
   ```
 
   首次启动前先在 Web「接入主机」打开发现窗口，容器上线后核对机器码再点「启用」。容器使用内嵌会话模式（没有 systemd；会话随容器进程结束，所以请保持它常驻，服务端重启与浏览器刷新不受影响）。容器里同样可以开一个本机终端，那是容器自己的 shell，权限只限于容器之内。不设 `RELAYMESH_AGENT_SSH_ALLOW` 就等于不限制目标，请务必按实际网段填写。挂载宿主机目录代替命名卷时，请先把目录 `chown 10001:10001`。数据卷里的 `ssh-gateway/` 目录保存着登录凭据（密封）：备份卷时请连同密钥一起保管，或者用 `RELAYMESH_AGENT_SSH_CRED_KEY` 把密钥分开存放。
-- **不想另外拉镜像**：服务端镜像里已经带着各平台的 Agent（`/app/agent-dist/relaymesh-agent-linux-amd64`，arm64 主机换成 `relaymesh-agent-linux-arm64`），把上面例子里的 `image` 换成 `teacat99/relaymesh:2.0.0-rc.2`，并加上 `entrypoint: ["/app/agent-dist/relaymesh-agent-linux-amd64"]`、`command: ["run", "--ssh-gateway"]`，数据目录改用 `RELAYMESH_AGENT_DATA_DIR=/app/data` 与卷 `gateway-data:/app/data` 即可，其余相同。
+- **不想另外拉镜像**：服务端镜像里已经带着各平台的 Agent（`/app/agent-dist/relaymesh-agent-linux-amd64`，arm64 主机换成 `relaymesh-agent-linux-arm64`），把上面例子里的 `image` 换成 `teacat99/relaymesh:2.0.0-rc.3`，并加上 `entrypoint: ["/app/agent-dist/relaymesh-agent-linux-amd64"]`、`command: ["run", "--ssh-gateway"]`，数据目录改用 `RELAYMESH_AGENT_DATA_DIR=/app/data` 与卷 `gateway-data:/app/data` 即可，其余相同。
 
 ---
 

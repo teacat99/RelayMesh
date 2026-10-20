@@ -8,7 +8,7 @@
 
 ### 新增
 
-- **远程 Web 终端（ExecMesh）**：在浏览器里打开已装 Agent 的主机上的终端。Agent 可作为系统服务常驻运行（Linux / macOS / Windows），并提供 `install.sh` / `install.ps1` 一键安装；会话守护进程让 Agent 升级、重启或崩溃时终端会话不被杀掉；终端内容只保存在主机本机，服务端永远不存终端内容；还有 Web 一键升级 Agent、长上下文终端按需加载、历史日志与右键菜单。
+- **远程 Web 终端（ExecMesh）**：在浏览器里打开已装 Agent 的主机上的终端。Agent 可作为系统服务常驻运行（Linux / macOS / Windows），并提供 `install.sh` / `install.ps1` 一键安装；会话守护进程让 Agent 升级、重启或崩溃时终端会话不被杀掉；终端内容只保存在主机本机，服务端永远不存终端内容；还有 Web 一键升级 Agent、长上下文终端按需加载、历史日志与右键菜单。没有自带安装源的部署（单二进制 / `go run`）里，页面生成的安装命令会固定到这台服务端自己的版本（Release 二进制，以及 `go run …@vX.Y.Z` / `go install …@vX.Y.Z` 编出的程序，现在都能报告自己的版本号，不再显示 `dev`）。
 - **让模型在授权主机上执行命令（ExecMesh 档，默认关闭）**：`terminal_targets` / `terminal_exec` / `terminal_run` 三个 MCP 工具，以及文件能力 `terminal_files`（默认关闭，只能访问你指定的目录）。MCP 令牌改为一机一令牌加档位（RelayMesh / ExecMesh / 自定义），配合「模型 × 主机」授权与审计记录。
 - **SSH 网关**：经一台已装 Agent 的主机，接入没有 Agent 的 SSH 主机（人和模型都能用）；登录凭据只保存在网关自己的存储里。
 - **Agent 自动升级与发布签名**：「提示」与「静默」两档（默认全关，同意发生在主机本机，服务端另有总闸）；静默升级前会用编进 Agent 的 ed25519 发布公钥验签，验不过就不安装。GitHub Release 里的 Agent 程序会在正式发布后补签，对应的 `.sig` 作为 Release 资产提供，自己托管 Agent 分发目录的人可以直接用；用法与限制见 [远程终端运维说明](https://github.com/teacat99/RelayMesh/blob/main/docs/terminal-operations.md)。
