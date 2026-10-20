@@ -5,28 +5,14 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>RelayMesh · Agent Communication & Feedback Relay</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600&display=swap" rel="stylesheet">
-    <script>
-      (function() {
-        try {
-          var mode = localStorage.getItem('relaymesh.theme') || localStorage.getItem('portpass.theme') || 'auto';
-          var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-          var isDark = mode === 'dark' || (mode === 'auto' && prefersDark);
-          if (isDark) {
-            document.documentElement.classList.add('dark');
-          } else {
-            document.documentElement.classList.remove('dark');
-          }
-        } catch (e) {}
-      })();
-    </script>
-    <script type="module" crossorigin src="/assets/index-aU88gJcf.js"></script>
-    <link rel="modulepreload" crossorigin href="/assets/vendor-vue-D0h3xoVE.js">
-    <link rel="modulepreload" crossorigin href="/assets/vendor-misc-C3dvP_DW.js">
-    <link rel="modulepreload" crossorigin href="/assets/vendor-ui-CH_OxMK0.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-CPVJL4J1.css">
+    <!-- 不引用任何外部字体 / 样式表：正文走系统字体栈，等宽字体是随应用自带的 Noto Sans Mono 拉丁子集（同源，见 src/assets/globals.css），服务端 CSP 也只放行本站；src/lib/selfContained.test.ts 负责防回退 -->
+    <!-- 首屏主题初始化（外置脚本，配合服务端 CSP script-src 'self'） -->
+    <script src="/theme-init.js"></script>
+    <script type="module" crossorigin src="/assets/index-Bi5QB2uE.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-vue-CMM3qWJs.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-misc-MY0qa7rO.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-ui-DFez2maC.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-JPzUaLh1.css">
   </head>
   <body class="bg-background text-foreground antialiased h-full">
     <div id="app"></div>

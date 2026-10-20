@@ -1,20 +1,22 @@
 <script setup lang="ts">
+// 归档库整页（手机上从侧栏底部的归档入口进来；PC 上是弹窗，直接打开 /archive 也是这一页）。
+// #156 批 4：页头换成各整页共用的 PageHeader 骨架（h-14、底线、留白与其他页一致）；这一页没有侧栏，所以 standalone（不画汉堡 / 展开侧栏）。
+// 「返回」：上一步在本应用里就是浏览器的返回，直接打开的链接则前往会话页（不会把人退到应用外面去）；「工作区主页」留着，手机上只留图标。
 import { useRouter } from 'vue-router'
 import { useSessionStore } from '../stores/session'
+import { backOrSession } from '../lib/sessionNav'
 import ArchiveList from '../components/ArchiveList.vue'
 import Button from '../components/ui/button/Button.vue'
-import { Archive, ChevronLeft, Home } from 'lucide-vue-next'
+import PageHeader from '../components/shell/PageHeader.vue'
+import PageBackButton from '../components/shell/PageBackButton.vue'
+import { Archive, Home } from 'lucide-vue-next'
 import type { FeedbackSession } from '../api/types'
 
 const router = useRouter()
 const sessionStore = useSessionStore()
 
 function handleBack() {
-  if (window.history.length > 1) {
-    router.back()
-  } else {
-    router.push('/')
-  }
+  backOrSession(router)
 }
 
 function handleSelectSession(s: FeedbackSession) {
@@ -24,35 +26,21 @@ function handleSelectSession(s: FeedbackSession) {
 </script>
 
 <template>
-  <div class="min-h-full min-h-[100dvh] w-full bg-background text-foreground flex flex-col">
-    <!-- Top Header Bar (紧凑适宜高度 h-11，文字靠左) -->
-    <header class="h-11 px-3 sm:px-5 border-b border-border/70 flex items-center justify-between bg-card/80 backdrop-blur-md sticky top-0 z-40 shrink-0">
-      <div class="flex items-center gap-2">
-        <button
-          type="button"
-          class="p-1 -ml-1 rounded-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-colors flex items-center gap-1 text-xs font-mono cursor-pointer"
-          @click="handleBack"
-        >
-          <ChevronLeft class="w-3.5 h-3.5" />
-          <span>返回</span>
-        </button>
-        <span class="text-border">/</span>
-        <div class="flex items-center gap-1.5 font-bold text-xs sm:text-sm font-mono text-foreground">
-          <Archive class="w-3.5 h-3.5 text-primary" />
-          <span>历史会话归档库</span>
-        </div>
-      </div>
+  <div class="min-h-full min-h-[100dvh] w-full bg-background text-foreground flex flex-col" data-testid="archive-page">
+    <PageHeader standalone class="sticky top-0">
+      <template #leading>
+        <PageBackButton label="返回" title="返回上一页" always-label data-testid="archive-back" @click="handleBack" />
+      </template>
 
-      <Button
-        variant="outline"
-        size="sm"
-        class="h-7 text-xs font-mono rounded-sm flex items-center gap-1.5 px-2 cursor-pointer"
-        @click="router.push('/')"
-      >
-        <Home class="w-3 h-3" />
-        <span class="hidden sm:inline">工作区主页</span>
-      </Button>
-    </header>
+      <Archive class="size-4 shrink-0 text-primary" aria-hidden="true" />
+      <h1 class="min-w-0 truncate text-sm font-semibold">历史会话归档库</h1>
+
+      <template #actions>
+        <Button variant="outline" size="sm" class="h-8 shrink-0 gap-1 text-xs" title="回到工作区主页" data-testid="archive-home" @click="router.push('/')">
+          <Home class="size-3.5" aria-hidden="true" /><span class="hidden sm:inline">工作区主页</span>
+        </Button>
+      </template>
+    </PageHeader>
 
     <!-- Main Content Container (移动端去除内部容器边框，自适应全屏流式空间) -->
     <main class="flex-1 max-w-4xl w-full mx-auto p-3 sm:p-5 flex flex-col overflow-y-auto">

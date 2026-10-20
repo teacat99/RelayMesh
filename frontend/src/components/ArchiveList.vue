@@ -2,8 +2,10 @@
 import { ref, computed } from 'vue'
 import dayjs from 'dayjs'
 import { useSessionStore } from '../stores/session'
+import { displayRounds } from '../lib/workflowRounds'
 import Button from './ui/button/Button.vue'
 import Badge from './ui/badge/Badge.vue'
+import PageState from './shell/PageState.vue'
 import {
   Search,
   FolderGit2,
@@ -11,7 +13,6 @@ import {
   Clock,
   RotateCcw,
   ExternalLink,
-  Inbox,
   Sparkles,
   Layers,
   FileText
@@ -49,7 +50,8 @@ const archivedGroups = computed<ArchivedGroup[]>(() => {
     list.push({
       key,
       latest: sorted[0],
-      rounds: group.length,
+      // 轮数取整个工作流的总数：归档库里的老工作流在列表里往往只有最新的一行（#173）
+      rounds: displayRounds(sessionStore.workflowRounds[key], group.length),
       sessions: sorted
     })
   }
@@ -123,27 +125,25 @@ function handleView(group: ArchivedGroup) {
 
     <!-- Scrollable Archive Cards Grid/List -->
     <div class="flex-1 overflow-y-auto space-y-3 pr-1 min-h-[320px]">
-      <div
+      <PageState
         v-if="filteredArchivedGroups.length === 0"
-        class="flex flex-col items-center justify-center py-20 text-center space-y-3 text-muted-foreground"
-      >
-        <div class="w-12 h-12 rounded-sm bg-muted/40 border border-border/60 flex items-center justify-center">
-          <Inbox class="w-6 h-6 stroke-[1.2]" />
-        </div>
-        <div class="space-y-1">
-          <p class="text-xs font-semibold text-foreground">暂无匹配的已归档 Workflow</p>
-          <p class="text-[11px] text-muted-foreground">在侧边栏中点击右键菜单“归档 Workflow”，可将已完成交互移入归档库</p>
-        </div>
-      </div>
+        kind="empty"
+        title="暂无匹配的已归档 Workflow"
+        hint="在侧边栏中点击右键菜单“归档 Workflow”，可将已完成交互移入归档库"
+        data-testid="archive-empty"
+      />
 
       <div
         v-for="g in filteredArchivedGroups"
         :key="g.key"
+        data-testid="archive-card"
+        :data-workflow-id="g.key"
         class="p-4 rounded-sm border border-border/80 bg-card/60 hover:bg-muted/30 transition-all space-y-2.5 shadow-2xs group"
       >
         <!-- Top Row: Title + Tags + Row Actions (无全局底栏按钮，操作内聚在每行) -->
-        <div class="flex items-center justify-between gap-3">
-          <div class="flex items-center gap-2 min-w-0">
+        <!-- 手机上一行放不下「标题 + 徽章 + 两个按钮」（标题会被挤成两个字加省略号）：标题组至少给 12rem，放不下就让按钮另起一行靠右；PC 弹窗够宽，仍是一行 -->
+        <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+          <div class="flex min-w-0 flex-1 basis-48 items-center gap-2">
             <Workflow class="w-3.5 h-3.5 text-primary shrink-0" />
             <h3 class="text-xs sm:text-sm font-semibold text-foreground truncate tracking-tight">
               {{ g.latest.title || '工作流方案交互' }}
@@ -151,13 +151,13 @@ function handleView(group: ArchivedGroup) {
             <Badge variant="outline" class="text-[10px] px-1.5 py-0 font-normal font-mono rounded-xs shrink-0">
               已归档
             </Badge>
-            <Badge v-if="g.rounds > 1" variant="secondary" class="text-[10px] px-1.5 py-0 font-normal font-mono rounded-xs shrink-0">
+            <Badge v-if="g.rounds > 1" variant="secondary" data-testid="archive-rounds" class="text-[10px] px-1.5 py-0 font-normal font-mono rounded-xs shrink-0">
               共 {{ g.rounds }} 轮交互
             </Badge>
           </div>
 
           <!-- Row Inline Action Buttons -->
-          <div class="flex items-center gap-1.5 shrink-0">
+          <div class="ml-auto flex items-center gap-1.5 shrink-0">
             <Button
               variant="ghost"
               size="sm"

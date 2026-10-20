@@ -127,7 +127,8 @@ watch(() => sessionStore.lastPhaseEvent, async (evt) => {
   <div
     v-if="phases.length > 0"
     ref="containerRef"
-    class="relative flex items-center rounded-sm border border-border/80 shadow-2xs min-w-0 whitespace-nowrap text-[11px] sm:text-xs overflow-x-auto no-scrollbar scrollbar-none bg-card/95 backdrop-blur-xs select-none"
+    data-testid="phase-slider"
+    class="relative flex items-center rounded-sm border border-border/80 shadow-2xs min-w-0 whitespace-nowrap text-[11px] sm:text-xs overflow-x-auto max-md:overflow-visible no-scrollbar scrollbar-none bg-card/95 backdrop-blur-xs select-none"
     title="工作流阶段（点击切换，右键编辑）"
   >
     <!-- Sliding indicator -->

@@ -2,22 +2,27 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/api"
-	"github.com/teacat99/RelayMesh/internal/browser"
-	"github.com/teacat99/RelayMesh/internal/cert"
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/store"
-	"github.com/teacat99/RelayMesh/web"
+	"github.com/teacat99/RelayMesh/v2/internal/api"
+	"github.com/teacat99/RelayMesh/v2/internal/browser"
+	"github.com/teacat99/RelayMesh/v2/internal/cert"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
+	"github.com/teacat99/RelayMesh/v2/web"
 )
 
 func runServe() {
@@ -57,6 +62,7 @@ func runServe() {
 
 	// 3. Initialize HTTP & MCP Server
 	server := api.NewServer(cfg, st, staticFS)
+	server.Start()
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	httpServer := &http.Server{
@@ -85,6 +91,17 @@ func runServe() {
 		if err != nil {
 			log.Printf("Warning: failed to setup TLS: %v", err)
 		} else {
+			// 叶子证书指纹供 Agent 安装命令的 --pin 参数使用（自签名证书场景下，用指纹代替系统 CA 校验服务端身份）。
+			if hub := server.Terminal(); hub != nil && len(tlsCert.Certificate) > 0 {
+				sum := sha256.Sum256(tlsCert.Certificate[0])
+				hub.SetTLSPin("sha256:" + hex.EncodeToString(sum[:]))
+				hub.SetHTTPSPort(cfg.HTTPSPort)
+				// 公钥指纹（curl --pinnedpubkey 的格式）：自签名证书下，从服务端下载安装文件时用它校验服务端身份。
+				if leaf, err := x509.ParseCertificate(tlsCert.Certificate[0]); err == nil {
+					spki := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+					hub.SetTLSSPKI("sha256//" + base64.StdEncoding.EncodeToString(spki[:]))
+				}
+			}
 			httpsAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.HTTPSPort)
 			httpsServer = &http.Server{
 				Addr:         httpsAddr,
@@ -123,14 +140,25 @@ func runServe() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Printf("HTTP Server forced to shutdown: %v", err)
-	}
-	if httpsServer != nil {
-		if err := httpsServer.Shutdown(ctx); err != nil {
-			log.Printf("HTTPS Server forced to shutdown: %v", err)
+	// 先关闭 SSE 与终端 WebSocket（它们不受 http.Server.Shutdown 管理或不会被它中断），再排空 HTTP/HTTPS 服务器。
+	server.Shutdown(ctx)
+
+	// HTTP 与 HTTPS 并行排空：串行会让后一个端口被前一个的排空时间占住，新进程快速重启时抢不到端口。
+	var wg sync.WaitGroup
+	drain := func(name string, srv *http.Server) {
+		defer wg.Done()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("%s Server forced to shutdown: %v", name, err)
+			_ = srv.Close()
 		}
 	}
+	wg.Add(1)
+	go drain("HTTP", httpServer)
+	if httpsServer != nil {
+		wg.Add(1)
+		go drain("HTTPS", httpsServer)
+	}
+	wg.Wait()
 
 	log.Printf("RelayMesh exited cleanly.")
 }

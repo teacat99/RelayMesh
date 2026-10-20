@@ -30,9 +30,15 @@ func (g *gzipWriter) WriteHeader(code int) {
 	g.ResponseWriter.WriteHeader(code)
 }
 
+// gzipLevel 取 4 而不是 BestSpeed(1)：用仓库里约 2.2 MB 互不重复的中文 Markdown 拼成 JSON 实测（#169），
+// 级别 1 → 1035 KB / 36 ms，级别 4 → 896 KB / 65 ms，级别 6（默认）→ 883 KB / 90 ms，级别 9 → 883 KB / 98 ms。
+// 级别 4 用约 30 ms 额外 CPU 换掉 13% 的字节，再往上几乎不再变小；生产带宽只有 3 Mbps 左右时，
+// 省下的约 140 KB 传输（约 0.4 s）远大于这点 CPU。整表重复打开还有 ETag/304 兜着，不会反复压缩。
+const gzipLevel = 4
+
 var gzipPool = sync.Pool{
 	New: func() any {
-		w, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+		w, _ := gzip.NewWriterLevel(io.Discard, gzipLevel)
 		return w
 	},
 }
@@ -49,6 +55,12 @@ func GzipMiddleware() gin.HandlerFunc {
 		// 2. 严禁对 SSE 实时流进行 gzip 缓冲，否则会导致实时事件延迟挂起
 		path := c.Request.URL.Path
 		if strings.HasSuffix(path, "/events") || strings.HasSuffix(path, "/sse") {
+			c.Next()
+			return
+		}
+
+		// 文件下载是已知长度的二进制流：不压缩（压缩会去掉 Content-Length，也白白消耗 CPU）。
+		if strings.HasPrefix(path, "/files/dl/") {
 			c.Next()
 			return
 		}
@@ -73,9 +85,11 @@ func GzipMiddleware() gin.HandlerFunc {
 		c.Writer = &gzipWriter{ResponseWriter: c.Writer, writer: gz}
 		c.Next()
 
-		// 若响应没有正文内容（如 204 No Content 或 304 Not Modified），移除 Content-Encoding
+		// 若响应没有正文内容（如 204 No Content 或 304 Not Modified），移除 Content-Encoding，
+		// 并让 gzip 写到黑洞：否则收尾的 Close 会把 gzip 头尾（十来个字节）当成正文写出去。
 		if c.Writer.Status() == http.StatusNoContent || c.Writer.Status() == http.StatusNotModified {
 			c.Header("Content-Encoding", "")
+			gz.Reset(io.Discard)
 		}
 	}
 }

@@ -8,6 +8,23 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * 自带的等宽字体：Noto Sans Mono 的拉丁字符子集（可变字重，约 32 KB），与应用同源提供。
+ * 只有行内 code / kbd / samp / pre 会用到它（见下面 base 层的字体栈）；按 unicode-range 与实际使用懒加载——
+ * 本机有 Cascadia Mono 的（Windows 11）排在它前面，根本不会下载；中日韩字符不在子集内，仍落到系统的 CJK 等宽字体。
+ * 许可证：SIL OFL 1.1，原文随构建产物放在 /licenses/NotoSansMono-OFL.txt（public/licenses）。
+ * 为什么不是外链：外链的样式表会阻塞首屏，访问 Google 不稳定的网络（国内、内网、离线）会被拖住；
+ * src/lib/selfContained.test.ts 防止再被引回来。
+ */
+@font-face {
+  font-family: 'Noto Sans Mono';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/noto-sans-mono-latin-wght-normal.woff2') format('woff2-variations'), url('./fonts/noto-sans-mono-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 @theme {
   --color-status-active: #3b8259;
   --color-status-pending: #d97706;
@@ -131,8 +148,10 @@ body,
       border-color 0.15s ease,
       color 0.15s ease;
   }
+  /* 等宽字体不依赖外部字体站点（首屏不被外链阻塞，内网 / 离线也一样）：'Noto Sans Mono' 是上面自带的拉丁子集（同源），
+     其余全是系统字体；拉丁字符先选 Windows 自带的 Cascadia，没有就用自带的 Noto Sans Mono，中日韩字符再落到后面的 CJK 等宽字体。 */
   code, kbd, samp, pre {
-    font-family: 'Cascadia Mono', 'Cascadia Code', 'Noto Sans Mono', 'Noto Sans Mono CJK SC', 'Sarasa Mono SC', 'NSimSun', Consolas, 'Courier New', monospace;
+    font-family: 'Cascadia Mono', 'Cascadia Code', 'Noto Sans Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'DejaVu Sans Mono', 'Noto Sans Mono CJK SC', 'Sarasa Mono SC', 'NSimSun', 'Courier New', monospace;
     font-feature-settings: 'tnum' 1, 'zero' 1;
     font-variant-east-asian: full-width;
   }
@@ -190,6 +209,36 @@ body,
 
 [data-sonner-toaster] > * {
   pointer-events: auto;
+}
+
+/* ExecMesh 的消息提示（Sonner.vue 在 ExecMesh 里给容器加 .toaster-exec，并把 position 换成 bottom-right）。
+   这里没有输入区可贴，终端占满右侧：消息贴在终端区域的底边、靠右。
+   - 靠右：命令行与输出通常靠左，右下角几乎不挡内容；左侧栏底部的解锁倒计时与工具按钮也不再被盖住；
+   - 触屏 / 窄屏上终端底部有一条辅助条，它的高度由终端页量出来写到 <html> 的 --exec-keybar-height 上，消息停在它上方；
+   - 动画方向：从屏幕底边升起、沉回底边（RelayMesh 里消息悬在输入区上方，原地浮起一小段，保持原样）。 */
+[data-sonner-toaster].toaster-exec {
+  bottom: calc(var(--exec-keybar-height, 0px) + 0.75rem + env(safe-area-inset-bottom, 0px)) !important;
+  left: auto !important;
+  right: 0.75rem !important;
+  max-width: min(36rem, calc(100vw - 1.5rem)) !important;
+}
+
+/* 容器宽度为 0（见上，消息自己决定宽度）：靠右的容器里，消息要以右边缘对齐，否则会从容器的左边缘向右伸出屏幕。 */
+[data-sonner-toaster].toaster-exec [data-sonner-toast] {
+  left: auto !important;
+  right: 0 !important;
+  --exec-rise: calc(100% + 1.5rem + var(--exec-keybar-height, 0px));
+  transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease, height 0.4s ease, box-shadow 0.2s ease;
+}
+
+[data-sonner-toaster].toaster-exec [data-sonner-toast][data-mounted='false'],
+[data-sonner-toaster].toaster-exec [data-sonner-toast][data-removed='true'][data-front='true'][data-swipe-out='false'] {
+  --y: translateY(var(--exec-rise));
+}
+
+/* 手指 / 鼠标拖着消息往下扔时跟手，不要缓动 */
+[data-sonner-toaster].toaster-exec [data-sonner-toast][data-swiping='true'] {
+  transition: none;
 }
 
 /* ==============================================================================
@@ -390,4 +439,252 @@ body,
   }
 }
 
+/*
+ * 任务页的过渡动画（WorkTaskList / WorkModuleTree 里的 <TransitionGroup name="work-…">）。
+ *
+ * 为什么写在 @layer 之外：任务行自己带 transition-colors（悬停底色），同样是工具类、同在 utilities 层，
+ * 谁盖掉谁取决于生成顺序，实测会把进入动画的 opacity 过渡盖掉；未分层的样式永远比分层的优先，规则就不依赖顺序了。
+ *
+ * 约束：只动 opacity / transform / translate（合成层属性，不触发布局，不用 backdrop-filter，没有无限循环）；
+ * 每段 ≤ 300ms；「减少动态效果」下全部关闭，进入前的起始样式也不套（免得白白闪两帧空白）。
+ *
+ * 离开的元素：原地淡出，同时立刻脱离文档流（position: absolute，位置不变）——否则它在 DOM 里还要停留一两帧，
+ * 下面的元素要等它被移走才一下子跳上来，FLIP 的让位动画就播不出来（Vue 官方列表过渡也是这么处理的）。
+ * 容器（列表根、每组的行容器、规划树）都是 position: relative，离开的元素用 left / right: 0 保持原宽度。
+ */
+.work-row-enter-active,
+.work-tree-enter-active {
+  transition: opacity 200ms ease-out, translate 200ms ease-out;
+}
+.work-group-enter-active {
+  transition: opacity 200ms ease-out;
+}
+.work-row-leave-active,
+.work-tree-leave-active,
+.work-group-leave-active {
+  transition: opacity 150ms ease-out;
+}
+.work-row-leave-to,
+.work-tree-leave-to,
+.work-group-leave-to {
+  opacity: 0;
+}
+.work-row-move,
+.work-group-move,
+.work-tree-move {
+  transition: transform 300ms ease-out;
+}
 
+@media (prefers-reduced-motion: no-preference) {
+  .work-row-leave-active,
+  .work-tree-leave-active,
+  .work-group-leave-active {
+    position: absolute;
+    right: 0;
+    left: 0;
+    pointer-events: none;
+  }
+  .work-row-enter-from {
+    opacity: 0;
+    translate: 0 -0.375rem;
+  }
+  .work-tree-enter-from {
+    opacity: 0;
+    translate: 0 -0.25rem;
+  }
+  .work-group-enter-from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-row-enter-active,
+  .work-tree-enter-active,
+  .work-group-enter-active,
+  .work-row-leave-active,
+  .work-tree-leave-active,
+  .work-group-leave-active,
+  .work-row-move,
+  .work-group-move,
+  .work-tree-move {
+    transition: none;
+  }
+}
+
+/*
+ * 项目切换动画（RelayMesh ↔ ExecMesh）：旧画面化作粒子消散，露出下面的新页面。
+ *
+ * 机制：路由守卫（router/modeTransition.ts）用 View Transitions 把旧画面截成一张图（::view-transition-old(root)），
+ * 并在切换期间给 <html> 加 data-mode-switch="forward|back"；下面的样式只在这个属性存在时生效，不影响别的过渡。
+ * 旧画面叠在新页面上方，用一层遮罩决定「哪里还看得见旧画面」：
+ *   - 最底下一层：扫过去之前（前沿之后）的区域完全保留；
+ *   - 中间两层：两张错开的点阵（间距 12px / 17px，叠在一起像随机的颗粒），点的半径随时间缩小；
+ *   - 最上面一层：前沿到前沿减去带宽之间由 0 渐变到 1，前沿后面（已扫过）的区域一律不要。
+ *   合成：上层 ∩（点阵 ∪ 点阵 ∪ 未扫区域）= 未扫区域 ∪（带内的点阵 × 渐变），所以带内只剩渐隐的颗粒，带后面是干净的新页面。
+ * 前沿沿渐变线（forward：135° 左上 → 右下；back：315° 右下 → 左上）从 0% 推进到 142%（= 100% + 带宽，保证收尾时全部清空）；
+ * 点阵同时沿对角缓缓漂移（mask-position），像颗粒被风吹散；旧画面轻微放大 1.8%。
+ *
+ * 约束（GPU 评估 P3）：一次性 620ms，只有遮罩 / transform 在动，没有 backdrop-filter、没有常驻帧，结束后伪元素随之销毁；
+ * 「减少动态效果」或设置里关掉时守卫根本不会发起（这里再兜一层）。
+ *
+ * 已知取舍：View Transitions 进行期间，浏览器不会把鼠标 / 触摸事件交给底下的页面（实测 pointer-events: none 也放不过去，
+ * elementFromPoint 返回 <html>），所以这 0.6 秒内的点击会被吞掉；时间很短，且换来的是整页的无缝过渡，可以接受。
+ */
+@property --vt-front {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 0%;
+}
+@property --vt-dot {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 5px;
+}
+
+html[data-mode-switch]::view-transition-old(root) {
+  --vt-angle: 135deg;
+  --vt-band: 42%;
+  z-index: 2;
+  mix-blend-mode: normal;
+  animation: mode-dissolve 620ms cubic-bezier(0.4, 0, 0.6, 1) both;
+  mask-image:
+    linear-gradient(var(--vt-angle), transparent calc(var(--vt-front) - var(--vt-band)), #000 var(--vt-front)),
+    radial-gradient(circle at 50% 50%, #000 var(--vt-dot), transparent calc(var(--vt-dot) + 0.8px)),
+    radial-gradient(circle at 50% 50%, #000 calc(var(--vt-dot) * 0.7), transparent calc(var(--vt-dot) * 0.7 + 0.8px)),
+    linear-gradient(var(--vt-angle), transparent var(--vt-front), #000 var(--vt-front));
+  mask-size: 100% 100%, 12px 12px, 17px 17px, 100% 100%;
+  mask-repeat: no-repeat, repeat, repeat, no-repeat;
+  mask-composite: intersect, add, add, add;
+}
+html[data-mode-switch='back']::view-transition-old(root) {
+  --vt-angle: 315deg;
+}
+html[data-mode-switch]::view-transition-new(root) {
+  mix-blend-mode: normal;
+  animation: none;
+}
+
+@keyframes mode-dissolve {
+  from {
+    --vt-front: 0%;
+    --vt-dot: 5.2px;
+    mask-position: 0 0, 0 0, 0 0, 0 0;
+    transform: scale(1);
+  }
+  to {
+    --vt-front: 142%;
+    --vt-dot: 1.2px;
+    mask-position: 0 0, 18px 22px, -22px 26px, 0 0;
+    transform: scale(1.018);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-mode-switch]::view-transition-group(*),
+  html[data-mode-switch]::view-transition-old(*),
+  html[data-mode-switch]::view-transition-new(*) {
+    animation: none;
+  }
+}
+
+
+
+/* 正文里的引用链接（#161）：任务 #36 / 确认项 Q23 / 文档 [[路径]] / 会话号 sess-xxxxxxxx。
+   识别与装饰见 lib/linkRefs.ts、lib/linkRefsDom.ts，纯文本用 components/work/LinkedText.vue，点击动线见 composables/useLinkRefs.ts。
+   它们是真正的 <a href>（普通点击在页面里办事，⌘ / Ctrl / 中键在新标签页打开同一个深链），外观统一：
+   类型图标 + 文字，等宽、主色、点状下划线，悬停变实线。图标是 ::before 上的 mask，复制文字时不会带上它。
+   选择器写成 .link-ref.link-ref，是为了压过 .markdown-body a 的颜色与实线下划线。 */
+.link-ref.link-ref {
+  display: inline;
+  box-sizing: border-box;
+  cursor: pointer;
+  padding: 0 0.15em;
+  border-radius: var(--radius-xs, 2px);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.92em;
+  font-weight: 600;
+  color: var(--primary);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.link-ref.link-ref:hover {
+  background-color: var(--muted);
+  text-decoration-style: solid;
+}
+.link-ref.link-ref:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.link-ref::before {
+  content: '';
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  margin-right: 0.2em;
+  vertical-align: -0.12em;
+  background-color: currentColor;
+  -webkit-mask: var(--link-ref-icon) center / contain no-repeat;
+  mask: var(--link-ref-icon) center / contain no-repeat;
+}
+.link-ref-task {
+  --link-ref-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 11 3 3L22 4'/%3E%3Cpath d='M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11'/%3E%3C/svg%3E");
+}
+.link-ref-confirm {
+  --link-ref-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7.9 20A9 9 0 1 0 4 16.1L2 22Z'/%3E%3Cpath d='M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E");
+}
+.link-ref-doc {
+  --link-ref-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/%3E%3Cpath d='M14 2v4a2 2 0 0 0 2 2h4'/%3E%3Cpath d='M10 9H8'/%3E%3Cpath d='M16 13H8'/%3E%3Cpath d='M16 17H8'/%3E%3C/svg%3E");
+}
+.link-ref-session {
+  --link-ref-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m15 10 5 5-5 5'/%3E%3Cpath d='M4 4v7a4 4 0 0 0 4 4h12'/%3E%3C/svg%3E");
+}
+
+/* 手机宽度（< 768px，即「移动端」版式）：9~11px 的辅助文字一律抬到 12px（#155；真机档案量出各页 50%~70% 的字符小于 12px，
+   Material 的下限是 12sp）。写在无层的普通样式里——优先级高于 Tailwind 工具类（它们在 utilities 层里），
+   不必逐个去改一千多处 text-[10px]；桌面与平板（≥ 768px）版式不变。
+   `sm:` 前缀的写法只在 640~767px 之间生效，所以单独限定宽度，免得把 <640px 里本来更大的字压小。 */
+@media (max-width: 767.98px) {
+  .text-\[9px\],
+  .text-\[10px\],
+  .text-\[11px\] {
+    font-size: 12px;
+  }
+  [data-sonner-toaster] [data-sonner-toast] [data-title],
+  [data-sonner-toaster] [data-sonner-toast] [data-description] {
+    font-size: 12px !important;
+  }
+}
+@media (min-width: 640px) and (max-width: 767.98px) {
+  .sm\:text-\[10px\],
+  .sm\:text-\[11px\] {
+    font-size: 12px;
+  }
+}
+
+/* 触屏（粗指针）上的点按区（#155；真机档案里绝大多数点击目标不足 44px）：给按钮 / 标签页 / role=button 的元素盖一层透明的伪元素，
+   把「能点中的范围」撑到 44×44 左右，按下它就是按下控件本身，视觉大小与版式都不变。桌面鼠标（细指针）不受影响。
+   - 往外最多撑 10px（宽高各 20px）：挤在一起的小按钮（间距 4~8px）之间不会互相吃掉太多；本来就不小于 44px 的方向不撑。
+   - 放在 base 层、用 :where()：零优先级，控件自己的 absolute / fixed 等定位类、scoped 样式都能盖过这里的 relative。
+   - 不要的地方加 `no-touch-hit`（连同它的所有后代一起不撑）：行内文字按钮（.task-ref）、紧挨着的一排功能键之类。
+   - 输入框 / 下拉框没有伪元素，改成让它们自己至少 44px 高（只在手机宽度的触屏上；复选框、单选框、滑块等不动）。 */
+@layer base {
+  @media (pointer: coarse) and (max-width: 767.98px) {
+    :where(select, input:not([type]), input[type='text'], input[type='search'], input[type='number'], input[type='email'], input[type='url'], input[type='password'], input[type='tel']):not(.no-touch-hit, .no-touch-hit *) {
+      min-height: 44px;
+    }
+  }
+  @media (pointer: coarse) {
+    :where(button, [role='button'], [role='tab']):not(.no-touch-hit, .no-touch-hit *, .task-ref, [data-sonner-toaster] *) {
+      position: relative;
+    }
+    :where(button, [role='button'], [role='tab']):not(.no-touch-hit, .no-touch-hit *, .task-ref, [data-sonner-toaster] *)::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: clamp(100%, 44px, calc(100% + 20px));
+      height: clamp(100%, 44px, calc(100% + 20px));
+      transform: translate(-50%, -50%);
+    }
+  }
+}

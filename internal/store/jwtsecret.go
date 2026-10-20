@@ -11,8 +11,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
 )
 
 // JWTSecretKey 是自动生成的 JWT 签名密钥在 system_settings 表中的键。

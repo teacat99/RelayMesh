@@ -11,6 +11,11 @@ import {
   useForwardPropsEmits
 } from 'radix-vue'
 import { cn } from '@/lib/utils'
+import { LAYER_CLASS } from '@/lib/layers'
+
+// 根节点是 Portal（一个 Teleport 片段），额外的属性（如 data-testid）落不到任何元素上，Vue 会在开发环境报警；
+// 手动把它们转给真正渲染出来的内容元素。
+defineOptions({ inheritAttrs: false })
 
 interface Props extends DialogContentProps {
   class?: string
@@ -43,17 +48,22 @@ const sideClass = computed(() => {
 
 const classes = computed(() =>
   cn(
-    'fixed z-50 gap-4 bg-card p-6 shadow-modal transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-200 data-[state=open]:duration-300 flex flex-col',
+    'fixed gap-4 bg-card p-6 shadow-modal transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-200 data-[state=open]:duration-300 flex flex-col',
+    LAYER_CLASS.sheet,
     sideClass.value,
     props.class
   )
+)
+const overlayClasses = cn(
+  'fixed inset-0 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
+  LAYER_CLASS.sheet
 )
 </script>
 
 <template>
   <DialogPortal>
-    <DialogOverlay class="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-    <DialogContent v-bind="forwarded" :class="classes">
+    <DialogOverlay :class="overlayClasses" />
+    <DialogContent v-bind="{ ...forwarded, ...$attrs }" :class="classes">
       <slot />
       <DialogClose
         v-if="showClose !== false"

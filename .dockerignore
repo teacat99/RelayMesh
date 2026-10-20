@@ -1,0 +1,24 @@
+# 构建上下文过滤：避免把宿主机的依赖目录 / 仓库元数据 / 本地数据送进 Docker 构建
+# （宿主机 pnpm 的 node_modules 含符号链接，COPY 进镜像会与容器内 npm ci 的真实目录冲突）
+
+.git
+.cursor
+.agents
+.playwright-mcp
+
+# 本地数据与证书
+data
+certs
+*.db
+*.db-shm
+*.db-wal
+
+# 前端依赖与缓存（镜像内由 npm ci 重新安装；web/dist 必须保留，Go 通过 embed 内嵌）
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# 本地二进制：仅保留 Dockerfile（预览镜像）所需的 bin/relaymesh
+bin/*
+!bin/relaymesh

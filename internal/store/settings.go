@@ -7,14 +7,31 @@ import (
 	"strings"
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
 	"gorm.io/gorm"
 )
 
 const (
-	GlobalSettingsKey = "app_settings"
+	GlobalSettingsKey  = "app_settings"
 	AuthCredentialsKey = "auth_credentials"
 )
+
+// phaseSection 是服务指引里「阶段流转」一节（第 4 条）。单独成常量，是为了迁移存量设置时能整段替换。
+const phaseSection = `4. 阶段流转（Phase Progression）与行为约束：
+   - 严格遵循 MCP 回执中 current_phase 与 phase_prompt 注入的阶段约束；阶段只有三种：
+     • 讨论 (discuss)：快速沟通信息，先给结论再给依据，信息不足时一次最多问 3 个问题并给出备选；⚠️ 只读，严禁创建、修改或删除任何源代码文件；
+     • 方案 (plan)：基于已核实的事实做方案评估，产出可拍板的方案（目标与非目标、事实依据、备选≥2、风险与回滚、验收标准、待确认的不可逆项）；⚠️ 只读，必须通过 feedback 获得确认并切换至开发阶段方可编码；
+     • 开发 (dev)：按已确认的方案实施，增量验证（lint/type-check → build → 测试），完成标准 = 功能 + 类型 + 编译 + 测试 + 文档同步，每条须有可验证证据；收尾清理与最终汇报也在本阶段完成；
+   - 切换阶段：在 interactive_feedback 的 phase 参数或 workflow_context(action: "set_phase") 里传 discuss / plan / dev；旧的 assess / verify / done 仍可识别（分别并入 discuss / dev / dev），回执里的 current_phase 是实际生效的阶段。`
+
+// phaseSectionLegacy 是 v1.7 之前的五段式写法（评估 / 方案 / 开发 / 验证 / 完成）。
+// 仅用于识别并替换存量设置里的旧文案：逐字相同才替换，用户改过的不动。
+const phaseSectionLegacy = `4. 阶段流转（Phase Progression）与行为约束：
+   - 严格遵循 MCP 回执中 current_phase 与 phase_prompt 注入的阶段约束：
+     • 评估 (assess) 与 方案 (plan) 阶段：⚠️ 严禁创建、修改或删除任何源代码文件，仅可只读分析验证，必须通过 feedback 获得确认并切换至开发阶段方可编码；
+     • 开发 (dev) 阶段：增量验证（lint/type-check → build），每完成独立模块通过 feedback 汇报；
+     • 验证 (verify) 阶段：完成标准 = 功能 + 类型 + 编译 + 校验 + 文档同步，每条须有可验证证据；
+     • 完成 (done) 阶段：通过 feedback 提交最终汇报，环境收尾清理。`
 
 const DefaultServerInstructions = `【RelayMesh 智能体协同中枢内生治理指引】
 RelayMesh 是本工作区唯一的权威人机交互、多智能体协同与研发生命周期中枢。当连接到 RelayMesh 时，请严格遵循以下行为指引：
@@ -38,12 +55,7 @@ RelayMesh 是本工作区唯一的权威人机交互、多智能体协同与研�
    - 收到 === 等待回执 === 时，严格按回执指令调用 AwaitShell 等待并随后调用 continue_feedback_session 轮询，等待期间严禁输出 chat 正文、严禁调用其他工具、严禁擅自总结；
    - 收到 === 用户反馈 === 时，方可作为用户的权威输入继续推进。
 
-4. 阶段流转（Phase Progression）与行为约束：
-   - 严格遵循 MCP 回执中 current_phase 与 phase_prompt 注入的阶段约束：
-     • 评估 (assess) 与 方案 (plan) 阶段：⚠️ 严禁创建、修改或删除任何源代码文件，仅可只读分析验证，必须通过 feedback 获得确认并切换至开发阶段方可编码；
-     • 开发 (dev) 阶段：增量验证（lint/type-check → build），每完成独立模块通过 feedback 汇报；
-     • 验证 (verify) 阶段：完成标准 = 功能 + 类型 + 编译 + 校验 + 文档同步，每条须有可验证证据；
-     • 完成 (done) 阶段：通过 feedback 提交最终汇报，环境收尾清理。
+` + phaseSection + `
 
 5. 全模式不可逆操作底线：
    - 生产部署、数据库迁移、删除业务数据、执行破坏性命令、git push 远端、发布 release/tag 等不可逆或高风险操作，必须通过 interactive_feedback 获得用户显式二次确认。
@@ -60,7 +72,12 @@ RelayMesh 是本工作区唯一的权威人机交互、多智能体协同与研�
 8. 上下文获取与跨项目边界隔离（D-165）：
    - 主机名 (HostName) 由连接凭据权威锁定，项目目录 (project_directory) 由大模型主动传递；
    - 凡调用 list_sessions 或 workflow_context(action: 'list_workflows') 获取上下文，必须传递 project_directory，系统严格限定在当前 (HostName, ProjectDirectory) 边界内，杜绝跨项目与跨主机污染；
-   - 仅当人工明确指定特定 workflow_id 时，才允许跨目录读取该指定工作流的会话历史。`
+   - 仅当人工明确指定特定 workflow_id 时，才允许跨目录读取该指定工作流的会话历史。
+
+9. 交付锚点（可选，用于定位信息的陈旧性）：
+   - 项目目录是 git 仓库时，调用 interactive_feedback 可把 git log -1 --format='%h %s' 的单行输出放进 commit 参数，时间由服务端记录；不是 git 仓库时省略；
+   - 回执响应头的 anchor 行是本工作流最近一次交付锚点；上下文被重置后，据此用 git log <哈希>..HEAD 与 git status 核对期间发生了什么；
+   - 保存恢复胶囊（checkpoint_save）时可省略 basis.git_commit，服务端会取最近一次交付锚点并把胶囊关联到那次交付。`
 
 type AuthCredentials struct {
 	Username  string    `json:"username"`
@@ -76,27 +93,26 @@ type SecuritySettings struct {
 }
 
 type GlobalAppSettings struct {
-	HostName                    string             `json:"hostName"`
-	DefaultTimeoutSeconds       int                `json:"defaultTimeoutSeconds"`
-	PromptWaitMinutes           int                `json:"promptWaitMinutes"`
-	MaxNoFeedbackChecks         int                `json:"maxNoFeedbackChecks"`
-	DefaultWaitCountdownMinutes int                `json:"defaultWaitCountdownMinutes"`
-	UserPresence                string             `json:"userPresence"`
-	UserMemory                  string             `json:"userMemory"`
-	ServerInstructions          string             `json:"serverInstructions"`
-	PhaseTemplate               []model.PhaseItem  `json:"phaseTemplate"`
-	Security                    SecuritySettings   `json:"security"`
-	FlowPrompts                 struct {
+	HostName                    string `json:"hostName"`
+	DefaultTimeoutSeconds       int    `json:"defaultTimeoutSeconds"`
+	PromptWaitMinutes           int    `json:"promptWaitMinutes"`
+	MaxNoFeedbackChecks         int    `json:"maxNoFeedbackChecks"`
+	DefaultWaitCountdownMinutes int    `json:"defaultWaitCountdownMinutes"`
+	// DefaultWaitCountdownSeconds 秒级默认挂起倒计时；-1 = 没设过，沿用分钟值。
+	DefaultWaitCountdownSeconds int `json:"defaultWaitCountdownSeconds"`
+	// 异步对话（#123）：智能体每发一条新消息，回复窗口加这么多分钟；<=0 按默认 5。
+	AsyncWindowAddMinutes int `json:"asyncWindowAddMinutes"`
+	// 异步对话：智能体每次用计时器最多连续等这么多分钟再回头读收件箱；<=0 按默认 10。
+	AsyncWaitSliceMinutes int               `json:"asyncWaitSliceMinutes"`
+	UserMemory            string            `json:"userMemory"`
+	ServerInstructions    string            `json:"serverInstructions"`
+	PhaseTemplate         []model.PhaseItem `json:"phaseTemplate"`
+	Security              SecuritySettings  `json:"security"`
+	FlowPrompts           struct {
 		Online struct {
 			WaitPollPrompt  string `json:"waitPollPrompt"`
 			ExhaustedPrompt string `json:"exhaustedPrompt"`
 		} `json:"online"`
-		Away struct {
-			ImmediatePrompt string `json:"immediatePrompt"`
-		} `json:"away"`
-		Autopilot struct {
-			ImmediatePrompt string `json:"immediatePrompt"`
-		} `json:"autopilot"`
 	} `json:"flowPrompts"`
 }
 
@@ -142,7 +158,7 @@ func (s *Store) GetGlobalAppSettingsWithDB(ctx context.Context, db *gorm.DB) (*G
 		PromptWaitMinutes:           2,
 		MaxNoFeedbackChecks:         24,
 		DefaultWaitCountdownMinutes: 2,
-		UserPresence:                "online",
+		DefaultWaitCountdownSeconds: -1,
 		ServerInstructions:          DefaultServerInstructions,
 		Security: SecuritySettings{
 			BruteForceProtection: true,
@@ -153,8 +169,6 @@ func (s *Store) GetGlobalAppSettingsWithDB(ctx context.Context, db *gorm.DB) (*G
 	}
 	appSettings.FlowPrompts.Online.WaitPollPrompt = "下一步操作：\n1. 调用 AwaitShell({ block_until_ms: {wait_ms} }) 等待 {wait_minutes} 分钟\n2. 等待结束后立即调用 continue_feedback_session({ workflow_id: \"{workflow_id}\" })\n3. 根据返回的 === 标记 === 判断下一步\n\n等待期间禁止：chat 正文输出、其他工具调用、阶段整理。\n禁止将本回执或 Agent 生成的文字当作用户反馈。\n所有沟通均通过 RelayMesh MCP 工具。"
 	appSettings.FlowPrompts.Online.ExhaustedPrompt = "用户反馈已超时。立即挂起当前任务并停止后续执行，进入会话结束与环境收尾规程：\n1. 终端与后台任务盘点清理（强制）：\n   - 检查 terminals 目录（.cursor/projects/.../terminals/*.txt），提取除 1.txt 外所有最近生成的数字文件名（文件名数字即 shell_id/task_id）；\n   - 对包含存活 pid 且无 exit_code 的未退出进程，使用 Shell 工具执行 kill -9 <pid> 显式终止；\n   - 无论其 status 为 running、succeeded 还是 failed，对所有识别出的最近数字任务 ID，必须显式调用 AwaitShell({ shell_id: \"<数字ID>\", block_until_ms: 0 }) 进行状态观测与 ACK 消费，彻底清空 Cursor Harness 未决队列；\n   - 确保后台异步任务挂起数严格归零，彻底杜绝轮次切换时延迟注入 Finished background tasks 系统通知；\n2. 临时产物与会话状态归档：\n   - 清理 .cursor/tmp/ 临时文件，仅保留必要证据\n   - 完成 git 阶段性提交，确保无文件滞留暂存区\n   - 更新会话文档状态为 paused 并记录恢复点\n3. 最终汇报：\n   - 总结执行进度、已完成/未完成事项与后续恢复建议\n   - 通过普通 chat 提交最终状态报告，结束本轮执行"
-	appSettings.FlowPrompts.Away.ImmediatePrompt = "【系统回执·人工暂离】用户已确认当前推进目标并主动暂离，请继续执行已授权范围内的工作。\n行为约束：\n- 按会话文档「当前任务」和「关键决策」已锁定的方向继续推进\n- 遇到非阻塞性问题记入会话文档「待用户拍板」，不阻塞进度\n- 不可逆动作：已授权的按计划执行，未授权的记录待确认并暂缓\n- 每完成一个逻辑单元执行增量验证（lint/type-check→build）\n- 阶段完成或遇到阻塞时，通过 interactive_feedback 提交阶段简报\n- 用户回来后按会话文档记录对齐进度"
-	appSettings.FlowPrompts.Autopilot.ImmediatePrompt = "【系统回执·外部编排】当前处于 autopilot 外部编排模式，由外部系统通过 Task API 驱动。\n行为约束：\n- 通过 report_progress(action: \"sync\") 同步 task segments\n- 通过 report_progress(action: \"report\") 汇报进度（kind: progress/stage/evidence/question/completion）\n- 通过 report_progress(action: \"check_feedback\") 检查外部反馈\n- 按 task segments 定义的范围执行，不越界\n- 不通过 interactive_feedback 向用户直接提问\n- 遇不可逆动作以 question 类型上报并等待\n- 遇 MCP 通信错误降级为 away 模式"
 
 	if len(settingsMap) > 0 {
 		bytes, err := json.Marshal(settingsMap)
@@ -171,9 +185,6 @@ func (s *Store) GetGlobalAppSettingsWithDB(ctx context.Context, db *gorm.DB) (*G
 	}
 	if appSettings.DefaultWaitCountdownMinutes < 0 {
 		appSettings.DefaultWaitCountdownMinutes = 2
-	}
-	if appSettings.UserPresence == "" {
-		appSettings.UserPresence = "online"
 	}
 	if appSettings.FlowPrompts.Online.WaitPollPrompt == "" {
 		appSettings.FlowPrompts.Online.WaitPollPrompt = "下一步操作：\n1. 调用 AwaitShell({ block_until_ms: {wait_ms} }) 等待 {wait_minutes} 分钟\n2. 等待结束后立即调用 continue_feedback_session({ workflow_id: \"{workflow_id}\" })\n3. 根据返回的 === 标记 === 判断下一步\n\n等待期间禁止：chat 正文输出、其他工具调用、阶段整理。\n禁止将本回执或 Agent 生成的文字当作用户反馈。\n所有沟通均通过 RelayMesh MCP 工具。"
@@ -200,6 +211,8 @@ func (s *Store) GetGlobalAppSettingsWithDB(ctx context.Context, db *gorm.DB) (*G
 
 // SaveSettings 保存全局配置至数据库
 func (s *Store) SaveSettings(ctx context.Context, settings map[string]any) error {
+	// 旧版前端缓存（或导入的旧备份）可能还带着五段式阶段模板与旧版服务指引：落库前统一收敛。
+	settings, _ = migrateSettingsPhases(settings)
 	bytes, err := json.Marshal(settings)
 	if err != nil {
 		return err
@@ -268,4 +281,3 @@ func (s *Store) ResetAuthCredentials(ctx context.Context) error {
 		return tx.Where("key = ?", AuthCredentialsKey).Delete(&model.SystemSetting{}).Error
 	})
 }
-

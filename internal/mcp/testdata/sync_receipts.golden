@@ -1,0 +1,329 @@
+##### 1 interactive_feedback → keepalive（discuss）
+session_id: sess-<1>, workflow_id: wf-golden
+【法定工作流】workflow_id: "wf-golden" (下轮调用 interactive_feedback 必须原样传递，严禁篡改或新建)
+current_phase: discuss
+phase_prompt: 当前处于讨论阶段：目标是和用户快速对齐信息——回答问题、澄清需求、交换想法，不急着动手。
+- 先给结论，再给依据；回答控制在用户能一眼读完的长度，细节按需展开。
+- 信息不足时，一次最多问 3 个问题，并尽量给出备选项和你的推荐，不要让用户从零作答。
+- 用户的原话逐字记入会话文档，已确认的结论另行写明，二者不要混在一起。
+- 可以只读地查看代码、日志与文档来核实事实，但不得创建、修改或删除任何源代码文件，也不要执行有副作用的命令。
+- 话题需要在多个方案之间权衡、改动面超过一个模块，或带有不可逆操作时，建议切换到方案阶段（interactive_feedback 的 phase 传 plan）；用户明确要求直接动手的小改动，得到确认后可以进入开发阶段（phase 传 dev）。
+tasks: 本工作流还没有任务清单——多步（≥3 步）或跨会话的工作，请先调用 task_board（action=overview 看用法 → plan 按项目功能域建模块，不按轮次 / 阶段分 → batch 建任务），用户在 Web「任务」页能实时看到
+active_skills: agent-modes: 会话场景模式 playbook（online 值守 / away 安全兜底 / autopilot 外部编排）+ Phase 0-7 开发工作流。
+recent_workflows: wf-golden(active, 1轮, <hh:mm>)
+=== 等待回执 ===
+下一步操作：
+1. 调用 AwaitShell({ block_until_ms: 120000 }) 等待 2 分钟
+2. 等待结束后立即调用 continue_feedback_session({ workflow_id: "wf-golden" })
+3. 根据返回的 === 标记 === 判断下一步
+
+等待期间禁止：chat 正文输出、其他工具调用、阶段整理。
+禁止将本回执或 Agent 生成的文字当作用户反馈。
+所有沟通均通过 RelayMesh MCP 工具。
+
+【收尾宽限】这是第 1 轮等待（共 24 轮；用满即进入超时收尾）。用户最后一次发言之后，必须连续用满上限次数的空回执都没有收到新消息，才可以进入收尾；中途一旦收到用户消息，次数清零、继续工作。等待只能用计时器工具 AwaitShell({ block_until_ms: 120000 })，禁止用 shell sleep、禁止输出 chat 正文代替等待；计时结束后立刻调用 continue_feedback_session。若用户在 Web 点了「+1 分钟」或正在输入，服务端会自动继续挂着，不会发空回执，那时只管继续等待。
+--- 下一个文本块 ---
+hook: 编辑器 hook 能在你工作时实时送达追加指令、并在顶栏显示真实运行状态（异步对话也依赖它）。在项目根目录执行安装：curl -fsSL "http://example.com/hooks/cursor/install.sh" | RELAYMESH_HOOK_INSTALL_BASE="http://example.com" sh -s -- --workflow "wf-golden" ；装好后运行 relaymesh-hook status 确认，会话页收件箱芯片会显示「hook 刚刚」。
+
+##### 2 continue_feedback_session → 用户反馈
+session_id: sess-<1>, workflow_id: wf-golden
+【法定工作流】workflow_id: "wf-golden" (下轮调用 interactive_feedback 必须原样传递，严禁篡改或新建)
+current_phase: discuss
+phase_prompt: 当前处于讨论阶段：目标是和用户快速对齐信息——回答问题、澄清需求、交换想法，不急着动手。
+- 先给结论，再给依据；回答控制在用户能一眼读完的长度，细节按需展开。
+- 信息不足时，一次最多问 3 个问题，并尽量给出备选项和你的推荐，不要让用户从零作答。
+- 用户的原话逐字记入会话文档，已确认的结论另行写明，二者不要混在一起。
+- 可以只读地查看代码、日志与文档来核实事实，但不得创建、修改或删除任何源代码文件，也不要执行有副作用的命令。
+- 话题需要在多个方案之间权衡、改动面超过一个模块，或带有不可逆操作时，建议切换到方案阶段（interactive_feedback 的 phase 传 plan）；用户明确要求直接动手的小改动，得到确认后可以进入开发阶段（phase 传 dev）。
+tasks: 本工作流还没有任务清单——多步（≥3 步）或跨会话的工作，请先调用 task_board（action=overview 看用法 → plan 按项目功能域建模块，不按轮次 / 阶段分 → batch 建任务），用户在 Web「任务」页能实时看到
+active_skills: agent-modes: 会话场景模式 playbook（online 值守 / away 安全兜底 / autopilot 外部编排）+ Phase 0-7 开发工作流。
+recent_workflows: wf-golden(idle, 1轮, <hh:mm>)
+=== 用户反馈 ===
+确认，继续。
+
+##### 3 workflow_context set_phase → plan
+{
+  "available_phases": [
+    "discuss",
+    "plan",
+    "dev"
+  ],
+  "current_phase": "plan",
+  "phase_prompt": "当前处于方案阶段：目标是基于核实过的事实，产出一份可以让用户拍板的方案。\n- 先核实现状再下结论：阅读相关代码、配置、文档与既有决策，引用具体的文件或函数作为依据；没有核实过的内容明确标为假设。\n- 方案固定包含：目标与非目标 / 事实依据 / 备选方案（至少 2 个，写清取舍）/ 数据流、状态、不变量与边界异常 / 影响面（所有引用方）/ 风险与回滚 / 验收标准 / 需要用户确认的不可逆事项。\n- 决策逐项通过 feedback 与用户确认，锁定后写入会话文档「关键决策」；用户没有拍板的事项记入「待用户拍板」，不要自行假定。\n- 本阶段只读：不得创建、修改或删除任何源代码文件，也不要执行有副作用的命令；确实需要改动才能验证时，先向用户说明并获得二次确认。\n- 用户确认方案后，切换到开发阶段（phase 传 dev）再动手。",
+  "status": "updated",
+  "workflow_id": "wf-golden"
+}
+
+##### 4 workflow_context task_create
+{
+  "status": "created",
+  "task": {
+    "conclusion": "",
+    "created_at": "<ts>",
+    "created_by": "agent",
+    "description": "用来让回执头里出现任务清单概况。",
+    "kind": "improve",
+    "labels": [],
+    "percent": 0,
+    "progress": "刚开始",
+    "ref": "#1",
+    "refs": [],
+    "state": "todo",
+    "task_id": 1,
+    "title": "金样任务",
+    "updated_at": "<ts>"
+  }
+}
+
+##### 5 workflow_context checkpoint_save
+{
+  "basis": {},
+  "created_at": "<ts>",
+  "revision": 1,
+  "status": "saved",
+  "workflow_id": "wf-golden"
+}
+
+##### 6 interactive_feedback → keepalive（commit + dev）
+session_id: sess-<2>, workflow_id: wf-golden
+【法定工作流】workflow_id: "wf-golden" (下轮调用 interactive_feedback 必须原样传递，严禁篡改或新建)
+current_phase: dev
+phase_prompt: 当前处于开发阶段：按已确认的方案实施，并在本阶段内完成验证、收尾与汇报。
+- 改前先读相关代码与文档，沿用项目惯用模式；改动接口、类型或 import 时检查所有引用方。
+- 小步增量：每完成一个逻辑单元立即做增量验证（lint / type-check → build → 相关测试），不要全部写完再统一修；每 200-500 行改动或一个独立模块完成就提交，汇报时附带 commit 参数（git log -1 --format='%h %s' 的单行输出）。
+- 完成标准 = 功能 + 类型 + 编译 + 测试 + 文档与配置同步 + 开发记录，每一条都要有可验证的证据（命令输出、截图或日志），没有证据不算完成。
+- 部署、数据库迁移、删除业务数据、git push 远端、发布 release / tag 等不可逆操作，必须先通过 feedback 获得用户的二次确认。
+- 发现方案与现实不符（接口不存在、假设不成立、影响面超出方案）时先停下记录：能在方案范围内解决就解决，否则向用户汇报并回到方案阶段，不要悄悄改变方案。
+- 收尾：盘点后台进程与未提交变更，清理临时文件，更新会话文档，再通过 feedback 提交最终汇报（修改内容、原因、影响范围、验证证据、后续建议）。用户的下一条反馈如果是新话题，先把阶段切回讨论。
+checkpoint: rev=1 obj=金样：覆盖回执头里的检查点行 stage=s1/in_progress next=继续第二轮
+tasks: 待办 1（共 1，已完成 0） ｜ 最近 #1 待办 0% 金样任务 ｜ 还没有模块规划：先 task_board action=plan 按项目功能域建 3–8 个模块，再 batch 归类 ｜ task_board 查看 / 成批更新
+anchor: abc1234 "golden: 交付锚点" @ <time>（<age>）
+active_skills: agent-modes: 会话场景模式 playbook（online 值守 / away 安全兜底 / autopilot 外部编排）+ Phase 0-7 开发工作流。
+recent_workflows: wf-golden(active, 2轮, <hh:mm>)
+anchor_saved: abc1234
+=== 等待回执 ===
+下一步操作：
+1. 调用 AwaitShell({ block_until_ms: 120000 }) 等待 2 分钟
+2. 等待结束后立即调用 continue_feedback_session({ workflow_id: "wf-golden" })
+3. 根据返回的 === 标记 === 判断下一步
+
+等待期间禁止：chat 正文输出、其他工具调用、阶段整理。
+禁止将本回执或 Agent 生成的文字当作用户反馈。
+所有沟通均通过 RelayMesh MCP 工具。
+
+【收尾宽限】这是第 1 轮等待（共 24 轮；用满即进入超时收尾）。用户最后一次发言之后，必须连续用满上限次数的空回执都没有收到新消息，才可以进入收尾；中途一旦收到用户消息，次数清零、继续工作。等待只能用计时器工具 AwaitShell({ block_until_ms: 120000 })，禁止用 shell sleep、禁止输出 chat 正文代替等待；计时结束后立刻调用 continue_feedback_session。若用户在 Web 点了「+1 分钟」或正在输入，服务端会自动继续挂着，不会发空回执，那时只管继续等待。
+
+##### 7 continue_feedback_session → 用户反馈（带锚点行）
+session_id: sess-<2>, workflow_id: wf-golden
+【法定工作流】workflow_id: "wf-golden" (下轮调用 interactive_feedback 必须原样传递，严禁篡改或新建)
+current_phase: dev
+phase_prompt: 当前处于开发阶段：按已确认的方案实施，并在本阶段内完成验证、收尾与汇报。
+- 改前先读相关代码与文档，沿用项目惯用模式；改动接口、类型或 import 时检查所有引用方。
+- 小步增量：每完成一个逻辑单元立即做增量验证（lint / type-check → build → 相关测试），不要全部写完再统一修；每 200-500 行改动或一个独立模块完成就提交，汇报时附带 commit 参数（git log -1 --format='%h %s' 的单行输出）。
+- 完成标准 = 功能 + 类型 + 编译 + 测试 + 文档与配置同步 + 开发记录，每一条都要有可验证的证据（命令输出、截图或日志），没有证据不算完成。
+- 部署、数据库迁移、删除业务数据、git push 远端、发布 release / tag 等不可逆操作，必须先通过 feedback 获得用户的二次确认。
+- 发现方案与现实不符（接口不存在、假设不成立、影响面超出方案）时先停下记录：能在方案范围内解决就解决，否则向用户汇报并回到方案阶段，不要悄悄改变方案。
+- 收尾：盘点后台进程与未提交变更，清理临时文件，更新会话文档，再通过 feedback 提交最终汇报（修改内容、原因、影响范围、验证证据、后续建议）。用户的下一条反馈如果是新话题，先把阶段切回讨论。
+checkpoint: rev=1 obj=金样：覆盖回执头里的检查点行 stage=s1/in_progress next=继续第二轮
+tasks: 待办 1（共 1，已完成 0） ｜ 最近 #1 待办 0% 金样任务 ｜ 还没有模块规划：先 task_board action=plan 按项目功能域建 3–8 个模块，再 batch 归类 ｜ task_board 查看 / 成批更新
+anchor: abc1234 "golden: 交付锚点" @ <time>（<age>）
+active_skills: agent-modes: 会话场景模式 playbook（online 值守 / away 安全兜底 / autopilot 外部编排）+ Phase 0-7 开发工作流。
+recent_workflows: wf-golden(idle, 2轮, <hh:mm>)
+=== 用户反馈 ===
+收到，下一步。
+
+##### 8 interactive_feedback → 秒回
+session_id: sess-<3>, workflow_id: wf-golden
+【法定工作流】workflow_id: "wf-golden" (下轮调用 interactive_feedback 必须原样传递，严禁篡改或新建)
+current_phase: dev
+phase_prompt: 当前处于开发阶段：按已确认的方案实施，并在本阶段内完成验证、收尾与汇报。
+- 改前先读相关代码与文档，沿用项目惯用模式；改动接口、类型或 import 时检查所有引用方。
+- 小步增量：每完成一个逻辑单元立即做增量验证（lint / type-check → build → 相关测试），不要全部写完再统一修；每 200-500 行改动或一个独立模块完成就提交，汇报时附带 commit 参数（git log -1 --format='%h %s' 的单行输出）。
+- 完成标准 = 功能 + 类型 + 编译 + 测试 + 文档与配置同步 + 开发记录，每一条都要有可验证的证据（命令输出、截图或日志），没有证据不算完成。
+- 部署、数据库迁移、删除业务数据、git push 远端、发布 release / tag 等不可逆操作，必须先通过 feedback 获得用户的二次确认。
+- 发现方案与现实不符（接口不存在、假设不成立、影响面超出方案）时先停下记录：能在方案范围内解决就解决，否则向用户汇报并回到方案阶段，不要悄悄改变方案。
+- 收尾：盘点后台进程与未提交变更，清理临时文件，更新会话文档，再通过 feedback 提交最终汇报（修改内容、原因、影响范围、验证证据、后续建议）。用户的下一条反馈如果是新话题，先把阶段切回讨论。
+checkpoint: rev=1 obj=金样：覆盖回执头里的检查点行 stage=s1/in_progress next=继续第二轮
+tasks: 待办 1（共 1，已完成 0） ｜ 最近 #1 待办 0% 金样任务 ｜ 还没有模块规划：先 task_board action=plan 按项目功能域建 3–8 个模块，再 batch 归类 ｜ task_board 查看 / 成批更新
+anchor: abc1234 "golden: 交付锚点" @ <time>（<age>）
+active_skills: agent-modes: 会话场景模式 playbook（online 值守 / away 安全兜底 / autopilot 外部编排）+ Phase 0-7 开发工作流。
+recent_workflows: wf-golden(idle, 3轮, <hh:mm>)
+=== 用户反馈 ===
+提前追加的一句话。
+
+##### 9 list_sessions group_by=workflow
+{
+  "total": 1,
+  "workflows": [
+    {
+      "has_pending": false,
+      "host_name": "hosts",
+      "last_active_at": "<ts>",
+      "latest_status": "completed",
+      "project_directory": "/tmp/golden-proj",
+      "session_count": 3,
+      "title": "golden 第三轮",
+      "workflow_id": "wf-golden"
+    }
+  ]
+}
+
+##### 10 list_sessions workflow_id
+{
+  "sessions": [
+    {
+      "consumed_at": "<ts>",
+      "consumed_by_ai": true,
+      "created_at": "<ts>",
+      "host_name": "hosts",
+      "project_directory": "/tmp/golden-proj",
+      "responded_at": "<ts>",
+      "session_id": "sess-<3>",
+      "status": "completed",
+      "title": "golden 第三轮",
+      "updated_at": "<ts>",
+      "workflow_id": "wf-golden"
+    },
+    {
+      "consumed_at": "<ts>",
+      "consumed_by_ai": true,
+      "created_at": "<ts>",
+      "git_commit": "abc1234",
+      "git_subject": "golden: 交付锚点",
+      "host_name": "hosts",
+      "project_directory": "/tmp/golden-proj",
+      "responded_at": "<ts>",
+      "session_id": "sess-<2>",
+      "status": "completed",
+      "title": "golden 第二轮",
+      "updated_at": "<ts>",
+      "workflow_id": "wf-golden"
+    },
+    {
+      "consumed_at": "<ts>",
+      "consumed_by_ai": true,
+      "created_at": "<ts>",
+      "host_name": "hosts",
+      "project_directory": "/tmp/golden-proj",
+      "responded_at": "<ts>",
+      "session_id": "sess-<1>",
+      "status": "completed",
+      "title": "golden 第一轮",
+      "updated_at": "<ts>",
+      "workflow_id": "wf-golden"
+    }
+  ],
+  "total": 3
+}
+
+##### 11 get_session_history
+{
+  "history": [
+    {
+      "consumed_at": "<ts>",
+      "consumed_by_ai": true,
+      "created_at": "<ts>",
+      "host_name": "hosts",
+      "project_directory": "/tmp/golden-proj",
+      "responded_at": "<ts>",
+      "response_text": "提前追加的一句话。",
+      "session_id": "sess-<3>",
+      "status": "completed",
+      "summary": "第三轮汇报：看到你提前说的话了。",
+      "title": "golden 第三轮",
+      "updated_at": "<ts>",
+      "user_messages": [],
+      "workflow_id": "wf-golden"
+    },
+    {
+      "consumed_at": "<ts>",
+      "consumed_by_ai": true,
+      "created_at": "<ts>",
+      "git_commit": "abc1234",
+      "git_subject": "golden: 交付锚点",
+      "host_name": "hosts",
+      "project_directory": "/tmp/golden-proj",
+      "responded_at": "<ts>",
+      "response_text": "收到，下一步。",
+      "session_id": "sess-<2>",
+      "status": "completed",
+      "summary": "第二轮汇报：已提交。",
+      "title": "golden 第二轮",
+      "updated_at": "<ts>",
+      "user_messages": [],
+      "workflow_id": "wf-golden"
+    },
+    {
+      "consumed_at": "<ts>",
+      "consumed_by_ai": true,
+      "created_at": "<ts>",
+      "host_name": "hosts",
+      "project_directory": "/tmp/golden-proj",
+      "responded_at": "<ts>",
+      "response_text": "确认，继续。",
+      "session_id": "sess-<1>",
+      "status": "completed",
+      "summary": "第一轮汇报：先看看现状。",
+      "title": "golden 第一轮",
+      "updated_at": "<ts>",
+      "user_messages": [],
+      "workflow_id": "wf-golden"
+    }
+  ],
+  "rounds": 3,
+  "workflow_id": "wf-golden"
+}
+
+##### 12 workflow_context list_workflows
+{
+  "count": 1,
+  "workflows": [
+    {
+      "current_phase": "dev",
+      "last_active": "<ts>",
+      "latest_checkpoint_at": "<ts>",
+      "latest_checkpoint_revision": 1,
+      "latest_checkpoint_status": "submitted",
+      "session_count": 3,
+      "workflow_id": "wf-golden"
+    }
+  ]
+}
+
+##### 13 workflow_context inbox（没有新消息）
+inbox: workflow_id=wf-golden，没有新的追加。
+
+##### 14 task_board overview
+{
+  "counts": {
+    "doing": 0,
+    "done": 0,
+    "open": 1,
+    "review": 0,
+    "shelved": 0,
+    "todo": 1,
+    "total": 1
+  },
+  "empty": false,
+  "focus": [],
+  "hint": "还没有模块规划，任务都在「未归类」。先想清楚怎么分：模块 = 项目稳定的功能域 / 子系统（外加发布运维、质量测试、文档待办这类横切工作线），不按轮次、日期、会话、阶段分；然后用 action=plan 建 3–8 个模块，再用 batch 把任务成批归类，例如 ops=[{\"task_ids\":[1,2,3],\"module\":\"终端\"}]",
+  "modules": [],
+  "todo_preview": [
+    {
+      "description": "用来让回执头里出现任务清单概况。",
+      "kind": "improve",
+      "percent": 0,
+      "progress": "刚开始",
+      "ref": "#1",
+      "state": "todo",
+      "title": "金样任务",
+      "updated_at": "<ts>"
+    }
+  ],
+  "unassigned": {
+    "open": 1,
+    "total": 1
+  },
+  "workflow_id": "wf-golden"
+}
+

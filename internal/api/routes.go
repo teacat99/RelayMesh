@@ -9,17 +9,22 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/teacat99/RelayMesh/v2/internal/chat"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/mcp"
-	"github.com/teacat99/RelayMesh/internal/model"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/mcp"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/ntfy"
+	"github.com/teacat99/RelayMesh/v2/internal/oauth"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/terminal"
 )
 
 type APIHandler struct {
@@ -27,6 +32,13 @@ type APIHandler struct {
 	store     *store.Store
 	mcpServer *mcp.Server
 	broker    *SSEBroker
+	terminal  *terminal.Hub // 可能为 nil（终端功能整体不可用）；令牌管理里涉及终端的操作依赖它
+	oauth     *oauth.Service
+
+	ntfy      *ntfy.Notifier // ntfy 推送器（见 ntfy.go）；NewServer 里接线
+	ntfyGuard ntfyGuard      // 测试推送的节流
+
+	chat *chat.Service // 统一消息流（conversations.go）；懒创建
 }
 
 func NewAPIHandler(cfg *config.Config, st *store.Store, mcpServer *mcp.Server, broker *SSEBroker) *APIHandler {
@@ -56,6 +68,7 @@ func (h *APIHandler) GetCurrentSession(c *gin.Context) {
 	}
 	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
 	projectSessionImages(session)
+	h.attachWorkflowAggregates(c.Request.Context(), []*model.FeedbackSession{session})
 	c.JSON(http.StatusOK, gin.H{"has_session": true, "session": session})
 }
 
@@ -64,11 +77,18 @@ func (h *APIHandler) ListSessions(c *gin.Context) {
 	status := c.Query("status")
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
 	brief := c.Query("brief") == "true" || c.Query("compact") == "true"
+	// cover_workflows=true（只对 brief 生效）：在最新 limit 行之外，再给每个工作流补上它最新的一行（#173）。
+	// 侧栏与归档库要的是「每个工作流一条」，只拿最新 N 行会话时，话痨的工作流会把较早的工作流挤出窗口。
+	coverWorkflows := brief && c.Query("cover_workflows") == "true"
 
 	var sessions []model.FeedbackSession
 	var err error
 	if brief {
-		sessions, err = h.store.ListFeedbackSessionsBrief(c.Request.Context(), projectDir, status, limit)
+		if coverWorkflows {
+			sessions, err = h.store.ListFeedbackSessionsBriefCovering(c.Request.Context(), projectDir, status, limit)
+		} else {
+			sessions, err = h.store.ListFeedbackSessionsBrief(c.Request.Context(), projectDir, status, limit)
+		}
 	} else {
 		sessions, err = h.store.ListFeedbackSessions(c.Request.Context(), projectDir, status, limit)
 	}
@@ -87,6 +107,12 @@ func (h *APIHandler) ListSessions(c *gin.Context) {
 			projectSessionImages(&sessions[i])
 		}
 	}
+	// 工作流级聚合（侧栏会话卡的会话级状态用，#159）：按工作流去重后一次查出，不逐行查询
+	rows := make([]*model.FeedbackSession, len(sessions))
+	for i := range sessions {
+		rows[i] = &sessions[i]
+	}
+	h.attachWorkflowAggregates(c.Request.Context(), rows)
 	c.JSON(http.StatusOK, gin.H{"sessions": sessions})
 }
 
@@ -106,6 +132,12 @@ func (h *APIHandler) GetWorkflowSessions(c *gin.Context) {
 		return
 	}
 
+	// ?light=1[&tail=N]：较早的行只带首行预览（见 sessions_light.go）；不带参数时与以前逐字节一致。
+	// 先轻量化再装饰：轻量行没有图片，省掉对它们的图片投影。
+	if wantsLight(c) {
+		lightenSessions(sessions, lightTailParam(c))
+	}
+
 	for i := range sessions {
 		if active, startedAt, timeoutSec := h.mcpServer.GetActiveWaiterInfo(sessions[i].ID); active {
 			sessions[i].IsMCPActive = true
@@ -116,7 +148,13 @@ func (h *APIHandler) GetWorkflowSessions(c *gin.Context) {
 		projectSessionImages(&sessions[i])
 	}
 
-	c.JSON(http.StatusOK, gin.H{"sessions": sessions})
+	// 整表是读多写少的大响应：带弱 ETag，If-None-Match 命中就回 304（见 conditional.go）。
+	body, etag, err := marshalSessionsPayload(sessions)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	respondConditionalJSON(c, etag, body)
 }
 
 func (h *APIHandler) GetSession(c *gin.Context) {
@@ -248,24 +286,37 @@ func (h *APIHandler) GetSessionImage(c *gin.Context) {
 		return
 	}
 
-	session, err := h.store.GetFeedbackSession(c.Request.Context(), id)
-	if err != nil || session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
-		return
+	var images []model.SessionImage
+	queuedID, isInbox := store.ParseInboxSessionID(id)
+	if isInbox {
+		// 追加指令收件箱里的图片：inbox-<编号> 当作「会话编号」寻址，供智能体按直链取图。
+		q, err := h.store.GetQueuedFeedback(c.Request.Context(), queuedID)
+		if err != nil || q == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "inbox message not found"})
+			return
+		}
+		images = q.Images
+	} else {
+		session, err := h.store.GetFeedbackSession(c.Request.Context(), id)
+		if err != nil || session == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+			return
+		}
+		images = session.Images
 	}
 
-	if idx >= len(session.Images) {
+	if idx >= len(images) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "image index out of range"})
 		return
 	}
 
-	img := session.Images[idx]
+	img := images[idx]
 	raw := strings.TrimSpace(img.Data)
 	if commaIdx := strings.Index(raw, ","); commaIdx != -1 {
 		raw = raw[commaIdx+1:]
 	}
 
-	if raw == "" {
+	if raw == "" && !isInbox {
 		// 如果内存中或极端情况下已被置空，重新从数据库直接读取该行原始记录以保证绝对可用
 		var rawSession model.FeedbackSession
 		if err := h.store.DB().WithContext(c.Request.Context()).Where("id = ?", id).First(&rawSession).Error; err == nil {
@@ -335,9 +386,35 @@ func (h *APIHandler) GetSessionImage(c *gin.Context) {
 }
 
 type SubmitFeedbackRequest struct {
-	ResponseText string              `json:"response_text"`
-	UserMessages []string            `json:"user_messages"`
-	Images       []model.SessionImage `json:"images"`
+	ResponseText string          `json:"response_text"`
+	UserMessages []string        `json:"user_messages"`
+	Images       []feedbackImage `json:"images"`
+	// DraftWorkflowID 是草稿图片所在的工作流（图片带 draft_key 时使用）；缺省取会话所属的工作流。
+	DraftWorkflowID string `json:"draft_workflow_id"`
+}
+
+// fillImageHashes 给没有哈希的图片补上内容哈希（不可变访问 URL 与 ETag 依赖它）。
+func fillImageHashes(images []model.SessionImage) {
+	for i := range images {
+		img := &images[i]
+		if img.Hash == "" && img.Data != "" {
+			raw := strings.TrimSpace(img.Data)
+			if commaIdx := strings.Index(raw, ","); commaIdx != -1 {
+				raw = raw[commaIdx+1:]
+			}
+			sum := sha256.Sum256([]byte(raw))
+			img.Hash = hex.EncodeToString(sum[:8])
+		}
+	}
+}
+
+func hasDraftKeys(images []feedbackImage) bool {
+	for _, img := range images {
+		if img.DraftKey != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *APIHandler) SubmitFeedback(c *gin.Context) {
@@ -348,28 +425,34 @@ func (h *APIHandler) SubmitFeedback(c *gin.Context) {
 		return
 	}
 
-	for i := range req.Images {
-		img := &req.Images[i]
-		if img.Hash == "" && img.Data != "" {
-			raw := strings.TrimSpace(img.Data)
-			if commaIdx := strings.Index(raw, ","); commaIdx != -1 {
-				raw = raw[commaIdx+1:]
+	// 草稿图片已经在粘贴时上传过：这里直接复用服务器上的那份，不再让浏览器重传一遍
+	draftWorkflowID := strings.TrimSpace(req.DraftWorkflowID)
+	if draftWorkflowID == "" && hasDraftKeys(req.Images) {
+		if sess, err := h.store.GetFeedbackSession(c.Request.Context(), id); err == nil && sess != nil {
+			draftWorkflowID = sess.WorkflowID
+			if draftWorkflowID == "" {
+				draftWorkflowID = sess.ID
 			}
-			sum := sha256.Sum256([]byte(raw))
-			img.Hash = hex.EncodeToString(sum[:8])
 		}
 	}
+	images, consumed, err := h.resolveFeedbackImages(c.Request.Context(), draftWorkflowID, req.Images)
+	if err != nil {
+		writeResolveError(c, err)
+		return
+	}
+	fillImageHashes(images)
 
 	session, err := h.store.SubmitFeedback(c.Request.Context(), store.SubmitFeedbackInput{
 		SessionID:    id,
 		ResponseText: req.ResponseText,
 		UserMessages: req.UserMessages,
-		Images:       req.Images,
+		Images:       images,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	h.releaseConsumedDraftImages(c.Request.Context(), draftWorkflowID, consumed)
 
 	// 先取快照再唤醒 MCP 等待者：等待者协程会把同一个 session 对象标记为已消费，
 	// 先复制既避免数据竞争，也保证「已完成」事件先于「已消费」事件发出（后者 updated_at 更新，前端据此去重）。
@@ -395,65 +478,105 @@ func (h *APIHandler) RevokeSession(c *gin.Context) {
 func (h *APIHandler) AppendWorkflowFeedback(c *gin.Context) {
 	workflowID := c.Param("workflow_id")
 	var req struct {
-		ResponseText string              `json:"response_text"`
-		UserMessages []string            `json:"user_messages"`
-		Images       []model.SessionImage `json:"images"`
-		HostName     string              `json:"host_name"`
-		ProjectDir   string              `json:"project_directory"`
+		ResponseText string          `json:"response_text"`
+		UserMessages []string        `json:"user_messages"`
+		Images       []feedbackImage `json:"images"`
+		HostName     string          `json:"host_name"`
+		ProjectDir   string          `json:"project_directory"`
+		// DraftWorkflowID 是草稿图片所在的工作流（图片带 draft_key 时使用）；缺省取路径里的工作流。
+		DraftWorkflowID string `json:"draft_workflow_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	for i := range req.Images {
-		img := &req.Images[i]
-		if img.Hash == "" && img.Data != "" {
-			raw := strings.TrimSpace(img.Data)
-			if commaIdx := strings.Index(raw, ","); commaIdx != -1 {
-				raw = raw[commaIdx+1:]
-			}
-			sum := sha256.Sum256([]byte(raw))
-			img.Hash = hex.EncodeToString(sum[:8])
-		}
+	// 草稿图片已经在粘贴时上传过：直接复用服务器上的那份，不再让浏览器重传
+	draftWorkflowID := strings.TrimSpace(req.DraftWorkflowID)
+	if draftWorkflowID == "" {
+		draftWorkflowID = workflowID
 	}
-
-	// 1. 优先检查该 workflow 是否有处于 pending 或 未被 AI 消费的 completed 会话
-	latestSess, err := h.store.GetLatestWorkflowFeedbackSession(c.Request.Context(), workflowID)
-	if err == nil && latestSess != nil && (latestSess.Status == "pending" || (latestSess.Status == "completed" && !latestSess.ConsumedByAI)) {
-		sess, err := h.store.SubmitFeedback(c.Request.Context(), store.SubmitFeedbackInput{
-			SessionID:    latestSess.ID,
-			ResponseText: req.ResponseText,
-			UserMessages: req.UserMessages,
-			Images:       req.Images,
-		})
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		payload := h.sessionPayload(sess)
-		h.mcpServer.NotifySessionCompleted(sess)
-		h.broker.Broadcast("session_completed", payload)
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "type": "session", "session": payload})
+	images, consumed, err := h.resolveFeedbackImages(c.Request.Context(), draftWorkflowID, req.Images)
+	if err != nil {
+		writeResolveError(c, err)
 		return
 	}
+	fillImageHashes(images)
 
-	// 2. 若当前无未消费会话，存入 QueuedFeedback 等待 AI 下次发起交互直接秒回
-	q, err := h.store.QueueWorkflowFeedback(c.Request.Context(), store.QueueFeedbackInput{
-		WorkflowID:       workflowID,
-		HostName:         req.HostName,
-		ProjectDirectory: req.ProjectDir,
-		ResponseText:     req.ResponseText,
-		UserMessages:     req.UserMessages,
-		Images:           req.Images,
+	d, err := h.deliverWorkflowFeedback(c.Request.Context(), workflowID, workflowFeedbackInput{
+		ResponseText: req.ResponseText,
+		UserMessages: req.UserMessages,
+		Images:       images,
+		HostName:     req.HostName,
+		ProjectDir:   req.ProjectDir,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	h.releaseConsumedDraftImages(c.Request.Context(), draftWorkflowID, consumed)
 
-	h.broker.Broadcast("queued_feedback_updated", q)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "type": "queued", "queued": q})
+	if d.Session != nil {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "type": "session", "session": d.Session})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "type": "queued", "queued": d.Queued})
+}
+
+// workflowFeedbackInput 是要交给工作流里智能体的内容。
+type workflowFeedbackInput struct {
+	ResponseText string
+	UserMessages []string
+	Images       []model.SessionImage
+	HostName     string
+	ProjectDir   string
+	// ForceInbox 为真时不并入最近一轮会话，一律存进收件箱排队（聊天里选择「作为追加」）。
+	ForceInbox bool
+}
+
+// workflowDelivery 是一次交付的结果：Session 不为空表示内容成了某一轮会话的回复；否则 Queued 是收件箱里排队的那一条。
+type workflowDelivery struct {
+	Session *model.FeedbackSession
+	Queued  *model.QueuedFeedback
+}
+
+// deliverWorkflowFeedback 把追加的内容交给工作流里的智能体，并广播：
+//  1. 最近一轮会话还在等回复（pending），或已有回复但智能体还没读走（completed 且未被消费）→ 内容就是这一轮的回复；
+//  2. 否则存进收件箱排队，智能体下次发起交互 / 读取收件箱时带走。
+//
+// 草稿图片的释放由调用方处理（只有它知道图片来自哪里）。「追加指令」「在任务上发起改进需求」都走这里，投递规则只有这一份。
+func (h *APIHandler) deliverWorkflowFeedback(ctx context.Context, workflowID string, in workflowFeedbackInput) (*workflowDelivery, error) {
+	latestSess, err := h.store.GetLatestWorkflowFeedbackSession(ctx, workflowID)
+	if !in.ForceInbox && err == nil && latestSess != nil && (latestSess.Status == "pending" || (latestSess.Status == "completed" && !latestSess.ConsumedByAI)) {
+		sess, err := h.store.SubmitFeedback(ctx, store.SubmitFeedbackInput{
+			SessionID:    latestSess.ID,
+			ResponseText: in.ResponseText,
+			UserMessages: in.UserMessages,
+			Images:       in.Images,
+		})
+		if err != nil {
+			return nil, err
+		}
+		payload := h.sessionPayload(sess)
+		h.mcpServer.NotifySessionCompleted(sess)
+		h.broker.Broadcast("session_completed", payload)
+		return &workflowDelivery{Session: payload}, nil
+	}
+
+	q, err := h.store.QueueWorkflowFeedback(ctx, store.QueueFeedbackInput{
+		WorkflowID:       workflowID,
+		HostName:         in.HostName,
+		ProjectDirectory: in.ProjectDir,
+		ResponseText:     in.ResponseText,
+		UserMessages:     in.UserMessages,
+		Images:           in.Images,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// 事件里只带标识与状态，不带图片：收到事件的页面会自己重新拉取收件箱
+	h.broker.Broadcast("queued_feedback_updated", gin.H{"workflow_id": workflowID, "id": q.ID, "state": q.State})
+	return &workflowDelivery{Queued: q}, nil
 }
 
 func (h *APIHandler) ListQueuedFeedbacks(c *gin.Context) {
@@ -480,7 +603,7 @@ func (h *APIHandler) RevokeQueuedFeedback(c *gin.Context) {
 		return
 	}
 
-	h.broker.Broadcast("queued_feedback_revoked", gin.H{"id": id, "workflow_id": res.WorkflowID})
+	h.broker.Broadcast("queued_feedback_revoked", gin.H{"id": id, "workflow_id": res.WorkflowID, "delivered": res.Delivered})
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "revoked": res})
 }
 
@@ -523,6 +646,10 @@ func (h *APIHandler) DeleteWorkflowDraft(c *gin.Context) {
 	if err := h.store.DeleteWorkflowDraft(c.Request.Context(), workflowID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	// 草稿整体销毁：它的图片也一并删除
+	if _, err := h.store.DeleteAllDraftImages(c.Request.Context(), workflowID); err != nil {
+		log.Printf("[draft-images] 删除草稿图片失败（workflow=%s）: %v", workflowID, err)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
@@ -681,15 +808,26 @@ func (h *APIHandler) UpdateSessionMaxChecks(c *gin.Context) {
 
 func (h *APIHandler) UpdateSessionWaitCountdown(c *gin.Context) {
 	id := c.Param("id")
+	// countdown_seconds（秒级，#121）优先；只给 countdown_minutes 时走旧路径，行为不变。
 	var req struct {
-		CountdownMinutes int `json:"countdown_minutes"`
+		CountdownMinutes *int `json:"countdown_minutes"`
+		CountdownSeconds *int `json:"countdown_seconds"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.CountdownMinutes < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid countdown_minutes"})
+	if err := c.ShouldBindJSON(&req); err != nil ||
+		(req.CountdownMinutes == nil && req.CountdownSeconds == nil) ||
+		(req.CountdownMinutes != nil && *req.CountdownMinutes < 0) ||
+		(req.CountdownSeconds != nil && (*req.CountdownSeconds < 0 || *req.CountdownSeconds > 3600)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid countdown_seconds / countdown_minutes"})
 		return
 	}
 
-	session, err := h.store.UpdateSessionWaitCountdown(c.Request.Context(), id, req.CountdownMinutes)
+	var session *model.FeedbackSession
+	var err error
+	if req.CountdownSeconds != nil {
+		session, err = h.store.UpdateSessionWaitCountdownSeconds(c.Request.Context(), id, *req.CountdownSeconds)
+	} else {
+		session, err = h.store.UpdateSessionWaitCountdown(c.Request.Context(), id, *req.CountdownMinutes)
+	}
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -706,31 +844,29 @@ func (h *APIHandler) UpdateSessionWaitCountdown(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
 }
 
-func (h *APIHandler) UpdateSessionUserPresence(c *gin.Context) {
+// SessionPresence 是 Web 告诉服务端「用户还在」的入口（#121 收尾宽限）：
+// kind=plus 点「+1 分钟」；kind=typing 是输入时的心跳。只对正挂着的长轮询生效，没有就返回 active=false。
+func (h *APIHandler) SessionPresence(c *gin.Context) {
 	id := c.Param("id")
 	var req struct {
-		UserPresence string `json:"user_presence"`
+		Kind string `json:"kind"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.UserPresence == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user_presence is required"})
+	if err := c.ShouldBindJSON(&req); err != nil || (req.Kind != "plus" && req.Kind != "typing") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kind 必须是 plus 或 typing"})
 		return
 	}
-
-	session, err := h.store.UpdateSessionUserPresence(c.Request.Context(), id, req.UserPresence)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if h.mcpServer == nil {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "active": false})
 		return
 	}
-
-	if active, startedAt, timeoutSec := h.mcpServer.GetActiveWaiterInfo(session.ID); active {
-		session.IsMCPActive = true
-		session.MCPActiveAt = startedAt
-		session.MCPTimeoutSec = timeoutSec
+	var total int
+	var ok bool
+	if req.Kind == "plus" {
+		total, ok = h.mcpServer.PresencePlus(id)
+	} else {
+		total, ok = h.mcpServer.PresenceTyping(id)
 	}
-	session.LastKeepaliveAt = h.mcpServer.GetLastKeepaliveTime(session.ID)
-
-	h.broadcastSession("session_updated", session)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "session": session})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "active": ok, "hold_seconds": total})
 }
 
 type TranscribeAudioRequest struct {
@@ -922,11 +1058,11 @@ func (h *APIHandler) ListTasks(c *gin.Context) {
 }
 
 type CreateTaskRequest struct {
-	TaskID     string           `json:"task_id,omitempty"`
-	Title      string           `json:"title,omitempty"`
-	Mode       string           `json:"mode,omitempty"`
-	Stages     model.TaskStages `json:"stages,omitempty"`
-	Segments   []model.Segment  `json:"segments,omitempty"`
+	TaskID     string            `json:"task_id,omitempty"`
+	Title      string            `json:"title,omitempty"`
+	Mode       string            `json:"mode,omitempty"`
+	Stages     model.TaskStages  `json:"stages,omitempty"`
+	Segments   []model.Segment   `json:"segments,omitempty"`
 	WaitPolicy *model.WaitPolicy `json:"wait_policy,omitempty"`
 }
 
@@ -938,9 +1074,9 @@ func (h *APIHandler) CreateTask(c *gin.Context) {
 	}
 
 	policy := model.WaitPolicy{
-		AfterMinutes:       2,
+		AfterMinutes:        2,
 		MaxNoFeedbackChecks: 24,
-		WaitInstruction:    "暂无新反馈；请等待 {minutes} 分钟后再次调用。",
+		WaitInstruction:     "暂无新反馈；请等待 {minutes} 分钟后再次调用。",
 	}
 	if req.WaitPolicy != nil {
 		if req.WaitPolicy.AfterMinutes > 0 {
@@ -1207,7 +1343,7 @@ func (h *APIHandler) ListCredentials(c *gin.Context) {
 		_, _ = h.store.EnsureEnvMCPCredential(c.Request.Context(), h.cfg.MCPToken)
 	}
 
-	creds, err := h.store.ListCredentials(c.Request.Context())
+	creds, err := h.store.ListVisibleCredentials(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -1224,21 +1360,59 @@ func (h *APIHandler) ListCredentials(c *gin.Context) {
 		IsEnv       bool              `json:"is_env"`
 		CreatedAt   string            `json:"created_at"`
 		UpdatedAt   string            `json:"updated_at"`
+
+		// 档位由权限推导（relaymesh / execmesh / hybrid / none），不落库。
+		Tier string `json:"tier"`
+		// 是否是能力 URL 凭据（令牌是网址的一部分，只在 /mcp/c/<令牌> 上有效）。
+		Capability bool `json:"capability"`
+		// 令牌强度不足的原因（空串表示合格）；带终端权限的令牌必须合格。
+		TokenWeakness string `json:"token_weakness"`
+
+		TerminalHosts   []string             `json:"terminal_hosts"`
+		TerminalModeCap string               `json:"terminal_mode_cap"`
+		TerminalLimits  model.TerminalLimits `json:"terminal_limits"`
+		ExpiresAt       *string              `json:"expires_at"`
+		AllowedCIDRs    []string             `json:"allowed_cidrs"`
+		LastUsedAt      *string              `json:"last_used_at"`
+		LastUsedIP      string               `json:"last_used_ip"`
 	}
-	var result []maskedCred
+	formatTime := func(t *time.Time) *string {
+		if t == nil {
+			return nil
+		}
+		s := t.Format(time.RFC3339)
+		return &s
+	}
+	nonNil := func(l model.StringList) []string {
+		if l == nil {
+			return []string{}
+		}
+		return []string(l)
+	}
+	result := make([]maskedCred, 0, len(creds))
 	for _, cr := range creds {
 		isEnv := (h.cfg.MCPToken != "" && cr.Token == h.cfg.MCPToken) || cr.Name == "MCP Token (环境变量)"
 		result = append(result, maskedCred{
-			ID:          cr.ID,
-			Name:        cr.Name,
-			Token:       store.MaskToken(cr.Token),
-			HostName:    cr.HostName,
-			IsActive:    cr.IsActive,
-			Permissions: cr.Permissions,
-			Note:        cr.Note,
-			IsEnv:       isEnv,
-			CreatedAt:   cr.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:   cr.UpdatedAt.Format(time.RFC3339),
+			ID:              cr.ID,
+			Name:            cr.Name,
+			Token:           store.MaskToken(cr.Token),
+			HostName:        cr.HostName,
+			IsActive:        cr.IsActive,
+			Permissions:     cr.Permissions,
+			Note:            cr.Note,
+			IsEnv:           isEnv,
+			CreatedAt:       cr.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:       cr.UpdatedAt.Format(time.RFC3339),
+			Tier:            mcp.TierForPermissions(cr.Permissions),
+			Capability:      cr.Capability,
+			TokenWeakness:   config.MCPTokenWeakness(cr.Token),
+			TerminalHosts:   nonNil(cr.TerminalHosts),
+			TerminalModeCap: cr.TerminalModeCap,
+			TerminalLimits:  cr.TerminalLimits,
+			ExpiresAt:       formatTime(cr.ExpiresAt),
+			AllowedCIDRs:    nonNil(cr.AllowedCIDRs),
+			LastUsedAt:      formatTime(cr.LastUsedAt),
+			LastUsedIP:      cr.LastUsedIP,
 		})
 	}
 
@@ -1257,6 +1431,10 @@ func (h *APIHandler) GetCredential(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
+	if cred.Hidden {
+		c.JSON(http.StatusNotFound, gin.H{"error": "credential not found"})
+		return
+	}
 	cred.Token = store.MaskToken(cred.Token)
 	c.JSON(http.StatusOK, gin.H{"credential": cred})
 }
@@ -1267,6 +1445,27 @@ func (h *APIHandler) CreateCredential(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
+	if req.Hidden || req.OAuthSource != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不能手动创建 OAuth 隐藏凭据"})
+		return
+	}
+
+	if carriesTerminal(&req) && !h.requireTerminalUnlock(c) {
+		return
+	}
+	// 一把新令牌直接带着「允许整个文件系统」：同样要求刚刚重新输入过密码（见 requireFreshTerminalUnlock）。
+	wholeFS := model.EffectiveWholeFS(req.Permissions, req.TerminalLimits)
+	if wholeFS && !h.requireFreshTerminalUnlock(c, "新建令牌「"+req.Name+"」：开启「允许整个文件系统」") {
+		return
+	}
+
+	// 新建带终端能力的令牌且没有显式给出主机名单（字段缺省 / null，而不是明确的 []）时，
+	// 按各主机的「对新模型默认授予」预填名单。预填的是明确的机器码条目，之后与手工配置的没有区别。
+	if (req.Permissions.Terminal || req.Permissions.TerminalFiles) && !req.Capability && req.TerminalHosts == nil {
+		if codes, err := h.store.DefaultAllowHostCodes(c.Request.Context()); err == nil && len(codes) > 0 {
+			req.TerminalHosts = model.StringList(codes)
+		}
+	}
 
 	if err := h.store.CreateCredential(c.Request.Context(), &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1274,8 +1473,16 @@ func (h *APIHandler) CreateCredential(c *gin.Context) {
 	}
 
 	fullToken := req.Token
+	if wholeFS {
+		h.terminal.FilesScopeChanged(c.GetString("auth_subject"), c.ClientIP(), terminal.ResultOK, wholeFSLabel(&req)+"：开启「允许整个文件系统」（新建）")
+	}
 	h.broker.Broadcast("credentials_updated", gin.H{"id": req.ID, "action": "create"})
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "credential": req, "token": fullToken})
+	resp := gin.H{"status": "ok", "credential": req, "token": fullToken}
+	if req.Capability {
+		// 完整网址只在创建时给出一次（列表里的令牌是打码的）。
+		resp["capability_path"] = capabilityPathFor(fullToken)
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func (h *APIHandler) UpdateCredential(c *gin.Context) {
@@ -1295,6 +1502,20 @@ func (h *APIHandler) UpdateCredential(c *gin.Context) {
 	delete(body, "token")
 	delete(body, "created_at")
 
+	// 授予或放宽终端能力（等同于在远端机器上执行命令）需要二次解锁；停用 / 清空主机授权等收紧操作只需登录。
+	before, err := h.store.GetCredentialIfVisible(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "credential not found"})
+		return
+	}
+	if credentialUpdateNeedsUnlock(before, body) && !h.requireTerminalUnlock(c) {
+		return
+	}
+	// 让令牌从「没有」变成「有」整个文件系统的访问：还要求刚刚重新输入过密码；关闭、收窄不需要（刹车只需登录）。
+	if credentialUpdateGrantsWholeFS(before, body) && !h.requireFreshTerminalUnlock(c, wholeFSSubject(before, uint(id))) {
+		return
+	}
+
 	// permissions 需特殊处理：从 map 转为 Permissions struct
 	if permsRaw, ok := body["permissions"]; ok {
 		permsBytes, err := json.Marshal(permsRaw)
@@ -1313,6 +1534,15 @@ func (h *APIHandler) UpdateCredential(c *gin.Context) {
 	}
 	cred.Token = store.MaskToken(cred.Token)
 
+	// 「允许整个文件系统」是否生效发生了变化（开启或关闭）：写审计，开启与关闭都留痕。
+	if was, now := wholeFSEffective(before), model.EffectiveWholeFS(cred.Permissions, cred.TerminalLimits); was != now {
+		action := "关闭"
+		if now {
+			action = "开启"
+		}
+		h.terminal.FilesScopeChanged(c.GetString("auth_subject"), c.ClientIP(), terminal.ResultOK, wholeFSLabel(cred)+"："+action+"「允许整个文件系统」")
+	}
+	h.terminal.MCPCredentialChanged(cred.ID, "updated")
 	h.broker.Broadcast("credentials_updated", gin.H{"id": cred.ID, "action": "update"})
 	h.broker.Broadcast("session_updated", gin.H{"action": "credentials_updated"})
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "credential": cred})
@@ -1326,9 +1556,9 @@ func (h *APIHandler) DeleteCredential(c *gin.Context) {
 		return
 	}
 
-	targetCred, err := h.store.GetCredential(c.Request.Context(), uint(id))
+	targetCred, err := h.store.GetCredentialIfVisible(c.Request.Context(), uint(id))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		c.JSON(http.StatusNotFound, gin.H{"error": "credential not found"})
 		return
 	}
 	if (h.cfg.MCPToken != "" && targetCred.Token == h.cfg.MCPToken) || targetCred.Name == "MCP Token (环境变量)" {
@@ -1341,6 +1571,7 @@ func (h *APIHandler) DeleteCredential(c *gin.Context) {
 		return
 	}
 
+	h.terminal.MCPCredentialChanged(uint(id), "deleted")
 	h.broker.Broadcast("credentials_updated", gin.H{"id": id, "action": "delete"})
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
@@ -1353,13 +1584,18 @@ func (h *APIHandler) RegenerateCredentialToken(c *gin.Context) {
 		return
 	}
 
-	targetCred, err := h.store.GetCredential(c.Request.Context(), uint(id))
+	targetCred, err := h.store.GetCredentialIfVisible(c.Request.Context(), uint(id))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		c.JSON(http.StatusNotFound, gin.H{"error": "credential not found"})
 		return
 	}
 	if (h.cfg.MCPToken != "" && targetCred.Token == h.cfg.MCPToken) || targetCred.Name == "MCP Token (环境变量)" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "该凭据由环境变量 RELAYMESH_MCP_TOKEN 驱动，不可重新生成 Token"})
+		return
+	}
+
+	// 重新生成会把新的完整令牌返回给调用者；带终端能力的令牌，取走它等同于取走一把执行命令的钥匙。
+	if carriesTerminal(targetCred) && !h.requireTerminalUnlock(c) {
 		return
 	}
 
@@ -1370,8 +1606,18 @@ func (h *APIHandler) RegenerateCredentialToken(c *gin.Context) {
 	}
 	cred.Token = store.MaskToken(cred.Token)
 
+	h.terminal.MCPCredentialChanged(cred.ID, "regenerated")
 	h.broker.Broadcast("credentials_updated", gin.H{"id": cred.ID, "action": "regenerate"})
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "credential": cred, "token": fullToken})
+	resp := gin.H{"status": "ok", "credential": cred, "token": fullToken}
+	if cred.Capability {
+		resp["capability_path"] = capabilityPathFor(fullToken)
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// capabilityPathFor 返回能力 URL 凭据的网址路径（不含协议与主机，由前端按当前访问地址补全）。
+func capabilityPathFor(token string) string {
+	return "/mcp/c/" + token
 }
 
 func (h *APIHandler) GetWorkflowPhase(c *gin.Context) {
@@ -1431,7 +1677,7 @@ func (h *APIHandler) SetWorkflowPhase(c *gin.Context) {
 		}
 	}
 
-	h.broker.Broadcast("phase_changed", gin.H{"workflow_id": workflowID, "phase": body.PhaseID})
+	h.broker.Broadcast("phase_changed", gin.H{"workflow_id": workflowID, "phase": model.CanonicalPhaseID(body.PhaseID)})
 
 	currentPhase, phases, _ := h.store.GetWorkflowPhaseWithDefaults(c.Request.Context(), workflowID)
 	c.JSON(http.StatusOK, gin.H{
@@ -1439,25 +1685,6 @@ func (h *APIHandler) SetWorkflowPhase(c *gin.Context) {
 		"current_phase_id": currentPhase,
 		"phases":           phases,
 	})
-}
-
-// autoResetToHumanPreferred resets current_phase_id to the human's preferred phase after feedback is consumed by AI,
-// ONLY when the workflow is currently in the "done" phase.
-func (h *APIHandler) autoResetToHumanPreferred(ctx context.Context, workflowID string) {
-	currentPhase, _, err := h.store.GetWorkflowPhaseWithDefaults(ctx, workflowID)
-	if err != nil || currentPhase != "done" {
-		return
-	}
-	preferred, err := h.store.GetHumanPreferredPhase(ctx, workflowID)
-	if err != nil || preferred == "" {
-		preferred = "assess"
-	}
-	if currentPhase == preferred {
-		return
-	}
-	if e := h.store.SetWorkflowPhase(ctx, workflowID, preferred, false); e == nil {
-		h.broker.Broadcast("phase_changed", gin.H{"workflow_id": workflowID, "phase": preferred})
-	}
 }
 
 func (h *APIHandler) GetWorkflowSheet(c *gin.Context) {
@@ -1515,4 +1742,3 @@ func (h *APIHandler) SaveWorkflowSheet(c *gin.Context) {
 	h.broker.Broadcast("workflow_sheet_updated", gin.H{"workflow_id": workflowID})
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "workflow_id": workflowID})
 }
-

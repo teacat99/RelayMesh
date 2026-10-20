@@ -1,0 +1,344 @@
+{
+  "cases": [
+    {
+      "name": "名字不重复：用目录名",
+      "items": [
+        {
+          "id": 1,
+          "host_name": "devhost",
+          "project_directory": "/home/user/RelayMesh"
+        },
+        {
+          "id": 2,
+          "host_name": "devhost",
+          "project_directory": "/home/user/Other"
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "RelayMesh",
+          "degraded": false
+        },
+        "2": {
+          "text": "Other",
+          "degraded": false
+        }
+      }
+    },
+    {
+      "name": "改名优先，前后空白被去掉",
+      "items": [
+        {
+          "id": 1,
+          "host_name": "h",
+          "project_directory": "/a/b",
+          "name": "  前端助手 "
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "前端助手",
+          "degraded": false
+        }
+      }
+    },
+    {
+      "name": "只有空白的改名等于没改",
+      "items": [
+        {
+          "id": 1,
+          "host_name": "h",
+          "project_directory": "/a/b",
+          "name": "   "
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "b",
+          "degraded": false
+        }
+      }
+    },
+    {
+      "name": "重名：所有重名项降级成 主机:完整路径，没重名的不动",
+      "items": [
+        {
+          "id": 1,
+          "host_name": "devhost",
+          "project_directory": "/home/user/app"
+        },
+        {
+          "id": 2,
+          "host_name": "laptop",
+          "project_directory": "/Users/me/app"
+        },
+        {
+          "id": 3,
+          "host_name": "devhost",
+          "project_directory": "/home/user/other"
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "devhost:/home/user/app",
+          "degraded": true
+        },
+        "2": {
+          "text": "laptop:/Users/me/app",
+          "degraded": true
+        },
+        "3": {
+          "text": "other",
+          "degraded": false
+        }
+      }
+    },
+    {
+      "name": "重名比较不分大小写，改名也参与比较",
+      "items": [
+        {
+          "id": 1,
+          "host_name": "h",
+          "project_directory": "/x/App"
+        },
+        {
+          "id": 2,
+          "host_name": "h",
+          "project_directory": "/y/zzz",
+          "name": "app"
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "h:/x/App",
+          "degraded": true
+        },
+        "2": {
+          "text": "h:/y/zzz",
+          "degraded": true
+        }
+      }
+    },
+    {
+      "name": "同主机同路径的两个凭据：补上编号才分得开",
+      "items": [
+        {
+          "id": 7,
+          "host_name": "h",
+          "project_directory": "/x/app"
+        },
+        {
+          "id": 9,
+          "host_name": "h",
+          "project_directory": "/x/app"
+        }
+      ],
+      "want": {
+        "7": {
+          "text": "h:/x/app #7",
+          "degraded": true
+        },
+        "9": {
+          "text": "h:/x/app #9",
+          "degraded": true
+        }
+      }
+    },
+    {
+      "name": "路径末尾的斜杠不影响重名与降级",
+      "items": [
+        {
+          "id": 1,
+          "host_name": "h",
+          "project_directory": "/a/app/"
+        },
+        {
+          "id": 2,
+          "host_name": "h",
+          "project_directory": "/a/app"
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "h:/a/app #1",
+          "degraded": true
+        },
+        "2": {
+          "text": "h:/a/app #2",
+          "degraded": true
+        }
+      }
+    },
+    {
+      "name": "没有目录也没有主机：未知项目",
+      "items": [
+        {
+          "id": 1
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "未知项目",
+          "degraded": false
+        }
+      }
+    },
+    {
+      "name": "两个未知项目：靠主机区分",
+      "items": [
+        {
+          "id": 1
+        },
+        {
+          "id": 2,
+          "host_name": "h"
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "未知项目",
+          "degraded": true
+        },
+        "2": {
+          "text": "h:未知项目",
+          "degraded": true
+        }
+      }
+    },
+    {
+      "name": "没有主机名的重名：只显示完整路径",
+      "items": [
+        {
+          "id": 1,
+          "project_directory": "/a/app"
+        },
+        {
+          "id": 2,
+          "project_directory": "/b/app"
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "/a/app",
+          "degraded": true
+        },
+        "2": {
+          "text": "/b/app",
+          "degraded": true
+        }
+      }
+    },
+    {
+      "name": "Windows 路径与反斜杠结尾",
+      "items": [
+        {
+          "id": 1,
+          "host_name": "w1",
+          "project_directory": "C:\\Users\\me\\code\\app\\"
+        },
+        {
+          "id": 2,
+          "host_name": "w1",
+          "project_directory": "D:\\work\\app"
+        },
+        {
+          "id": 3,
+          "host_name": "w1",
+          "project_directory": "D:\\work\\tool"
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "w1:C:\\Users\\me\\code\\app",
+          "degraded": true
+        },
+        "2": {
+          "text": "w1:D:\\work\\app",
+          "degraded": true
+        },
+        "3": {
+          "text": "tool",
+          "degraded": false
+        }
+      }
+    },
+    {
+      "name": "根目录取不到目录名",
+      "items": [
+        {
+          "id": 1,
+          "host_name": "h",
+          "project_directory": "/"
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "未知项目",
+          "degraded": false
+        }
+      }
+    },
+    {
+      "name": "两个身份改成同一个名字，另一个保持目录名",
+      "items": [
+        {
+          "id": 1,
+          "host_name": "h1",
+          "project_directory": "/a/one",
+          "name": "前端"
+        },
+        {
+          "id": 2,
+          "host_name": "h2",
+          "project_directory": "/b/two",
+          "name": "前端"
+        },
+        {
+          "id": 3,
+          "host_name": "h1",
+          "project_directory": "/c/three"
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "h1:/a/one",
+          "degraded": true
+        },
+        "2": {
+          "text": "h2:/b/two",
+          "degraded": true
+        },
+        "3": {
+          "text": "three",
+          "degraded": false
+        }
+      }
+    },
+    {
+      "name": "目录名里有空格与中文",
+      "items": [
+        {
+          "id": 1,
+          "host_name": "h",
+          "project_directory": "/home/我/我的 项目"
+        },
+        {
+          "id": 2,
+          "host_name": "h",
+          "project_directory": "/home/你/我的 项目"
+        }
+      ],
+      "want": {
+        "1": {
+          "text": "h:/home/我/我的 项目",
+          "degraded": true
+        },
+        "2": {
+          "text": "h:/home/你/我的 项目",
+          "degraded": true
+        }
+      }
+    }
+  ],
+  "comment": "身份显示名的前后端共用对照表：Go（internal/agentstate 的 TestLabelsGolden）与前端（src/lib/identity.test.ts）读同一个文件，任何一边改了算法而另一边没改，测试就会失败。"
+}
