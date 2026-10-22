@@ -1,136 +1,9 @@
-import { ref, computed } from 'vue'
+import { ref, computed, onScopeDispose, type Ref } from 'vue'
+import { computeSessionTimer, type SessionTimerRaw, type SessionTimerResult } from '../lib/sessionTimer'
 
-export interface SessionTimerRaw {
-  status?: string
-  is_mcp_active?: boolean
-  mcp_active_at?: string
-  wait_countdown_minutes?: number
-  last_keepalive_at?: string
-  created_at?: string
-  updated_at?: string
-  consumed_by_ai?: boolean
-  consumed_at?: string
-}
-
-export interface SessionTimerResult {
-  text: string
-  prefix: string
-  isCountdown: boolean
-}
-
-export function formatTimerDuration(seconds: number): string {
-  if (seconds < 0) seconds = 0
-  const ONE_DAY = 86400
-  const ONE_HOUR = 3600
-
-  if (seconds >= ONE_DAY) {
-    const days = Math.floor(seconds / ONE_DAY)
-    const remainSec = seconds % ONE_DAY
-    const hours = Math.floor(remainSec / ONE_HOUR)
-    const mins = Math.floor((remainSec % ONE_HOUR) / 60)
-    return `${days}d·${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`
-  }
-
-  if (seconds >= ONE_HOUR) {
-    const hours = Math.floor(seconds / ONE_HOUR)
-    const mins = Math.floor((seconds % ONE_HOUR) / 60)
-    const secs = seconds % 60
-    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-  }
-
-  const mins = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-}
-
-/**
- * 纯函数计算给定会话与时间戳下的展示信息（供 SidebarItemCard 等高频列表渲染使用）
- */
-export function computeSessionTimer(
-  session: SessionTimerRaw | null | undefined,
-  now: number,
-  fallbackTargetMinutes = 2
-): SessionTimerResult {
-  if (!session) {
-    return { text: '00:00', prefix: '执行', isCountdown: false }
-  }
-
-  const isPending = session.status === 'pending'
-  const isMcpActive = !!session.is_mcp_active
-
-  // 1. 若会话处于 pending 交互中
-  if (isPending) {
-    if (isMcpActive) {
-      // 1.1 MCP 客户端长轮询活跃挂起
-      const mcpStart = session.mcp_active_at ? new Date(session.mcp_active_at).getTime() : now
-      const elapsed = Math.max(0, Math.floor((now - mcpStart) / 1000))
-      const targetMin = session.wait_countdown_minutes !== undefined && session.wait_countdown_minutes !== null
-        ? session.wait_countdown_minutes
-        : fallbackTargetMinutes
-      const targetSec = targetMin * 60
-
-      if (targetSec > 0 && elapsed < targetSec) {
-        const remain = targetSec - elapsed
-        return {
-          text: formatTimerDuration(remain),
-          prefix: '剩余',
-          isCountdown: true
-        }
-      }
-      return {
-        text: formatTimerDuration(elapsed),
-        prefix: '剩余',
-        isCountdown: false
-      }
-    }
-
-    // 1.2 挂起超时或已归零，AI sleep 盲等人类输入
-    if (session.last_keepalive_at) {
-      const keepaliveStart = new Date(session.last_keepalive_at).getTime()
-      const keepaliveElapsed = Math.max(0, Math.floor((now - keepaliveStart) / 1000))
-      return {
-        text: formatTimerDuration(keepaliveElapsed),
-        prefix: '等待',
-        isCountdown: false
-      }
-    }
-
-    return {
-      text: '00:00',
-      prefix: '等待',
-      isCountdown: false
-    }
-  }
-
-  // 2. 会话已由用户回复提交 (completed)
-  if (session.status === 'completed') {
-    // 2.1 用户已提交但 AI 尚未提取消费 (待提取状态，AI 仍可能在本地 sleep 或轮询间歇)
-    if (!session.consumed_by_ai) {
-      const waitExtractStart = session.updated_at
-        ? new Date(session.updated_at).getTime()
-        : (session.created_at ? new Date(session.created_at).getTime() : now)
-      const elapsed = Math.max(0, Math.floor((now - waitExtractStart) / 1000))
-      return {
-        text: formatTimerDuration(elapsed),
-        prefix: '待提取',
-        isCountdown: false
-      }
-    }
-
-    // 2.2 AI 已确认收取消费，真正进入执行阶段
-    const execStartTime = session.consumed_at
-      ? new Date(session.consumed_at).getTime()
-      : (session.updated_at ? new Date(session.updated_at).getTime() : (session.created_at ? new Date(session.created_at).getTime() : now))
-    const execElapsed = Math.max(0, Math.floor((now - execStartTime) / 1000))
-    return {
-      text: formatTimerDuration(execElapsed),
-      prefix: '执行',
-      isCountdown: false
-    }
-  }
-
-  return { text: '', prefix: '', isCountdown: false }
-}
+// 计时的纯逻辑在 lib/sessionTimer.ts（可单元测试）；这里保留原来的导出，现有的引用不用改。
+export { computeSessionTimer, formatTimerDuration } from '../lib/sessionTimer'
+export type { SessionTimerRaw, SessionTimerResult } from '../lib/sessionTimer'
 
 /**
  * 响应式全局秒级时钟单例驱动
@@ -153,6 +26,23 @@ function stopSharedClock() {
     window.clearInterval(sharedTimerInterval)
     sharedTimerInterval = null
   }
+}
+
+/**
+ * 只要「现在几点」、不要计时结果的组件用这个（侧栏会话卡的状态推导）：返回共享的秒级时钟，所在的作用域结束（组件卸载）时自动退订。
+ *
+ * 不要把这个值当 prop 从父组件往一整批子组件里灌：prop 一变，子组件不管模板里用没用到它都会被整个重画一遍——
+ * 侧栏几十张卡每秒各重画一次就是这么来的（#215）。谁要用就自己在 computed 里读，并让 computed 的结果经 stableComputed
+ * （lib/stable.ts）过一遍，显示没变的卡就不会被唤醒；走字的那几个字放进自己的小组件（SidebarItemTimer）里单独重画。
+ */
+export function useSharedNow(): Readonly<Ref<number>> {
+  startSharedClock()
+  sharedRefSubscribers++
+  onScopeDispose(() => {
+    sharedRefSubscribers--
+    if (sharedRefSubscribers <= 0) stopSharedClock()
+  })
+  return sharedNow
 }
 
 export function useSessionTimer(

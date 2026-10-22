@@ -12,8 +12,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
 )
 
 const testStrongEnvSecret = "Xk9#mP2vL7qR4tWz8Yb3NcF6hJd5GsA1-env-supplied-by-operator"

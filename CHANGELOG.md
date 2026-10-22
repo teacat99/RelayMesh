@@ -4,7 +4,11 @@
 
 ## [Unreleased]
 
-即将发布的 **2.0.0**。这是一次大版本：RelayMesh 从「人与 AI 的交互中继」扩展成带远程终端、模型执行、异步协作与项目任务的协同平台，同时有若干需要留意的行为变化（见「变更」与「升级须知」）。
+## [2.0.0] - 2026-10-22
+
+**2.0.0** 是一次大版本：RelayMesh 从「人与 AI 的交互中继」扩展成带远程终端、模型执行、异步协作与项目任务的协同平台，同时有若干需要留意的行为变化（见「变更」与「升级须知」）。试用过 `2.0.0-rc.1` ～ `2.0.0-rc.3` 预览版的，本版包含它们的全部内容并带有后续的修复。
+
+> 从 1.x 升级：先读文末「升级须知」（备份数据目录、Go 模块路径加了 `/v2`、已装的 Agent 不会自动升级）。
 
 ### 新增
 
@@ -12,7 +16,7 @@
 - **让模型在授权主机上执行命令（ExecMesh 档，默认关闭）**：`terminal_targets` / `terminal_exec` / `terminal_run` 三个 MCP 工具，以及文件能力 `terminal_files`（默认关闭，只能访问你指定的目录）。MCP 令牌改为一机一令牌加档位（RelayMesh / ExecMesh / 自定义），配合「模型 × 主机」授权与审计记录。
 - **SSH 网关**：经一台已装 Agent 的主机，接入没有 Agent 的 SSH 主机（人和模型都能用）；登录凭据只保存在网关自己的存储里。
 - **Agent 自动升级与发布签名**：「提示」与「静默」两档（默认全关，同意发生在主机本机，服务端另有总闸）；静默升级前会用编进 Agent 的 ed25519 发布公钥验签，验不过就不安装。GitHub Release 里的 Agent 程序会在正式发布后补签，对应的 `.sig` 作为 Release 资产提供，自己托管 Agent 分发目录的人可以直接用；用法与限制见 [远程终端运维说明](https://github.com/teacat99/RelayMesh/blob/main/docs/terminal-operations.md)。
-- **异步协作**：异步对话模式（「发了就走」，授权档位取代阶段滑块）、确认项（`async_ask`）、追加指令收件箱、Agent 身份与状态、聊天与群聊（`chat` 工具）、ntfy 推送、统一通知闸；HTML Artifact、数据 KV、评论、反链与项目 ZIP。
+- **异步协作**：异步对话模式（「发了就走」，授权档位取代阶段滑块；不可逆操作改发 L2 确认卡，批准前绝不执行）、确认项（`async_ask`）、追加指令收件箱、Agent 身份与状态、聊天与群聊（`chat` 工具）、ntfy 推送、统一通知闸；HTML Artifact、数据 KV、评论、反链与项目 ZIP。
 - **项目、文档与任务**：项目结构与项目文档库（`project_docs`）、任务清单与共享任务板（`task_board`：指派、接取、交付、验收、退回，任务级权限）、正文引用链接统一（`#N`、`Q<N>`、`[[文档]]`、`sess-…`）、内置使用手册（`usage_guide`）、项目管理 Agent 经 MCP 运行预设（`preset_run`，默认全关）。
 - **非交互续聊与会话守护**：会话停摆检测与一键唤醒、终端预设与运行入口、自动续跑、网页「启用 Agent」、单次运行超时可配（上限 7 天）。
 - **新建会话「高级选项」**：工作流编号、首条指令、初始阶段、项目目录与主机；默认收起，不填时与以前完全一样。
@@ -174,7 +178,8 @@
 
 初始发布。
 
-[Unreleased]: https://github.com/teacat99/RelayMesh/compare/v1.6.3...HEAD
+[Unreleased]: https://github.com/teacat99/RelayMesh/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/teacat99/RelayMesh/compare/v1.6.3...v2.0.0
 [1.6.3]: https://github.com/teacat99/RelayMesh/compare/v1.6.2...v1.6.3
 [1.6.2]: https://github.com/teacat99/RelayMesh/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/teacat99/RelayMesh/compare/v1.6.0...v1.6.1

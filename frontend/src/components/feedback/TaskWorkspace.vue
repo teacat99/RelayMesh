@@ -7,11 +7,11 @@ import FeedbackMessageList from './FeedbackMessageList.vue'
 import FeedbackInputDock from './FeedbackInputDock.vue'
 import type { FeedbackSession, SessionImage } from '../../api/types'
 import Badge from '../ui/badge/Badge.vue'
+import MobileMenuButton from '../shell/MobileMenuButton.vue'
 import {
   Sparkles,
   LayoutDashboard,
   MessageSquareCode,
-  Menu,
   PanelLeftOpen,
   FolderGit2,
   Workflow,
@@ -91,7 +91,6 @@ const syntheticConversationRounds = computed<FeedbackSession[]>(() => {
     title: t.title || `工单规划 (Rev ${t.revision})`,
     summary: `【指挥端 Commander】初始化任务规划与执行阶段`,
     status: 'completed',
-    user_presence: 'autopilot',
     response_text: `🎖️ 【指挥端规划基准与目标拆解】\n\n${segmentsBody}${stagesSummary}`,
     user_messages: ['指挥端规划'],
     consumed_by_ai: true,
@@ -120,7 +119,6 @@ const syntheticConversationRounds = computed<FeedbackSession[]>(() => {
       title: `执行上报 #${rep.sequence} · ${kindLabel}`,
       summary: `⚙️ 【执行端 Executor】Seq #${rep.sequence} (${kindLabel})`,
       status: 'completed',
-      user_presence: 'autopilot',
       response_text: `${rep.body}${refText}`,
       user_messages: [kindLabel, `Seq #${rep.sequence}`],
       consumed_by_ai: rep.sequence <= t.acknowledged_report_sequence,
@@ -140,7 +138,6 @@ const syntheticConversationRounds = computed<FeedbackSession[]>(() => {
       title: `${isHuman ? '人工指令' : '指挥端指令'} #${fb.sequence}`,
       summary: `${authorTag} (Rev ${fb.task_revision})`,
       status: 'completed',
-      user_presence: isHuman ? 'online' : 'autopilot',
       response_text: fb.body,
       user_messages: [isHuman ? '人工输入' : '指挥端同步', `Fb #${fb.sequence}`],
       consumed_by_ai: true,
@@ -195,15 +192,11 @@ async function handleAckTask(seq: number) {
           <PanelLeftOpen class="w-4 h-4" />
         </button>
 
-        <!-- Mobile Sidebar Hamburger Toggle -->
-        <button
-          type="button"
-          class="p-1.5 -ml-1.5 rounded-sm text-muted-foreground hover:text-foreground md:hidden shrink-0"
+        <!-- Mobile Sidebar Hamburger Toggle（别处有会话在等答复时带数字角标） -->
+        <MobileMenuButton
+          class="p-1.5 -ml-1.5 rounded-sm text-muted-foreground hover:text-foreground md:hidden shrink-0 max-md:p-2"
           @click="emit('open-mobile-sidebar')"
-          title="展开会话与工单侧边栏"
-        >
-          <Menu class="w-4 h-4" />
-        </button>
+        />
 
         <div class="space-y-0.5 min-w-0">
           <div class="flex items-center gap-2 min-w-0">

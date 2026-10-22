@@ -88,7 +88,7 @@ macOS / Windows 要常驻：优先用 Docker Desktop 走路径 A（Windows 请�
 ```bash
 # A1 目录与 compose 文件（目录可以按用户要求换；已存在 .env 或 data/ 时先问用户）
 mkdir -p ~/relaymesh && cd ~/relaymesh
-curl -fsSLO https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/teacat99/RelayMesh/main/docker-compose.yml
 
 # A2 生成口令与令牌（命令里不会打印它们），写进 .env
 # 监听范围按第 1 节问题 2 的答案选：只有这台机器 / 公网域名 → 127.0.0.1；局域网（手机、同事）→ 0.0.0.0
@@ -98,8 +98,6 @@ RELAYMESH_WEB_USERNAME=admin
 RELAYMESH_WEB_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
 RELAYMESH_MCP_TOKEN=rmk_$(openssl rand -hex 24)
 RELAYMESH_PUBLISH_BIND=$BIND
-# 预览版：固定镜像版本（2.0 正式版发布后删掉这一行，镜像就会跟随 latest）
-RELAYMESH_TAG=2.0.0-rc.3
 EOF
 chmod 600 .env
 
@@ -120,7 +118,7 @@ docker compose ps        # 十几秒后 STATUS 应为 Up … (healthy)
 
 ```bash
 # B1 安装二进制（root 装到 /usr/local/bin/relaymesh；下载后会校验 SHA256，不匹配即中止）
-curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/install.sh | sh -s -- v2.0.0-rc.3
+curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/main/install.sh | sh
 relaymesh version        # 期望：RelayMesh v<版本号>
 ```
 
@@ -369,7 +367,7 @@ tar tzf relaymesh-data-<日期>.tgz > /dev/null && docker compose down && rm -rf
 
 ```bash
 # 升级：重新执行安装脚本替换二进制，然后重启（可固定版本：| sh -s -- v<版本号>）
-curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/install.sh | sh -s -- v2.0.0-rc.3
+curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/main/install.sh | sh
 systemctl restart relaymesh
 
 # 备份 / 恢复（实际数据在 /var/lib/private/relaymesh）

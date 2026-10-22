@@ -13,6 +13,7 @@ import {
   isStaleIncoming,
   mergeFetchedList,
   mergeSessionPatch,
+  shouldFollowNewPending,
 } from './sessionSync'
 
 function sess(id: string, updatedAt: string, extra: Partial<FeedbackSession> = {}): FeedbackSession {
@@ -97,6 +98,7 @@ describe('mergeSessionPatch', () => {
   it('空值指针字段在载荷里缺席即表示已清除', () => {
     const base = sess('a', T1, {
       consumed_at: T1,
+      responded_at: T1,
       deadline_at: T1,
       mcp_active_at: T1,
       mcp_timeout_seconds: 300,
@@ -105,7 +107,7 @@ describe('mergeSessionPatch', () => {
     })
     const merged = mergeSessionPatch(base, sess('a', T2, { is_mcp_active: false }))
     assert.equal(merged.is_mcp_active, false)
-    for (const key of ['consumed_at', 'deadline_at', 'mcp_active_at', 'mcp_timeout_seconds', 'last_keepalive_at'] as const) {
+    for (const key of ['consumed_at', 'responded_at', 'deadline_at', 'mcp_active_at', 'mcp_timeout_seconds', 'last_keepalive_at'] as const) {
       assert.equal(key in merged, false, `${key} 应被清除`)
     }
   })
@@ -114,6 +116,14 @@ describe('mergeSessionPatch', () => {
     const merged = mergeSessionPatch(sess('a', T1), sess('a', T2, { last_keepalive_at: T2, mcp_active_at: T2 }))
     assert.equal(merged.last_keepalive_at, T2)
     assert.equal(merged.mcp_active_at, T2)
+  })
+
+  it('缓存里的轻量行被完整会话载荷补丁之后就是完整行（载荷里没有 body_omitted = 已清除，#169）', () => {
+    const light = sess('a', T1, { summary: '# 标题', response_text: '回复', body_omitted: true })
+    const merged = mergeSessionPatch(light, sess('a', T2, { summary: '# 标题\n完整正文', response_text: '回复\n第二行', user_messages: ['快捷'] }))
+    assert.equal('body_omitted' in merged, false)
+    assert.equal(merged.summary, '# 标题\n完整正文')
+    assert.equal(merged.response_text, '回复\n第二行')
   })
 
   it('不修改入参', () => {
@@ -474,5 +484,67 @@ describe('isCacheFresh', () => {
   it('断线之后同步且在 TTL 内才新鲜', () => {
     assert.equal(isCacheFresh(2000, 1000, 2000 + ttl - 1, ttl), true)
     assert.equal(isCacheFresh(5, 0, 6, ttl), true)
+  })
+})
+
+// 选中项跟随新的待答复会话（#134）：输入区的模式看选中项，选中项停在上一轮时用户的回答会进收件箱
+describe('shouldFollowNewPending', () => {
+  const at = (n: number) => `2026-09-30T10:00:0${n}.000Z`
+  const r1 = sess('r1', at(1), { created_at: at(1) })
+  const r2 = sess('r2', at(2), { created_at: at(2) })
+  // 异步模式下发布的进度通知：不是轮次，没有回复框
+  const note = sess('n1', at(3), { created_at: at(3), kind: 'notice' })
+  const incoming = sess('r3', at(4), { created_at: at(4), status: 'pending' })
+  const list = [r1, r2, note, incoming]
+
+  it('什么都没选、或选中的就是它：跟', () => {
+    assert.equal(shouldFollowNewPending(null, incoming, list), true)
+    assert.equal(shouldFollowNewPending(undefined, incoming, []), true)
+    assert.equal(shouldFollowNewPending(incoming, incoming, list), true)
+  })
+
+  it('选中的在别的工作流：不跟——别的对话的提问不能把正在看的对话抢走', () => {
+    const other = sess('x1', at(2), { workflow_id: 'wf-2', created_at: at(2) })
+    assert.equal(shouldFollowNewPending(other, incoming, list), false)
+    // 到达的会话没有工作流：无从判断是同一段对话，保守地不动
+    const orphan = { session_id: 'o1', workflow_id: undefined }
+    assert.equal(shouldFollowNewPending(r2, orphan, list), false)
+  })
+
+  it('同一个工作流里停在最新一轮：跟到新轮次', () => {
+    assert.equal(shouldFollowNewPending(r2, incoming, list), true)
+    assert.equal(shouldFollowNewPending(r2, incoming, [r1, r2]), true)
+  })
+
+  it('停在最新一轮之后的进度通知上，也算在跟进对话', () => {
+    assert.equal(shouldFollowNewPending(note, incoming, list), true)
+  })
+
+  it('通知不算轮次：选中最新一轮、其后还有通知，照样跟（通知比它新不构成「翻到历史」）', () => {
+    const later = sess('n2', at(5), { created_at: at(5), kind: 'notice' })
+    assert.equal(shouldFollowNewPending(r2, incoming, [...list, later]), true)
+  })
+
+  it('停在更早的轮次（通知深链、任务里的「关联会话」）：不拽走', () => {
+    assert.equal(shouldFollowNewPending(r1, incoming, list), false)
+    assert.equal(shouldFollowNewPending(r1, incoming, [r1, r2, incoming]), false)
+  })
+
+  it('列表里的到达会话本身不参与比较（它比选中的新，但正是要跟的那条）', () => {
+    assert.equal(shouldFollowNewPending(r2, incoming, [r2, incoming]), true)
+  })
+
+  it('时间一样的两轮不算「更新」；时间解析不了时保守地当作在末尾', () => {
+    const twin = sess('twin', at(2), { created_at: at(2) })
+    assert.equal(shouldFollowNewPending(r2, incoming, [r2, twin]), true)
+    const broken = sess('b1', at(2), { created_at: 'not-a-time' })
+    assert.equal(shouldFollowNewPending(broken, incoming, [r1, r2]), true)
+    const weird = sess('w1', at(2), { created_at: '' })
+    assert.equal(shouldFollowNewPending(r1, incoming, [weird, r2]), false, '另一轮的时间解析不了就跳过它，其余照常比较')
+  })
+
+  it('工作流里本地只知道选中的这一条：跟', () => {
+    assert.equal(shouldFollowNewPending(r2, incoming, [r2]), true)
+    assert.equal(shouldFollowNewPending(r2, incoming, []), true)
   })
 })

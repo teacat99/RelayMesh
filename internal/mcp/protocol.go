@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/teacat99/RelayMesh/internal/model"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 // Raw JSON-RPC 2.0 structures
@@ -68,6 +68,13 @@ type CredentialContext struct {
 	BaseURL        string
 	Permissions    model.Permissions
 	Source         string // "db_credential", "env_token", "open_access", "local_stdio"
+
+	// 以下字段服务于终端类工具的审计与限额。
+	Credential *model.MCPCredential // 数据库凭据的快照；环境变量 / 开放访问 / stdio 来源为 nil
+	// ViaCapability 表示这次调用是经「能力 URL」（/mcp/c/<令牌>）进来的；仅用于审计线索。
+	ViaCapability bool
+	RemoteIP      string // 请求来源 IP（经可信代理解析）
+	UserAgent     string // 客户端自报的 User-Agent，只作展示线索，不作身份依据
 }
 
 type credCtxKeyType struct{}
@@ -134,12 +141,7 @@ func (s *Server) HandleRPCRequest(ctx context.Context, credCtx *CredentialContex
 
 	switch req.Method {
 	case "initialize":
-		instructions := store.DefaultServerInstructions
-		if s.store != nil {
-			if appSettings, err := s.store.GetGlobalAppSettings(ctx); err == nil && strings.TrimSpace(appSettings.ServerInstructions) != "" {
-				instructions = appSettings.ServerInstructions
-			}
-		}
+		instructions := s.InstructionsForPermissions(ctx, credCtx.Permissions)
 
 		resp.Result = map[string]any{
 			"protocolVersion": "2024-11-05",
@@ -160,6 +162,9 @@ func (s *Server) HandleRPCRequest(ctx context.Context, credCtx *CredentialContex
 
 	case "tools/list":
 		tools := GetToolDefinitionsForPermissions(credCtx.Permissions)
+		if !s.cfg.OAuthOff {
+			tools = AttachOAuthSecuritySchemes(tools)
+		}
 		resp.Result = map[string]any{
 			"tools": tools,
 		}
@@ -204,6 +209,10 @@ func (s *Server) HandleRPCRequest(ctx context.Context, credCtx *CredentialContex
 				},
 				IsError: isErr,
 			}
+		}
+		// 收尾：记下智能体的活动，并在有未读追加时补上 inbox: 提示（见 inbox.go）。
+		if tr, ok := resp.Result.(toolCallResult); ok {
+			resp.Result = s.decorateToolResult(ctx, credCtx, callParams.Name, callParams.Arguments, tr)
 		}
 
 	case "prompts/list":

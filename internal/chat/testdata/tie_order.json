@@ -1,0 +1,13 @@
+{
+  "comment": "同一毫秒内各来源的先后。Go（internal/chat）与前端（frontend/src/lib/timeline.ts 的 KIND_RANK）共用这一份，改任何一边都要同步。",
+  "order": ["report", "reply", "inbox", "notice", "capsule", "update", "card", "answer", "decision", "guard", "system"],
+  "frontend_kind": {
+    "inbox": "inbox",
+    "notice": "notice",
+    "capsule": "capsule",
+    "update": "task",
+    "card": "confirm",
+    "decision": "decisions",
+    "guard": "guard"
+  }
+}

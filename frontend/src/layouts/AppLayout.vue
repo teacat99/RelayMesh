@@ -40,8 +40,9 @@ onMounted(async () => {
   const isAuth = await authStore.checkAuthStatus()
   if (isAuth) {
     sessionStore.connectSSE()
-    sessionStore.fetchCurrentSession()
-    sessionStore.fetchSessions()
+    // fresh:false：侧栏 / 会话页挂载时也各取一遍，同一时刻只发一次（单飞加入），不再各发各的（#177）
+    sessionStore.fetchCurrentSession({ fresh: false })
+    sessionStore.fetchSessions(undefined, { fresh: false })
   }
 })
 </script>

@@ -3,6 +3,7 @@ import { ref, onMounted, nextTick } from 'vue'
 import { useAuthStore } from '../../stores/auth'
 import { useSessionStore } from '../../stores/session'
 import { User, KeyRound, Eye, EyeOff, ShieldCheck, ArrowRight, Loader2, ShieldAlert, Timer } from 'lucide-vue-next'
+import { LAYER_CLASS } from '../../lib/layers'
 
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
@@ -48,7 +49,8 @@ async function handleLogin() {
 <template>
   <div 
     v-if="authStore.showLoginModal" 
-    class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 dark:bg-black/70 backdrop-blur-xs transition-opacity duration-200"
+    class="fixed inset-0 flex items-center justify-center p-4 bg-black/50 dark:bg-black/70 backdrop-blur-xs transition-opacity duration-200"
+    :class="LAYER_CLASS.session"
   >
     <div 
       class="w-full max-w-[360px] bg-card border border-border/90 rounded-sm shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-150"
@@ -120,7 +122,8 @@ async function handleLogin() {
             />
             <button
               type="button"
-              class="absolute right-2.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+              class="absolute right-0 flex size-9 cursor-pointer items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
+              aria-label="显示或隐藏密码"
               @click="showPassword = !showPassword"
               tabindex="-1"
             >

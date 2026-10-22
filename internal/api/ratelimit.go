@@ -12,11 +12,11 @@ type IPAttempt struct {
 }
 
 type BlockedIPInfo struct {
-	IP             string    `json:"ip"`
-	FailedCount    int       `json:"failed_count"`
-	LastFailedAt   time.Time `json:"last_failed_at"`
-	LockedUntil    time.Time `json:"locked_until"`
-	RemainingSecs  int64     `json:"remaining_seconds"`
+	IP            string    `json:"ip"`
+	FailedCount   int       `json:"failed_count"`
+	LastFailedAt  time.Time `json:"last_failed_at"`
+	LockedUntil   time.Time `json:"locked_until"`
+	RemainingSecs int64     `json:"remaining_seconds"`
 }
 
 type RateLimiter struct {

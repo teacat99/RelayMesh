@@ -75,3 +75,25 @@ func TestGzipMiddleware(t *testing.T) {
 		t.Fatalf("expected SSE endpoint to skip gzip compression, got %q", wSSE.Header().Get("Content-Encoding"))
 	}
 }
+
+// 文件下载是已知长度的二进制流：不压缩，Content-Length 保持原样。
+func TestGzipMiddlewareSkipsFileDownloads(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(GzipMiddleware())
+	body := strings.Repeat("A", 4096)
+	r.GET("/files/dl/:ticket", func(c *gin.Context) {
+		c.Header("Content-Length", "4096")
+		c.Header("Content-Type", "application/octet-stream")
+		c.String(http.StatusOK, body)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/files/dl/abc", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Header().Get("Content-Encoding") != "" || w.Header().Get("Content-Length") != "4096" || w.Body.String() != body {
+		t.Fatalf("文件下载不应被压缩: encoding=%q length=%q bodyLen=%d", w.Header().Get("Content-Encoding"), w.Header().Get("Content-Length"), w.Body.Len())
+	}
+}

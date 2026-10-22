@@ -63,7 +63,7 @@ function handleDelete() {
           <input
             v-model="form.label"
             class="w-full px-2.5 py-1.5 rounded-sm border border-border/80 bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
-            placeholder="如：评估、开发"
+            placeholder="如：讨论、开发"
             @keydown.enter="handleSave"
           />
         </div>

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/model"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 // 1x1 透明 PNG，仅用于构造「带图片的会话」

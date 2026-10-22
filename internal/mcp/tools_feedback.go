@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/teacat99/RelayMesh/internal/model"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 type interactiveFeedbackArgs struct {
@@ -23,6 +23,11 @@ type interactiveFeedbackArgs struct {
 	Title            string `json:"title,omitempty"`
 	WorkflowID       string `json:"workflow_id,omitempty"`
 	Phase            string `json:"phase,omitempty"`
+	// Commit 是交付锚点：仓库最新提交，通常是 `git log -1 --format='%h %s'` 的输出（可选）。
+	Commit string `json:"commit,omitempty"`
+	// Wait 只有显式 false 才有意义：异步对话生效时发布不阻塞的进度通知；其余情况（缺省、true、
+	// 异步没生效）都按普通汇报阻塞等待。用原始 JSON 接收，只认明确的 false 写法，宁可多等也不误放行。
+	Wait json.RawMessage `json:"wait,omitempty"`
 }
 
 type continueFeedbackArgs struct {
@@ -86,6 +91,24 @@ func (s *Server) handleInteractiveFeedback(ctx context.Context, raw json.RawMess
 		return nil, store.NewInvalidInputError("summary is required and cannot be empty")
 	}
 
+	// 交付锚点：留空表示没有；填了但解析不了只给软告警，绝不阻断交付。
+	anchorHash, anchorSubject, anchorOK := ParseAnchor(args.Commit)
+	anchorWarn := strings.TrimSpace(args.Commit) != "" && !anchorOK
+
+	// wait:false（异步对话）：生效就发布不阻塞的通知并立即返回；不生效就照常阻塞，并在回执头说明为什么没放行。
+	waitNote := ""
+	if explicitFalse(args.Wait) {
+		if wf := strings.TrimSpace(args.WorkflowID); wf == "" {
+			waitNote = "wait_ignored: wait:false 需要显式传 workflow_id（异步对话是按工作流开启的），本次已按普通汇报处理（会等待用户回复）。"
+		} else {
+			info, mErr := s.store.WorkflowModeInfo(ctx, wf, time.Now())
+			if mErr == nil && info.State.Effective {
+				return s.publishNotice(ctx, args, anchorHash, anchorSubject, anchorOK, anchorWarn)
+			}
+			waitNote = waitIgnoredNote(info.State)
+		}
+	}
+
 	timeoutSec := s.cfg.FeedbackTimeoutSeconds
 	if timeoutSec <= 0 {
 		timeoutSec = 120
@@ -108,26 +131,23 @@ func (s *Server) handleInteractiveFeedback(ctx context.Context, raw json.RawMess
 		Title:              args.Title,
 		Summary:            args.Summary,
 		TimeoutSeconds:     timeoutSec,
+		GitCommit:          anchorHash,
+		GitSubject:         anchorSubject,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	if args.Phase != "" && session.WorkflowID != "" {
-		if e := s.store.SetWorkflowPhase(ctx, session.WorkflowID, args.Phase, false); e == nil {
-			if s.onUpdate != nil {
-				s.onUpdate("phase_changed", map[string]string{
-					"workflow_id": session.WorkflowID,
-					"phase":       args.Phase,
-				})
-			}
-		}
-	}
+	// 回执里的 anchor_saved / anchor_warning 行（没有传 commit 时为空，回执与以前逐字节一致）；
+	// wait_ignored 行只在 wait:false 没放行时才有。
+	anchorNote := joinHeaderNotes(s.anchorNoteFor(ctx, session, anchorHash, anchorSubject, anchorOK, anchorWarn), waitNote)
+
+	s.applyReportedPhase(ctx, session.WorkflowID, args.Phase)
 
 	// 只要 session 状态已经为 completed（例如命中了提前暂存的 QueuedFeedback 秒回），直接格式化返回，无需进入挂起等待
 	if session.Status == "completed" {
 		s.markConsumedAndBroadcast(ctx, session)
-		return s.formatFeedbackResultWithCtx(ctx, session), nil
+		return injectHeaderLine(s.formatFeedbackResultWithCtx(ctx, session), anchorNote), nil
 	}
 
 	// 获取业务层动态配置的真实挂起等待时长
@@ -135,6 +155,9 @@ func (s *Server) handleInteractiveFeedback(ctx context.Context, raw json.RawMess
 	if s.cfg.FeedbackTimeoutSeconds > 0 && s.cfg.FeedbackTimeoutSeconds <= 5 {
 		// 测试或显式覆盖模式：优先遵循显式指定的短等待时长
 		waitSec = s.cfg.FeedbackTimeoutSeconds
+	} else if sec, ok := session.HoldSeconds(); ok {
+		// 秒级挂起倒计时（#121）：0 = 秒回，至少挂 1 秒再发空回执
+		waitSec = max(sec, 1)
 	} else if session.WaitCountdownMinutes > 0 {
 		waitSec = session.WaitCountdownMinutes * 60
 	} else if session.TimeoutSeconds > 0 {
@@ -145,9 +168,16 @@ func (s *Server) handleInteractiveFeedback(ctx context.Context, raw json.RawMess
 	}
 
 	s.notifySessionUpdate(session.ID)
+	// 浏览器里的声音 / 系统通知只在网页开着时才响；这里再把「有人在等你」推到网页之外（ntfy 等）。
+	// 命中提前追加而秒回的请求不会走到这里——那种情况下人早已说过话，没有什么要提醒的。
+	s.notifyNewRequest(session)
 
 	// Wait for user feedback or timeout
-	return s.waitForFeedback(ctx, session.ID, waitSec)
+	result, err := s.waitForFeedback(ctx, session.ID, waitSec)
+	if err != nil {
+		return result, err
+	}
+	return injectHeaderLine(result, anchorNote), nil
 }
 
 func (s *Server) handleContinueFeedbackSession(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -184,6 +214,9 @@ func (s *Server) handleContinueFeedbackSession(ctx context.Context, raw json.Raw
 			targetSessionID = latestSess.ID
 		}
 	}
+	if sess.Kind == model.FeedbackKindNotice {
+		return nil, store.NewConflictError(fmt.Sprintf("session %q 是不阻塞的进度通知，没有什么可等待的。想读用户的追加请调用 workflow_context(action: \"inbox\")；需要等用户回复请用不带 wait:false 的 interactive_feedback。", sess.ID), 0)
+	}
 	if sess.Status == "completed" {
 		if sess.ConsumedByAI {
 			// 若该会话已经由 AI 提取消费过，检查该工作流是否存在新的 pending 活跃轮次
@@ -217,6 +250,9 @@ func (s *Server) handleContinueFeedbackSession(ctx context.Context, raw json.Raw
 	if s.cfg.FeedbackTimeoutSeconds > 0 && s.cfg.FeedbackTimeoutSeconds <= 5 {
 		// 测试或显式覆盖模式：优先遵循显式指定的短等待时长
 		waitSec = s.cfg.FeedbackTimeoutSeconds
+	} else if sec, ok := sess.HoldSeconds(); ok {
+		// 秒级挂起倒计时（#121）：0 = 秒回，至少挂 1 秒再发空回执
+		waitSec = max(sec, 1)
 	} else if sess.WaitCountdownMinutes > 0 {
 		waitSec = sess.WaitCountdownMinutes * 60
 	} else if sess.TimeoutSeconds > 0 {
@@ -259,9 +295,14 @@ func (s *Server) waitForFeedback(ctx context.Context, sessionID string, timeoutS
 
 	// Register waiter channel
 	waitCh := s.registerSessionWaiter(sessionID, effectiveWaitSec)
+	// delivered：这次挂起以「把用户的回复（或取消）交给了智能体」收场。此时不能再记「空回执」时刻——
+	// 那是智能体没拿到回复就离开时才有的状态（空回执 / 客户端断开）。
+	delivered := false
 	defer func() {
 		s.unregisterSessionWaiter(sessionID, waitCh)
-		s.RecordKeepaliveResponse(sessionID)
+		if !delivered {
+			s.RecordKeepaliveResponse(sessionID)
+		}
 		s.notifySessionUpdate(sessionID)
 	}()
 
@@ -282,12 +323,18 @@ func (s *Server) waitForFeedback(ctx context.Context, sessionID string, timeoutS
 			return nil, ctx.Err()
 
 		case <-timer.C:
+			// 用户点了「+1 分钟」或正在输入：这次挂起还没到真正的期限，接着挂（#121）
+			if left := s.holdRemaining(sessionID, waitCh); left > 0 {
+				timer.Reset(left)
+				continue
+			}
 			// Timeout reached, return keepalive prompt
 			sess, err := s.store.GetFeedbackSession(ctx, sessionID)
 			if err != nil {
 				return nil, err
 			}
 			if sess.Status == "completed" {
+				delivered = true
 				s.markConsumedAndBroadcast(ctx, sess)
 				return s.formatFeedbackResultWithCtx(ctx, sess), nil
 			}
@@ -297,10 +344,12 @@ func (s *Server) waitForFeedback(ctx context.Context, sessionID string, timeoutS
 
 		case updatedSess := <-waitCh:
 			if updatedSess != nil && updatedSess.Status == "completed" {
+				delivered = true
 				s.markConsumedAndBroadcast(ctx, updatedSess)
 				return s.formatFeedbackResultWithCtx(ctx, updatedSess), nil
 			}
 			if updatedSess != nil && updatedSess.Status == "cancelled" {
+				delivered = true
 				return s.formatCancelledResultWithCtx(ctx, updatedSess), nil
 			}
 		}
@@ -315,25 +364,11 @@ func (s *Server) markConsumedAndBroadcast(ctx context.Context, sess *model.Feedb
 	_ = s.store.MarkSessionConsumedByAI(ctx, sess.ID, now)
 	sess.ConsumedByAI = true
 	sess.ConsumedAt = &now
+	s.forgetKeepalive(sess.ID) // 回复已被取走，「等待」计时到此结束，转为「执行」
 
-	// Phase reset guard (D-107): when workflow is in "done" phase, now that AI has actually consumed
-	// the human's feedback, automatically transition back to "assess" (or preferred phase) to begin the next cycle.
-	if sess.WorkflowID != "" {
-		currentPhase, _, _ := s.store.GetWorkflowPhaseWithDefaults(ctx, sess.WorkflowID)
-		if currentPhase == "done" {
-			preferred, _ := s.store.GetHumanPreferredPhase(ctx, sess.WorkflowID)
-			if preferred == "" {
-				preferred = "assess"
-			}
-			if currentPhase != preferred {
-				if e := s.store.SetWorkflowPhase(ctx, sess.WorkflowID, preferred, false); e == nil {
-					if s.onUpdate != nil {
-						s.onUpdate("phase_changed", map[string]any{"workflow_id": sess.WorkflowID, "phase": preferred})
-					}
-				}
-			}
-		}
-	}
+	// 阶段重置守卫（D-107）已随五段式一起取消：以前阶段停在「完成」时，用户的下一条反馈被消费后会自动
+	// 回到「评估」。三段式里没有终点阶段（收尾与汇报都在「开发」内完成），话题切换由智能体按开发阶段
+	// 提示词的约定把阶段切回「讨论」，不再由服务端猜测。
 
 	if s.onUpdate != nil {
 		s.onUpdate("session_updated", sess)
@@ -362,8 +397,18 @@ func (s *Server) formatSessionHeaderWithContext(ctx context.Context, sess *model
 
 	currentPhase, phaseItems, _ := s.store.GetWorkflowPhaseWithDefaults(ctx, wID)
 	store.BackfillPhasePrompts(phaseItems)
+	// 异步对话：只对开启过异步的工作流有 mode / async / auth 行，其余工作流的回执与以前逐字节一致（INV-2）。
+	modeLines, authLine := s.modeHeaderLines(ctx, wID)
 	if currentPhase != "" {
 		header += "\ncurrent_phase: " + currentPhase
+	}
+	for _, line := range modeLines {
+		header += "\n" + line
+	}
+	if authLine != "" {
+		// 异步生效时，授权档位取代阶段提示词：由授权档位而不是「讨论 / 方案 / 开发」决定能做什么。
+		header += "\n" + authLine
+	} else if currentPhase != "" {
 		for _, p := range phaseItems {
 			if p.ID == currentPhase && strings.TrimSpace(p.Prompt) != "" {
 				header += "\nphase_prompt: " + strings.TrimSpace(p.Prompt)
@@ -373,29 +418,44 @@ func (s *Server) formatSessionHeaderWithContext(ctx context.Context, sess *model
 	}
 
 	if cp, _ := s.store.GetLatestCheckpoint(ctx, wID); cp != nil {
-			var content model.CheckpointContent
-			if json.Unmarshal([]byte(cp.ContentJSON), &content) == nil {
-				cpHint := fmt.Sprintf("rev=%d", cp.Revision)
-				if content.Objective != "" {
-					obj := content.Objective
-					if len([]rune(obj)) > 80 {
-						obj = string([]rune(obj)[:80]) + "..."
-					}
-					cpHint += " obj=" + obj
+		var content model.CheckpointContent
+		if json.Unmarshal([]byte(cp.ContentJSON), &content) == nil {
+			cpHint := fmt.Sprintf("rev=%d", cp.Revision)
+			if content.Objective != "" {
+				obj := content.Objective
+				if len([]rune(obj)) > 80 {
+					obj = string([]rune(obj)[:80]) + "..."
 				}
-				if content.CurrentStage != nil {
-					cpHint += " stage=" + content.CurrentStage.ID + "/" + content.CurrentStage.Status
-				}
-				if len(content.NextActions) > 0 {
-					next := content.NextActions[0]
-					if len([]rune(next)) > 60 {
-						next = string([]rune(next)[:60]) + "..."
-					}
-					cpHint += " next=" + next
-				}
-				header += "\ncheckpoint: " + cpHint
+				cpHint += " obj=" + obj
 			}
+			if content.CurrentStage != nil {
+				cpHint += " stage=" + content.CurrentStage.ID + "/" + content.CurrentStage.Status
+			}
+			if len(content.NextActions) > 0 {
+				next := content.NextActions[0]
+				if len([]rune(next)) > 60 {
+					next = string([]rune(next)[:60]) + "..."
+				}
+				cpHint += " next=" + next
+			}
+			header += "\ncheckpoint: " + cpHint
 		}
+	}
+
+	// 任务清单概况：有清单时回显各状态数量与最近的任务；没有清单时就是那句「请用 task_board」的提醒。
+	if line := s.taskDigestHeader(ctx, wID); line != "" {
+		header += "\n" + line
+	}
+
+	if line := s.guardPermitHintHeader(ctx, wID); line != "" {
+		header += "\n" + line
+	}
+
+	// 交付锚点：回显本工作流最近一次带锚点的交付，上下文被重置后的模型据此判断要不要核对提交历史。
+	// 工作流里没有任何锚点时不输出该行，回执与以前逐字节一致。
+	if anchored, _ := s.store.GetLatestAnchoredSession(ctx, wID, ""); anchored != nil {
+		header += "\n" + formatAnchorLine(anchored, time.Now())
+	}
 
 	activeNorms, _ := s.store.ListActiveUserNorms(ctx)
 	if len(activeNorms) > 0 {
@@ -439,7 +499,8 @@ func (s *Server) buildRecentWorkflowsHint(ctx context.Context, currentSess *mode
 		return ""
 	}
 
-	allSessions, err := s.store.ListFeedbackSessions(ctx, projDir, "", 100)
+	// 进度通知在 SQL 里就排除：先取 100 条再过滤的话，每发一条通知就挤掉一轮更早的汇报（#109）
+	allSessions, err := s.store.ListFeedbackRoundSessions(ctx, projDir, "", 100)
 	if err != nil || len(allSessions) == 0 {
 		return ""
 	}
@@ -456,8 +517,8 @@ func (s *Server) buildRecentWorkflowsHint(ctx context.Context, currentSess *mode
 	var wfOrder []string
 
 	for _, sess := range allSessions {
-		if sess.Status == "archived" {
-			continue
+		if sess.Status == "archived" || sess.Kind == model.FeedbackKindNotice {
+			continue // 进度通知不是「轮」，不计入也不影响最近活跃
 		}
 		if hostName != "" && sess.HostName != "" && sess.HostName != hostName {
 			continue
@@ -514,6 +575,10 @@ func (s *Server) formatFeedbackResultWithCtx(ctx context.Context, sess *model.Fe
 		text = "(用户已确认，未附加文字)"
 	}
 	res := fmt.Sprintf("%s\n=== 用户反馈 ===\n%s", header, text)
+	// 用户写了【回复 …】/【恢复 …】的引用时，紧跟着说明引用的是哪一条（#106）。
+	if block := s.quotedRefsBlock(ctx, sess.WorkflowID, sess.ResponseText); block != "" {
+		res += "\n" + block
+	}
 
 	if len(sess.Images) > 0 {
 		credCtx := CredentialFromContext(ctx)
@@ -530,6 +595,11 @@ func (s *Server) formatSessionImagesBlock(sess *model.FeedbackSession, credCtx *
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("=== 附件图片 (共 %d 张) ===\n", len(sess.Images)))
+	// 用户在输入框里粘贴 / 上传图片时，界面会同步在文字里插入「【图 N】」标记（N 为缩略图序号）。
+	// 标记写法与下面的「【图 N】(编号 #N)」完全一致，这里明确告诉 AI 两者一一对应，不必靠猜。
+	if strings.Contains(sess.ResponseText, "【图") {
+		sb.WriteString("（正文里的「【图 N】」标记指向下面列出的第 N 张图片）\n")
+	}
 
 	// 1. 如果是 stdio 模式，或者项目本地路径在当前机器可访问可写，尝试将图片落地到本地 .cursor/tmp/images/ 供 AI 使用 Read 工具直读
 	canWriteLocal := false
@@ -626,44 +696,12 @@ func (s *Server) formatKeepaliveResult(ctx context.Context, sess *model.Feedback
 		waitMin = 3
 	}
 	checks := sess.NoFeedbackChecks
-	maxChecks := sess.MaxNoFeedbackChecks
-	if maxChecks <= 0 {
+	maxChecks := sess.MaxNoFeedbackChecks // 0 = 不限（界面上的 ∞）
+	if maxChecks < 0 {
 		maxChecks = 24
 	}
 
 	globalSettings, _ := s.store.GetGlobalAppSettings(ctx)
-
-	expandCommonVars := func(tpl string) string {
-		r := strings.NewReplacer(
-			"{wait_minutes}", fmt.Sprintf("%d", waitMin),
-			"{wait_ms}", fmt.Sprintf("%d", waitMin*60000),
-			"{session_id}", sess.ID,
-			"{workflow_id}", sess.WorkflowID,
-		)
-		return r.Replace(tpl)
-	}
-
-	if sess.UserPresence == "away" {
-		awayTpl := ""
-		if globalSettings != nil {
-			awayTpl = globalSettings.FlowPrompts.Away.ImmediatePrompt
-		}
-		if awayTpl == "" {
-			awayTpl = "【系统回执·人工暂离】用户已确认当前推进目标并主动暂离，请继续执行已授权范围内的工作。\n行为约束：\n- 按会话文档「当前任务」和「关键决策」已锁定的方向继续推进\n- 遇到非阻塞性问题记入会话文档「待用户拍板」，不阻塞进度\n- 不可逆动作：已授权的按计划执行，未授权的记录待确认并暂缓\n- 每完成一个逻辑单元执行增量验证（lint/type-check→build）\n- 阶段完成或遇到阻塞时，通过 interactive_feedback 提交阶段简报\n- 用户回来后按会话文档记录对齐进度"
-		}
-		return fmt.Sprintf("%s\n=== 用户暂离 ===\n%s", header, expandCommonVars(awayTpl))
-	}
-
-	if sess.UserPresence == "autopilot" {
-		apTpl := ""
-		if globalSettings != nil {
-			apTpl = globalSettings.FlowPrompts.Autopilot.ImmediatePrompt
-		}
-		if apTpl == "" {
-			apTpl = "【系统回执·外部编排】当前处于 autopilot 外部编排模式，由外部系统通过 Task API 驱动。\n行为约束：\n- 通过 report_progress 汇报进度和检查反馈\n- 按 task segments 定义的范围执行，不越界\n- 不通过 interactive_feedback 向用户直接提问\n- 遇不可逆动作以 question 类型上报并等待\n- 遇 MCP 通信错误降级为 away 模式"
-		}
-		return fmt.Sprintf("%s\n=== 托管自驾 ===\n%s", header, expandCommonVars(apTpl))
-	}
 
 	exhaustedTpl := ""
 	waitPollTpl := ""
@@ -684,8 +722,8 @@ func (s *Server) formatKeepaliveResult(ctx context.Context, sess *model.Feedback
 			"{wait_ms}", fmt.Sprintf("%d", waitMin*60000),
 			"{session_id}", sess.ID,
 			"{workflow_id}", sess.WorkflowID,
-			"{max_checks}", fmt.Sprintf("%d", maxChecks),
-			"{total_hours}", fmt.Sprintf("%.1f", float64(maxChecks*waitMin)/60.0),
+			"{max_checks}", maxChecksText(maxChecks),
+			"{total_hours}", totalHoursText(maxChecks, waitMin),
 		)
 		return r.Replace(tpl)
 	}
@@ -694,7 +732,35 @@ func (s *Server) formatKeepaliveResult(ctx context.Context, sess *model.Feedback
 		return fmt.Sprintf("%s\n=== 反馈超时 ===\n%s", header, expandVars(exhaustedTpl))
 	}
 
-	return fmt.Sprintf("%s\n=== 等待回执 ===\n%s", header, expandVars(waitPollTpl))
+	return fmt.Sprintf("%s\n=== 等待回执 ===\n%s%s", header, expandVars(waitPollTpl), closingGraceNote(checks, maxChecks, waitMin))
+}
+
+func maxChecksText(maxChecks int) string {
+	if maxChecks <= 0 {
+		return "不限"
+	}
+	return fmt.Sprintf("%d", maxChecks)
+}
+
+func totalHoursText(maxChecks, waitMin int) string {
+	if maxChecks <= 0 {
+		return "不限"
+	}
+	return fmt.Sprintf("%.1f", float64(maxChecks*waitMin)/60.0)
+}
+
+// closingGraceNote 是附在每次空回执后的「收尾宽限」说明（#121）：把「何时才算可以结束」和「必须用计时器等待」写死，
+// 不依赖用户可编辑的模板，避免模板被改掉后智能体又退回到「发完总结就结束」。
+func closingGraceNote(checks, maxChecks, waitMin int) string {
+	limit := "不限"
+	if maxChecks > 0 {
+		limit = fmt.Sprintf("%d", maxChecks)
+	}
+	return fmt.Sprintf("\n\n【收尾宽限】这是第 %d 轮等待（共 %s 轮；用满即进入超时收尾）。"+
+		"用户最后一次发言之后，必须连续用满上限次数的空回执都没有收到新消息，才可以进入收尾；中途一旦收到用户消息，次数清零、继续工作。"+
+		"等待只能用计时器工具 AwaitShell({ block_until_ms: %d })，禁止用 shell sleep、禁止输出 chat 正文代替等待；"+
+		"计时结束后立刻调用 continue_feedback_session。若用户在 Web 点了「+1 分钟」或正在输入，服务端会自动继续挂着，不会发空回执，那时只管继续等待。",
+		checks+1, limit, waitMin*60000)
 }
 
 type listSessionsArgs struct {
@@ -779,24 +845,38 @@ func (s *Server) handleListSessions(ctx context.Context, raw json.RawMessage) (a
 		if i >= limit {
 			break
 		}
-		result = append(result, map[string]any{
+		item := map[string]any{
 			"session_id":        sess.ID,
 			"workflow_id":       sess.WorkflowID,
 			"title":             sess.Title,
 			"status":            sess.Status,
-			"user_presence":     sess.UserPresence,
 			"consumed_by_ai":    sess.ConsumedByAI,
 			"created_at":        sess.CreatedAt,
 			"updated_at":        sess.UpdatedAt,
 			"host_name":         sess.HostName,
 			"project_directory": sess.ProjectDirectory,
-		})
+		}
+		addAnchorFields(item, &sess)
+		addReplyTimeFields(item, &sess)
+		addKindField(item, &sess)
+		result = append(result, item)
 	}
 
 	return map[string]any{
 		"total":    len(result),
 		"sessions": result,
 	}, nil
+}
+
+// addReplyTimeFields 把「用户何时回复」与「智能体何时取走」告诉智能体：updated_at 会在取走时被刷新，
+// 单看它分不清用户是什么时候说的话（历史会话没有这两列，不输出）。
+func addReplyTimeFields(item map[string]any, sess *model.FeedbackSession) {
+	if sess.RespondedAt != nil {
+		item["responded_at"] = *sess.RespondedAt
+	}
+	if sess.ConsumedAt != nil {
+		item["consumed_at"] = *sess.ConsumedAt
+	}
 }
 
 func (s *Server) groupSessionsByWorkflow(sessions []model.FeedbackSession, limit int) map[string]any {
@@ -815,6 +895,9 @@ func (s *Server) groupSessionsByWorkflow(sessions []model.FeedbackSession, limit
 	var wfOrder []string
 
 	for _, sess := range sessions {
+		if sess.Kind == model.FeedbackKindNotice {
+			continue // 进度通知不是「轮」
+		}
 		key := sess.WorkflowID
 		if key == "" {
 			key = sess.ID
@@ -907,7 +990,7 @@ func (s *Server) handleGetSessionHistory(ctx context.Context, raw json.RawMessag
 
 	var matched []map[string]any
 	for _, sess := range matchedSessions {
-		matched = append(matched, map[string]any{
+		item := map[string]any{
 			"session_id":        sess.ID,
 			"workflow_id":       sess.WorkflowID,
 			"title":             sess.Title,
@@ -920,14 +1003,80 @@ func (s *Server) handleGetSessionHistory(ctx context.Context, raw json.RawMessag
 			"updated_at":        sess.UpdatedAt,
 			"host_name":         sess.HostName,
 			"project_directory": sess.ProjectDirectory,
-		})
+		}
+		addAnchorFields(item, &sess)
+		addReplyTimeFields(item, &sess)
+		addKindField(item, &sess)
+		matched = append(matched, item)
 	}
 
-	return map[string]any{
+	// rounds 只数真正的汇报轮次；异步模式下发布的进度通知（kind: notice）单独计数，没有通知时不出现。
+	notices := 0
+	for _, sess := range matchedSessions {
+		if sess.Kind == model.FeedbackKindNotice {
+			notices++
+		}
+	}
+	result := map[string]any{
 		"workflow_id": workflowID,
-		"rounds":      len(matched),
+		"rounds":      len(matched) - notices,
 		"history":     matched,
-	}, nil
+	}
+	if notices > 0 {
+		result["notices"] = notices
+	}
+	if appended := s.appendedMessagesForHistory(ctx, workflowID); len(appended) > 0 {
+		result["appended_messages"] = appended
+		result["appended_messages_note"] = "用户在你工作期间追加的消息（只读列表）。经 hook / 回执提示行 / inbox 读到的追加不会出现在 history 的轮次里，所以单独列在这里；" +
+			"state 为 queued 的是你还没读到的——请调用 workflow_context 的 inbox 读取并确认，不要只看这个列表。有图片时用 image_session_id 调 get_session_image 取图。"
+	}
+	// 撤回记录（#199）：你读过或被提醒过的追加后来被撤回了，只留编号与时间（不含正文），免得上下文压缩之后又按它行动。
+	if workflowID != "" {
+		if events, err := s.store.ListRetractionEvents(ctx, workflowID); err == nil && len(events) > 0 {
+			result["appended_retractions"] = events
+			result["appended_retractions_note"] = "用户撤回了这些你读过或被提醒过的追加（只读列表，只有编号与时间，没有正文）：请忽略它们，不要再按它们行动。read 为 false 的表示你只被提醒过、没有读到全文。"
+		}
+	}
+	return result, nil
+}
+
+// appendedMessagesForHistory 把工作流收件箱里的追加信息整理成历史查询的返回项（与 Web 会话页上的「您的追加信息」气泡一致）。
+// 只给图片张数与寻址编号，不带图片数据；列表本身只读，不改变任何一条的送达 / 确认状态。
+func (s *Server) appendedMessagesForHistory(ctx context.Context, workflowID string) []map[string]any {
+	if workflowID == "" {
+		return nil
+	}
+	items, err := s.store.ListInboxItems(ctx, workflowID)
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, q := range items {
+		m := map[string]any{
+			"id":         q.ID,
+			"state":      q.State,
+			"created_at": q.CreatedAt,
+			"text":       q.ResponseText,
+		}
+		if len(q.UserMessages) > 0 {
+			m["user_messages"] = []string(q.UserMessages)
+		}
+		if q.DeliveredAt != nil {
+			m["delivered_at"] = q.DeliveredAt
+		}
+		if q.AckedAt != nil {
+			m["acked_at"] = q.AckedAt
+		}
+		if q.DeliveredVia != "" {
+			m["delivered_via"] = q.DeliveredVia
+		}
+		if n := len(q.Images); n > 0 {
+			m["image_count"] = n
+			m["image_session_id"] = store.InboxSessionID(q.ID)
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 type getSessionImageArgs struct {
@@ -947,12 +1096,26 @@ func (s *Server) handleGetSessionImage(ctx context.Context, raw json.RawMessage)
 		return nil, store.NewInvalidInputError("session_id is required")
 	}
 
-	sess, err := s.store.GetFeedbackSession(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if sess == nil {
-		return nil, store.NewNotFoundError(fmt.Sprintf("session %s not found", sessionID))
+	var sess *model.FeedbackSession
+	if queuedID, isInbox := store.ParseInboxSessionID(sessionID); isInbox {
+		// 追加指令收件箱里的图片：inbox-<编号> 当作「会话编号」寻址（见 inbox.go）。
+		q, err := s.store.GetQueuedFeedback(ctx, queuedID)
+		if err != nil {
+			return nil, err
+		}
+		if q == nil {
+			return nil, store.NewNotFoundError(fmt.Sprintf("inbox message %d not found", queuedID))
+		}
+		sess = &model.FeedbackSession{ID: sessionID, ProjectDirectory: q.ProjectDirectory, Images: q.Images}
+	} else {
+		found, err := s.store.GetFeedbackSession(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if found == nil {
+			return nil, store.NewNotFoundError(fmt.Sprintf("session %s not found", sessionID))
+		}
+		sess = found
 	}
 
 	if len(sess.Images) == 0 {

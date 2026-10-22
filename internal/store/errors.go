@@ -5,13 +5,14 @@ import "fmt"
 type ErrorKind string
 
 const (
-	ErrNotFound          ErrorKind = "not_found"
-	ErrConflict          ErrorKind = "conflict"
-	ErrInvalidInput      ErrorKind = "invalid_input"
-	ErrClosed            ErrorKind = "task_closed"
-	ErrUnauthorized      ErrorKind = "unauthorized"
-	ErrOperationFailed   ErrorKind = "operation_failed"
-	ErrIdempotencyClash  ErrorKind = "idempotency_clash"
+	ErrNotFound         ErrorKind = "not_found"
+	ErrConflict         ErrorKind = "conflict"
+	ErrInvalidInput     ErrorKind = "invalid_input"
+	ErrClosed           ErrorKind = "task_closed"
+	ErrUnauthorized     ErrorKind = "unauthorized"
+	ErrForbidden        ErrorKind = "forbidden" // 任务级权限（#175 B2）：调用方不是这条任务的创建者 / 承接者 / 管理者
+	ErrOperationFailed  ErrorKind = "operation_failed"
+	ErrIdempotencyClash ErrorKind = "idempotency_clash"
 )
 
 type AppError struct {
@@ -41,4 +42,9 @@ func NewInvalidInputError(msg string) *AppError {
 
 func NewTaskClosedError(msg string) *AppError {
 	return &AppError{Kind: ErrClosed, Message: msg}
+}
+
+// NewForbiddenError 表示任务级权限不允许这次操作；消息写给智能体看：谁能做、该怎么做。
+func NewForbiddenError(msg string) *AppError {
+	return &AppError{Kind: ErrForbidden, Message: msg}
 }

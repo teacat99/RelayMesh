@@ -1,0 +1,133 @@
+name: CI
+
+# 公开仓库的持续集成：Go 静态检查 + 竞态测试 + Agent 五平台交叉编译，Windows / macOS 原生 Agent 测试（伪终端 / ACL / 服务安装流程），以及前端单元测试与类型检查。
+# 仅在公开仓库运行（私有开发库的 Actions 额度与密钥不在此使用）。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go 检查与测试
+    if: ${{ github.repository == 'teacat99/RelayMesh' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      # 每个包的默认超时是 10 分钟；internal/terminal 在 -race 下有近 600 个顺序执行的用例，
+      # 开发机（24 核）上就要 584 秒，托管 runner 更慢，所以显式放宽到 30 分钟（只防误判超时，不掩盖卡死：真卡住仍会在 30 分钟后失败）。
+      - name: go test（竞态检测）
+        run: go test ./... -race -count=1 -timeout 30m
+
+      - name: Agent 五平台交叉编译
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            echo "🔨 relaymesh-agent ${os}/${arch}"
+            CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build -o /dev/null ./cmd/relaymesh-agent
+          done
+
+  windows-agent:
+    name: Windows Agent 原生测试
+    if: ${{ github.repository == 'teacat99/RelayMesh' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go vet（Agent 与协议包）
+        run: go vet ./internal/agent/... ./internal/termproto/... ./cmd/relaymesh-agent/...
+
+      # 含 ConPTY 真实伪终端、私有 ACL 校验、计划任务安装 / 卸载流程（系统调用由注入的假实现替代）。
+      - name: go test（Windows 原生）
+        run: go test ./internal/agent/... ./internal/termproto/... -count=1 -timeout 5m
+
+      - name: install.ps1 语法检查与 BOM 检查（Windows PowerShell 5.1 与 PowerShell 7）
+        run: |
+          $check = {
+            param($path)
+            $t = $null; $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$t, [ref]$e)
+            if ($e.Count -gt 0) { $e | ForEach-Object { Write-Host "::error::$($_.Message) (行 $($_.Extent.StartLineNumber))" }; exit 1 }
+            $b = [IO.File]::ReadAllBytes($path)
+            if ($b[0] -ne 0xEF -or $b[1] -ne 0xBB -or $b[2] -ne 0xBF) { Write-Host "::error::install.ps1 必须保留 UTF-8 BOM（PowerShell 5.1 依赖它正确显示中文）"; exit 1 }
+          }
+          & $check "$PWD\install.ps1"
+        shell: pwsh
+
+      - name: install.ps1 语法检查（Windows PowerShell 5.1）
+        run: |
+          $t = $null; $e = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD\install.ps1", [ref]$t, [ref]$e)
+          if ($e.Count -gt 0) { $e | ForEach-Object { Write-Host "::error::$($_.Message) (行 $($_.Extent.StartLineNumber))" }; exit 1 }
+        shell: powershell
+
+  macos-agent:
+    name: macOS Agent 原生测试
+    if: ${{ github.repository == 'teacat99/RelayMesh' }}
+    runs-on: macos-latest
+    # 这批测试（真实 PTY 回显 / resize / 重连、launchd plist 渲染）此前只在 Linux 与 Windows 上跑过，macOS 是首次落到真机 runner。
+    # 先作为「观察性」任务：失败会在 Actions 里标红但不阻塞合并；跑稳之后应去掉 continue-on-error。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go vet（Agent 与协议包）
+        run: go vet ./internal/agent/... ./internal/termproto/... ./cmd/relaymesh-agent/...
+
+      - name: go test（macOS 原生）
+        run: go test ./internal/agent/... ./internal/termproto/... -count=1 -timeout 5m
+
+  frontend:
+    name: 前端类型检查与单元测试
+    if: ${{ github.repository == 'teacat99/RelayMesh' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: 安装依赖（锁文件必须与 package.json 一致）
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      # Docker 镜像（Dockerfile.multistage 的前端阶段）用 npm ci 装依赖，而上一步用的是 pnpm：只升级了 package.json 与
+      # pnpm-lock.yaml、漏掉 package-lock.json 时，这个任务里其余步骤全是绿的，镜像构建却会在第一步失败。
+      # --dry-run 只校验 package-lock.json 与 package.json 同步，不安装、不跑脚本。
+      - name: 锁文件一致性（Docker 镜像用 npm ci）
+        working-directory: frontend
+        run: npm ci --dry-run --ignore-scripts --no-audit --no-fund
+
+      - name: 单元测试
+        run: pnpm --dir frontend run test:unit
+
+      - name: 类型检查与构建
+        run: pnpm --dir frontend run build

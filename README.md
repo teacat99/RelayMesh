@@ -17,19 +17,6 @@
 
 ---
 
-## 📣 推荐：试用 2.x 预览版（v2.0.0-rc.3）
-
-**RelayMesh 2.0 的预览版已经发布，推荐新用户直接从它开始。** 2.0 起它不止是「人与 AI 的交互中继」：同一个单二进制里还带着远程终端与模型执行（ExecMesh）、异步协作、项目 / 文档 / 任务，以及 Agent 自动升级与发布签名；完整清单见下文「核心特性」开头的「功能总览」，改动细节与升级须知见 [更新日志](CHANGELOG.md)。
-
-- **下面的命令已经指向预览版**：Docker 用镜像标签 `2.0.0-rc.3`，安装脚本取标签 `v2.0.0-rc.3` 上的那一份，源码克隆用 `--branch v2.0.0-rc.3`；直接照着「5 分钟上手」做就能装到预览版。
-- **预览版须知**：功能与行为在正式版之前可能调整，用于生产请自行评估；Docker 的 `latest` 镜像与一键安装脚本默认安装的版本仍是上一个正式版（1.6.3），不会被预览版改动；2.0 正式版发布后，本页会统一整理。
-- **Agent 与 Cursor hook 的安装命令，Docker / 单二进制 / `go run` 起的 Hub 都可以直接从面板复制**（v2.0.0-rc.3 起）：Docker 部署的 Hub 自带安装源；单二进制与 `go run` 起的 Hub 没有安装源，面板会生成从 GitHub Release 下载的命令，并固定到这台 Hub 自己的版本（例如命令里带 `RELAYMESH_VERSION=v2.0.0-rc.3`），装上的 Agent 与 hook 和 Hub 同版本，下载后照样校验 SHA256。`go run github.com/teacat99/RelayMesh/v2/cmd/relaymesh@latest` 起的 Hub 也会如实显示自己的版本号：2.0 正式版发布之前，`/v2` 路径下只有预览版，`@latest` 就是最新的预览版；想固定版本，把 `@latest` 换成 `@v2.0.0-rc.3`。
-- **还在用 v2.0.0-rc.1 / rc.2 的 Hub？** 它们面板里生成的 Agent 命令（单二进制 / `go run` 起的 Hub）指向公开库 `main` 上 1.x 的 `install.sh`，不认识 `agent` 子命令，需要手工改：把命令里的 `main` 换成 `v2.0.0-rc.3`，并在 `sh` 前加 `env RELAYMESH_VERSION=v2.0.0-rc.3`；hook 的安装命令同样加上 `RELAYMESH_VERSION=v2.0.0-rc.3`。更省事的做法是先把 Hub 升级到 v2.0.0-rc.3。
-- **正在使用 1.x？** 1.x 的文档在这里：[v1.6.3 的 README](https://github.com/teacat99/RelayMesh/blob/v1.6.3/README.md)。升级到 2.x 之前请先读更新日志里的「升级须知」（例如 Go 模块路径从 2.0 起带 `/v2`）。
-- 下载与发布说明：[GitHub Release v2.0.0-rc.3](https://github.com/teacat99/RelayMesh/releases/tag/v2.0.0-rc.3)；问题与建议欢迎提 [Issue](https://github.com/teacat99/RelayMesh/issues)。
-
----
-
 ## 📖 项目简介 (Introduction)
 
 **RelayMesh** 是一款专为 AI 辅助编程与自动化 Agent 打造的高性能、高可靠**人机协同交互与状态中继网关**。
@@ -78,7 +65,7 @@ RelayMesh 基于 **Go 1.26** 与 **Vue 3.5** 纯原生重构，支持 **原生 s
 **没有 Go：先装单二进制**（自动识别系统与架构，下载后校验 SHA256）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/install.sh | sh -s -- v2.0.0-rc.3
+curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/main/install.sh | sh
 relaymesh version      # 期望：RelayMesh v<版本号>
 ```
 
@@ -109,7 +96,7 @@ relaymesh version      # 期望：RelayMesh v<版本号>
 
 ```bash
 mkdir -p ~/relaymesh && cd ~/relaymesh
-curl -fsSLO https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/teacat99/RelayMesh/main/docker-compose.yml
 
 # 生成 .env：随机的 Web 密码与 MCP 令牌，权限 600（不要提交到 Git）
 cat > .env <<EOF
@@ -118,8 +105,6 @@ RELAYMESH_WEB_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 
 RELAYMESH_MCP_TOKEN=rmk_$(openssl rand -hex 24)
 # 监听地址：0.0.0.0（默认）= 所有网卡，局域网 / 手机也能访问；只想本机用、或要放在反向代理后面（公网），改成 127.0.0.1
 RELAYMESH_PUBLISH_BIND=0.0.0.0
-# 预览版：固定镜像版本（2.0 正式版发布后删掉这一行，镜像就会跟随 latest）
-RELAYMESH_TAG=2.0.0-rc.3
 EOF
 chmod 600 .env
 
@@ -275,8 +260,8 @@ docker compose up -d
 - **升级、回滚与数据位置**：升级与回滚时服务端数据库迁移只增不改（旧版二进制可回开新库，往返演练数据完整），Agent 升级不打断会话，服务端与 Agent 的新旧版本可以混用（旧 Agent 上的模型执行会立即得到明确的 `host_unsupported`）；终端显示内容与模型运行的完整输出只留在被控主机上，服务端数据库里没有。逐项说明、从 v1.6.x 升级的行为变化清单与记录隐私说明见 [docs/terminal-operations.md](docs/terminal-operations.md)。
 
 ### 🤝 8. 异步协作、聊天与会话守护 (New in v2.0.0)
-- **异步对话模式（按工作流开启，默认关闭）**：在会话页工具栏的 hook 芯片里打开「异步对话」后，智能体用 `interactive_feedback` 加 **`wait:false`** 发布进度，**发完立刻继续干活**，不再停下来等你回复；你的追加与答复由 hook 在它两次工具调用之间送达，需要拍板的事走 `async_ask` / 计划确认。生效后阶段滑块让位给**授权档位**（默认「标准授权」，可自己加 L0 / L1 档，每个工作流各自选档），时间线上会出现不算轮次的「智能体进度」气泡与任务更新卡。**不可逆操作（部署、推送、删数据、改凭据、不可逆迁移）在任何档位下都要停下来问你**，服务端强制，没有「放飞」一档；没收到过 hook 的工作流不能开启，hook 超过 60 分钟没动静会自动降级为同步，随时可一键关闭。从没开过的工作流，回执与以前逐字一致。详见 [docs/async-mode.md](docs/async-mode.md)。
-- **确认项（不阻塞的提问、计划确认、文档决策）**：智能体用 MCP 工具 **`async_ask`** 提问后**立即继续干活**，不再停下来等；你在会话页输入框上方的「待确认」条里逐张作答，或对 L0 / L1 且有推荐的项一键「全部采用推荐」（提交前先列出全部结果，整批原子生效），答复经收件箱回到智能体。同一套机制还承载**计划确认**（绑定任务，批准后再动手）与**文档决策卡**（改了选项会让旧答复作废并重新确认）。**不可逆 / 高风险（L2）的决定在服务端被拒绝走这条路**，必须用阻塞式 `interactive_feedback`，也永远不进批量；答复一经提交即为终局，答错了发一条追加说明更正。每个确认项有按工作流递增、永不复用的编号 `Q12`。详见 [docs/confirm-items.md](docs/confirm-items.md)。
+- **异步对话模式（按工作流开启，默认关闭）**：在会话页工具栏的 hook 芯片里打开「异步对话」后，智能体用 `interactive_feedback` 加 **`wait:false`** 发布进度，**发完立刻继续干活**，不再停下来等你回复；你的追加与答复由 hook 在它两次工具调用之间送达，需要拍板的事走 `async_ask` / 计划确认。生效后阶段滑块让位给**授权档位**（默认「标准授权」，可自己加 L0 / L1 档，每个工作流各自选档），时间线上会出现不算轮次的「智能体进度」气泡与任务更新卡。**不可逆操作（部署、推送、删数据、改凭据、不可逆迁移）在任何档位下都要你批准才会执行**：智能体发一张 L2 确认卡，不阻断其余工作，批准前绝不执行、没有答复就是不批准，没有「放飞」一档；没收到过 hook 的工作流不能开启，hook 超过 60 分钟没动静会自动降级为同步，随时可一键关闭。从没开过的工作流，回执与以前逐字一致。详见 [docs/async-mode.md](docs/async-mode.md)。
+- **确认项（不阻塞的提问、计划确认、文档决策）**：智能体用 MCP 工具 **`async_ask`** 提问后**立即继续干活**，不再停下来等；你在会话页输入框上方的「待确认」条里逐张作答，或对 L0 / L1 且有推荐的项一键「全部采用推荐」（提交前先列出全部结果，整批原子生效），答复经收件箱回到智能体。同一套机制还承载**计划确认**（绑定任务，批准后再动手）与**文档决策卡**（改了选项会让旧答复作废并重新确认）。**不可逆 / 高风险（L2）的决定也发确认卡，但批准前绝不执行**：不能带默认值、永远不进批量、不能一键采用推荐、没有自动过期，批准只来自你（同步模式仍用阻塞式 `interactive_feedback`）；答复一经提交即为终局，答错了发一条追加说明更正。每个确认项有按工作流递增、永不复用的编号 `Q12`。详见 [docs/confirm-items.md](docs/confirm-items.md)。
 - **聊天与群聊（异步对话开启后）**：智能体用 MCP 工具 `chat` 与你对话（`read` / `send` / `members` / `status` / `end`；发送永不阻塞，需要你拍板的事仍走 `interactive_feedback` 或 `async_ask`）。你也可以在网页 `/group` 建群、把多个工作流里的智能体拉进同一个群：用 `@` 点名成员（`@all`，或 `@human` 把消息推给你并穿透免打扰），消息可以带项目文档或 HTML Artifact 卡片、在侧边预览；群只能由你创建、由你拉人，智能体不能自行建群；
 - **Agent 身份与状态**：Cursor hook 除了查收件箱，还把「Agent 现在在干什么」报给服务端；会话页顶栏的状态徽标显示身份与状态（空闲 / 思考中 / 执行工具 / 等待批准 / 已中止 / 出错 / 已结束），并带上来源与用时。hook 出任何问题都静默放行，不影响智能体干活。详见 [docs/inbox.md](docs/inbox.md)；
 - **会话守护与非交互续聊**：给终端启动预设开「会话守护」后，Hub 每分钟判断会话是否意外结束或停摆（默认 30 分钟没有动静，可配 5～720 分钟），并在启动器里给出处理入口——**只做监测、通知与「你点一下才唤醒」，不会自动重启**。「非交互续聊」预设把 `agent -p --resume …` 这样的命令包成一键运行（经主机的执行通道，不开终端），可固定模型、对话与提示词；「异常退出时自动续跑」默认关闭，开启后有次数预算与熔断。网页新建、还没有智能体接入的会话可以一键「启用 Agent」，在指定主机与目录里无人值守地新开一个 Cursor CLI 对话。详见 [docs/terminal-operations.md](docs/terminal-operations.md) 第 8 节。
@@ -359,7 +344,7 @@ relaymesh mcp stdio  # 启动原生 stdio MCP 服务
 
 #### 1. Linux / macOS 一键安装脚本
 ```bash
-curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/install.sh | bash -s -- v2.0.0-rc.3
+curl -fsSL https://raw.githubusercontent.com/teacat99/RelayMesh/main/install.sh | bash
 ```
 
 #### 2. GitHub Releases 预编译单二进制直接下载
@@ -396,8 +381,8 @@ chmod +x relaymesh-*
 
 ```bash
 mkdir -p ~/relaymesh && cd ~/relaymesh
-curl -fsSLO https://raw.githubusercontent.com/teacat99/RelayMesh/v2.0.0-rc.3/docker-compose.yml
-# 创建 .env（见上文 B，或只写你需要的几行；预览期间请包含 RELAYMESH_TAG=2.0.0-rc.3）后：
+curl -fsSLO https://raw.githubusercontent.com/teacat99/RelayMesh/main/docker-compose.yml
+# 创建 .env（见上文 B，或只写你需要的几行）后：
 docker compose up -d
 ```
 
@@ -425,7 +410,7 @@ docker compose up -d
 ```bash
 docker run -d --name relaymesh --restart unless-stopped --user 0:0 \
   -p 127.0.0.1:18775:18775 -p 127.0.0.1:18776:18776 \
-  -v "$PWD/data:/app/data" teacat99/relaymesh:2.0.0-rc.3
+  -v "$PWD/data:/app/data" teacat99/relaymesh:latest
 ```
 
 ---
@@ -434,7 +419,7 @@ docker run -d --name relaymesh --restart unless-stopped --user 0:0 \
 
 ```bash
 # 1. 克隆项目仓库
-git clone --branch v2.0.0-rc.3 --depth 1 https://github.com/teacat99/RelayMesh.git
+git clone https://github.com/teacat99/RelayMesh.git
 cd RelayMesh
 
 # 2. 构建前端静态资源
@@ -564,7 +549,7 @@ Windows 使用 PowerShell 版安装脚本（Windows PowerShell 5.1 与 PowerShel
   ```yaml
   services:
     relaymesh-gateway:
-      image: teacat99/relaymesh-agent:2.0.0-rc.3
+      image: teacat99/relaymesh-agent:latest
       container_name: relaymesh-gateway
       restart: unless-stopped
       # 不写 command：镜像默认就是 ["run", "--ssh-gateway"]。网关现在是 Agent 的默认能力；想关闭，改成 command: ["run", "--no-ssh-gateway"]
@@ -583,7 +568,7 @@ Windows 使用 PowerShell 版安装脚本（Windows PowerShell 5.1 与 PowerShel
   ```
 
   首次启动前先在 Web「接入主机」打开发现窗口，容器上线后核对机器码再点「启用」。容器使用内嵌会话模式（没有 systemd；会话随容器进程结束，所以请保持它常驻，服务端重启与浏览器刷新不受影响）。容器里同样可以开一个本机终端，那是容器自己的 shell，权限只限于容器之内。不设 `RELAYMESH_AGENT_SSH_ALLOW` 就等于不限制目标，请务必按实际网段填写。挂载宿主机目录代替命名卷时，请先把目录 `chown 10001:10001`。数据卷里的 `ssh-gateway/` 目录保存着登录凭据（密封）：备份卷时请连同密钥一起保管，或者用 `RELAYMESH_AGENT_SSH_CRED_KEY` 把密钥分开存放。
-- **不想另外拉镜像**：服务端镜像里已经带着各平台的 Agent（`/app/agent-dist/relaymesh-agent-linux-amd64`，arm64 主机换成 `relaymesh-agent-linux-arm64`），把上面例子里的 `image` 换成 `teacat99/relaymesh:2.0.0-rc.3`，并加上 `entrypoint: ["/app/agent-dist/relaymesh-agent-linux-amd64"]`、`command: ["run", "--ssh-gateway"]`，数据目录改用 `RELAYMESH_AGENT_DATA_DIR=/app/data` 与卷 `gateway-data:/app/data` 即可，其余相同。
+- **不想另外拉镜像**：服务端镜像里已经带着各平台的 Agent（`/app/agent-dist/relaymesh-agent-linux-amd64`，arm64 主机换成 `relaymesh-agent-linux-arm64`），把上面例子里的 `image` 换成 `teacat99/relaymesh:latest`，并加上 `entrypoint: ["/app/agent-dist/relaymesh-agent-linux-amd64"]`、`command: ["run", "--ssh-gateway"]`，数据目录改用 `RELAYMESH_AGENT_DATA_DIR=/app/data` 与卷 `gateway-data:/app/data` 即可，其余相同。
 
 ---
 

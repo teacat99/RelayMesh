@@ -6,11 +6,22 @@ import (
 	"log"
 	"os"
 
-	"github.com/teacat99/RelayMesh/internal/config"
-	"github.com/teacat99/RelayMesh/internal/store"
+	"github.com/teacat99/RelayMesh/v2/internal/agent"
+	"github.com/teacat99/RelayMesh/v2/internal/agent/cli"
+	"github.com/teacat99/RelayMesh/v2/internal/buildinfo"
+	"github.com/teacat99/RelayMesh/v2/internal/config"
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
+// version 由发布流水线通过 -ldflags "-X main.version=…" 注入；没有注入（go run / go install …@vX.Y.Z）时，
+// init 里改用 Go 工具链记在二进制里的模块版本（是正式 / 预发布标签才采用，否则仍是 dev），见 internal/buildinfo。
 var version = "dev"
+
+func init() { version = buildinfo.Resolve(version) }
+
+// rev 是「Agent 侧代码指纹」（见 internal/agentrev），构建时通过 -ldflags "-X main.rev=…" 注入，只给 `relaymesh agent` 子命令自报用
+// （服务端自己不读它：服务端判断主机要不要升级，看的是分发目录里的 REV 文件）。没有注入时为空，服务端回退到比版本号。
+var rev = ""
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `RelayMesh · Agent Communication & Feedback Relay (Version: %s)
@@ -21,7 +32,9 @@ Usage:
 Available Commands:
   serve         Start background HTTP/HTTPS server and Web UI (default when no args provided)
   mcp stdio     Start stdio MCP server with local Web control plane
+  agent         Run / install the terminal Agent on this machine (see "relaymesh agent help")
   reset-auth    Reset admin web login credentials to environment defaults
+  rebind-workflow  Move a workflow to a new project directory / host after migrating a project
   version       Print RelayMesh version
   help          Show this help message
 
@@ -29,7 +42,9 @@ Examples:
   relaymesh                     # Start standard HTTP/HTTPS service
   relaymesh serve               # Explicitly start standard service
   relaymesh mcp stdio           # Start native stdio MCP server for Cursor / Claude
+  relaymesh agent run --server https://relay.example.com   # Let the Web terminal reach this machine
   relaymesh reset-auth          # Reset authentication credentials
+  relaymesh rebind-workflow --list   # Show where each workflow is bound (dry-run by default, see --help)
   relaymesh version             # Display version
 `, version)
 }
@@ -56,6 +71,16 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "agent":
+		agent.Version = version
+		agent.Rev = rev
+		os.Exit(cli.Run(context.Background(), args[1:], cli.Env{
+			Version:     version,
+			Rev:         rev,
+			Prog:        "relaymesh agent",
+			ServiceArgs: []string{"agent"},
+		}))
+
 	case "version", "--version", "-v":
 		fmt.Printf("RelayMesh %s\n", version)
 
@@ -77,6 +102,9 @@ func main() {
 		} else {
 			fmt.Printf("   生效状态: 免密私有直连模式\n")
 		}
+
+	case "rebind-workflow":
+		os.Exit(runRebindWorkflow(args[1:]))
 
 	case "help", "--help", "-h":
 		printUsage()

@@ -1,113 +1,55 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { marked } from 'marked'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import DOMPurify from 'dompurify'
 import { usePreviewStore } from '@/stores/preview'
 import { toast } from 'vue-sonner'
+import { renderMarkdown } from '@/lib/markdownRender'
+import type { PurifyLike } from '@/lib/markdownSafe'
+import { decorateLinkRefs } from '@/lib/linkRefsDom'
+import { useLinkRefs } from '@/composables/useLinkRefs'
 
 const props = defineProps<{
   content: string
+  /** 正文所属的工作流：给了就把正文里存在的引用（任务 #36、确认项 Q23、文档 [[路径]]、会话号 sess-xxxxxxxx）装饰成可点击的链接；缺省不做任何链接。 */
+  workflowId?: string
+  /** 正文所在文档的路径（文档页才传）：[[./x]] / [[../x]] 这样的相对写法按它所在的目录解析。 */
+  docPath?: string
+  /** 给标题加锚点 id（文档页用：目录跳转、「评论」按钮要靠它）；聊天里不需要。 */
+  headingAnchors?: boolean
 }>()
 
 const previewStore = usePreviewStore()
 const markdownContainerRef = ref<HTMLElement | null>(null)
+const linkRefs = useLinkRefs(() => props.workflowId)
+// 先粗筛：不是每段正文都有会话号，装饰时才不必每次都去问 store（识别规则本身在 lib/linkRefs.ts 的 SESSION_RE）
+const MAYBE_SESSION_REF_RE = /sess-[0-9a-f]{6}/i
 
-// 严格处理代码块中 CJK 与 ASCII 字符：为 CJK 字符包裹严格 2ch 宽度的 span，确保像素级绝对对齐
-function formatMonospaceCode(codeText: string): string {
-  const lines = codeText.split('\n')
-  return lines.map(line => {
-    let formattedLine = ''
-    for (const char of line) {
-      const code = char.codePointAt(0) || 0
-      // 判断是否为 CJK 全宽字符范围 (汉字、全角标点、日韩字符等)
-      const isCJK = (
-        (code >= 0x4E00 && code <= 0x9FFF) ||   // CJK Unified Ideographs
-        (code >= 0x3400 && code <= 0x4DBF) ||   // CJK Extension A
-        (code >= 0x20000 && code <= 0x2A6DF) || // CJK Extension B
-        (code >= 0x3000 && code <= 0x303F) ||   // CJK Symbols and Punctuation (如 【】、。)
-        (code >= 0xFF01 && code <= 0xFF60) ||   // Fullwidth Forms (如 ：！等)
-        (code >= 0xFE30 && code <= 0xFE4F)      // CJK Compatibility Forms
-      )
-
-      if (isCJK) {
-        formattedLine += `<span class="cjk-char">${char}</span>`
-      } else if (char === '<') {
-        formattedLine += '&lt;'
-      } else if (char === '>') {
-        formattedLine += '&gt;'
-      } else if (char === '&') {
-        formattedLine += '&amp;'
-      } else if (char === '"') {
-        formattedLine += '&quot;'
-      } else {
-        formattedLine += char
-      }
-    }
-    return formattedLine
-  }).join('\n')
-}
-
-// Custom renderer for marked to process pre / code blocks with character grid
-const renderer = new marked.Renderer()
-renderer.code = function(token: any, lang?: string) {
-  let codeText = ''
-  let language = ''
-  if (typeof token === 'string') {
-    codeText = token
-    language = lang || ''
-  } else if (token && typeof token === 'object') {
-    codeText = token.text || ''
-    language = token.lang || lang || ''
-  }
-  const formatted = formatMonospaceCode(codeText)
-  const langClass = language ? ` class="language-${language}"` : ''
-  return `<div class="code-block-wrapper my-3 rounded-xs border border-border/80 bg-card overflow-hidden shadow-2xs relative group">
-    <button
-      type="button"
-      class="copy-code-button absolute top-2 right-2 p-1.5 rounded-sm bg-muted/70 hover:bg-muted text-muted-foreground hover:text-foreground cursor-pointer transition-all border border-border/60 shadow-2xs opacity-75 hover:opacity-100 group-hover:opacity-100 z-10"
-      title="复制代码"
-    >
-      <svg class="copy-icon-idle w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-      </svg>
-      <svg class="copy-icon-success w-3.5 h-3.5 hidden text-green-600 dark:text-green-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M20 6 9 17l-5-5"/>
-      </svg>
-    </button>
-    <pre class="p-3 m-0 overflow-x-auto"><code${langClass}>${formatted}</code></pre>
-  </div>`
-}
-
-// 处理 Markdown 中的图片渲染：支持点击大图预览
-renderer.image = function(token: any) {
-  let href = ''
-  let title = ''
-  let text = ''
-  if (typeof token === 'string') {
-    href = token
-  } else if (token && typeof token === 'object') {
-    href = token.href || ''
-    title = token.title || ''
-    text = token.text || ''
-  }
-  return `<img src="${href}" alt="${text}" title="${title}" class="markdown-previewable-image rounded-sm border border-border my-2 max-h-96 object-contain cursor-pointer hover:opacity-95 transition-all shadow-xs" />`
-}
-
-// Configure marked renderer for safe and rich HTML output
-marked.setOptions({
-  renderer: renderer,
-  breaks: true,
-  gfm: true
-})
-
+// 内容来自 AI 客户端，属于不可信输入：渲染管线（marked → 自定义渲染器 → DOMPurify 白名单 → LRU 缓存）见 lib/markdownRender.ts
 const renderedHtml = computed(() => {
   if (!props.content) return ''
-  return marked.parse(props.content) as string
+  return renderMarkdown(DOMPurify as unknown as PurifyLike, props.content, props.headingAnchors ? { headingAnchors: true } : undefined)
 })
+
+// 引用（任务 / 确认项 / 文档 / 会话号）在净化之后、对着已经渲染出来的 DOM 装饰（只替换文本节点，见 lib/linkRefsDom.ts），
+// 所以渲染缓存里始终是不带上下文的纯净结果。v-html 每次换内容都会把装饰冲掉，因此内容变了、
+// 或引用目标集合变了（任务 / 确认项 / 文档晚于正文加载出来）都要重新装饰；装饰是幂等的。
+function decorateRefs() {
+  const el = markdownContainerRef.value
+  const id = props.workflowId
+  if (!el || !id || !linkRefs.active.value) return
+  if (renderedHtml.value.includes('[[')) linkRefs.ensureDocs() // 文档索引只在正文里真的写了 [[ 才去取
+  if (MAYBE_SESSION_REF_RE.test(renderedHtml.value)) linkRefs.ensureSessions() // 会话整表同理：正文里真有 sess- 才保证它在本地（#169）
+  decorateLinkRefs(el, linkRefs.index, { workflowId: id, ...(props.docPath ? { fromPath: props.docPath } : {}) })
+}
+onMounted(decorateRefs)
+watch([renderedHtml, linkRefs.signature], () => void nextTick(decorateRefs), { flush: 'post' })
 
 function handleContainerClick(event: MouseEvent) {
   const target = event.target as HTMLElement
   if (!target) return
+
+  // 0. 点击正文里的引用链接：任务弹窗 / 点名确认卡 / 站内打开文档 / 滚到那一轮；带修饰键的点击放行给浏览器（新标签页打开深链）
+  if (linkRefs.handleClick(event)) return
 
   // 1. 点击代码块复制按钮
   const copyBtn = target.closest('.copy-code-button') as HTMLElement | null
@@ -193,6 +135,21 @@ function handleContainerClick(event: MouseEvent) {
   margin-bottom: 0.3rem;
   color: var(--foreground);
 }
+/* h4 ~ h6：设计文档里常有「#### 子标题」，没有这几条时它们和正文一样大、一样粗（#154 补） */
+.markdown-body h4 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-top: 0.65rem;
+  margin-bottom: 0.25rem;
+  color: var(--foreground);
+}
+.markdown-body h5, .markdown-body h6 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-top: 0.6rem;
+  margin-bottom: 0.2rem;
+  color: var(--muted-foreground);
+}
 .markdown-body p {
   margin-bottom: 0.6rem;
   line-height: 1.65;
@@ -243,7 +200,8 @@ function handleContainerClick(event: MouseEvent) {
   color: var(--foreground);
   padding: 0.15rem 0.35rem;
   border-radius: var(--radius-xs);
-  font-size: 0.85em;
+  /* 0.875em：正文 14px 时是 12.25px；原来的 0.85em 只有 11.9px，手机上被算进「小于 12px」（#155） */
+  font-size: 0.875em;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   border: 1px solid var(--border);
 }
@@ -258,11 +216,37 @@ function handleContainerClick(event: MouseEvent) {
   -webkit-text-autospace: no-autospace;
 }
 
+/* 长到一行放不下、又没有空格可断的字符串（路径、标识符、裸链接、加粗长串）允许在任意位置折行。
+   不加的话它们会把卡片撑宽，进而把整个消息列表的横向滚动范围撑大：手机上右侧多出一片能滑动的空白（#167 / #283）。
+   overflow-wrap:anywhere 只在「这一行实在装不下」时才折，平时的断行位置不变。
+   表格单元格另算（它会改变整张表的列宽分配）：先恢复成默认，手机上再按下面的规则单独处理。 */
+.markdown-body :where(p, li, blockquote, h1, h2, h3, h4, h5, h6) {
+  overflow-wrap: anywhere;
+}
+.markdown-body :where(th, td) {
+  overflow-wrap: normal;
+}
+
 .markdown-body table {
   width: 100%;
   border-collapse: collapse;
   margin-top: 0.75rem;
   margin-bottom: 0.75rem;
+}
+/* 手机（窄屏）上的表格：和设计文档页一样按内容宽度排，放不下就在表格自己里横向滚动，不去撑宽外面的消息列表（#167 / #283）。
+   单元格里的长串允许折行（折得下就不必滚），每格至少 4.5em 免得被挤成一个字宽；桌面上的表格不动，仍是 100% 宽的整张表。
+   设计文档页（DocMarkdownBody）自己有同样的规则，选择器更具体，不受这里影响。 */
+@media (max-width: 767.98px) {
+  .markdown-body table {
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .markdown-body th, .markdown-body td {
+    min-width: 4.5em;
+    overflow-wrap: anywhere;
+  }
 }
 .markdown-body th, .markdown-body td {
   border: 1px solid var(--border);

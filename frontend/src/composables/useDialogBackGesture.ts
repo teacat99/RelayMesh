@@ -99,3 +99,26 @@ export function useDialogBackGesture(open: Ref<boolean>) {
     entry = null
   })
 }
+
+/**
+ * 等待程序化关闭对话框所触发的 history.back() 走完。
+ *
+ * 对话框在打开时会往浏览器历史里压一条哨兵记录，关闭时用 history.back() 把它弹掉，而这是异步的。
+ * 如果在它走完之前就 router.push 到新页面，随后到来的回退会把新页面又退回去。需要「先关对话框、再跳转」的流程，
+ * 在关闭对话框之后、跳转之前 await 这个函数。
+ */
+export function settleDialogHistory(timeoutMs = 600): Promise<void> {
+  if (typeof window === 'undefined') return Promise.resolve()
+  return new Promise(resolve => {
+    const started = Date.now()
+    const poll = () => {
+      if (expectedSelfPops <= 0 || Date.now() - started >= timeoutMs) {
+        resolve()
+        return
+      }
+      setTimeout(poll, 16)
+    }
+    // 先让出一个宏任务：关闭对话框的 watcher 在渲染后才执行、才会登记这次回退。
+    setTimeout(poll, 0)
+  })
+}

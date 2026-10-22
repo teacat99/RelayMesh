@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { useSettingsStore, type QuickPresetItem, type PhaseTemplateItem, normalizePresetItem } from '@/stores/settings'
+import { useSettingsStore, type QuickPresetItem } from '@/stores/settings'
 import {
   MessageSquareQuote,
   Plus,
@@ -17,10 +17,11 @@ import {
   ArrowDown
 } from 'lucide-vue-next'
 import QuickPresetEditDialog from '../feedback/QuickPresetEditDialog.vue'
+import PresetVersionArchive from './PresetVersionArchive.vue'
 import Badge from '../ui/badge/Badge.vue'
 
 const settingsStore = useSettingsStore()
-const activeStatusTab = ref<'online' | 'away' | 'autopilot'>('online')
+const STATUS_KEY = 'online' as const
 
 // Dialog states
 const isDialogOpen = ref(false)
@@ -29,7 +30,7 @@ const isNewPreset = ref(false)
 const dialogTargetType = ref<'status' | 'general'>('status')
 
 const currentStatusPresets = computed(() => {
-  return settingsStore.getNormalizedStatusPresets(activeStatusTab.value)
+  return settingsStore.getNormalizedStatusPresets(STATUS_KEY)
 })
 
 const currentGeneralPresets = computed(() => {
@@ -52,7 +53,7 @@ function openEditDialog(target: 'status' | 'general', item: QuickPresetItem) {
 
 function handleSavePreset(item: QuickPresetItem) {
   if (dialogTargetType.value === 'status') {
-    settingsStore.saveStatusPresetItem(activeStatusTab.value, item)
+    settingsStore.saveStatusPresetItem(STATUS_KEY, item)
   } else {
     settingsStore.saveQuickPresetItem(item)
   }
@@ -60,14 +61,14 @@ function handleSavePreset(item: QuickPresetItem) {
 
 function handleDeletePreset(id: string) {
   if (dialogTargetType.value === 'status') {
-    settingsStore.removeStatusPresetItem(activeStatusTab.value, id)
+    settingsStore.removeStatusPresetItem(STATUS_KEY, id)
   } else {
     settingsStore.removeQuickPresetItem(id)
   }
 }
 
 function handleRemoveStatusPreset(id: string) {
-  settingsStore.removeStatusPresetItem(activeStatusTab.value, id)
+  settingsStore.removeStatusPresetItem(STATUS_KEY, id)
 }
 
 function handleRemoveGeneralPreset(id: string) {
@@ -75,19 +76,12 @@ function handleRemoveGeneralPreset(id: string) {
 }
 
 function resetCurrentStatusPresets() {
-  settingsStore.resetStatusPresets(activeStatusTab.value)
+  settingsStore.resetStatusPresets(STATUS_KEY)
 }
 
+// 恢复默认：换成出厂内容；会被换掉的自定义内容（改过的、自建的）先存进「版本留存」，不会丢
 function resetGeneralPresets() {
-  settingsStore.updateSettings({
-    quickPresets: [
-      { id: 'qp-1', title: '按计划推进', content: '按计划推进', allowAppend: false, appendTitle: '按计划推进', isAppendActive: false },
-      { id: 'qp-2', title: '同意方案，请继续', content: '同意方案，请继续', allowAppend: false, appendTitle: '同意方案', isAppendActive: false },
-      { id: 'qp-3', title: '实施规范', content: '应先阐述对当前问题的理解，不修改代码，汇报后等待二次确认。', allowAppend: true, appendTitle: '实施规范', isAppendActive: false },
-      { id: 'qp-4', title: '已核对无误', content: '已核对无误', allowAppend: false, appendTitle: '核对确认', isAppendActive: false },
-      { id: 'qp-5', title: '需要调整方案', content: '需要调整方案，请暂停后续改动，先提供备选设计。', allowAppend: false, appendTitle: '方案调整', isAppendActive: false }
-    ]
-  })
+  settingsStore.resetGeneralPresets()
 }
 
 // Phase Template
@@ -152,21 +146,30 @@ function movePhaseItem(idx: number, dir: -1 | 1) {
 }
 
 function resetPhaseTemplate() {
-  settingsStore.updateSettings({
-    phaseTemplate: [
-      { id: 'assess', label: '评估', description: '需求接入与理解确认', prompt: '当前处于需求评估阶段。通过 feedback 收集用户描述，逐条记录到会话文档，保留用户原话。对每条需求复述自己的理解：真实场景、根因推测、期望行为、验收标准。等待用户确认后再进入方案阶段。不急于敲定方案选型，先听完并理解真实需求，并引导用户完善需求，汇报不同方案的利弊，对每个需求列出推荐方案、风险、改动范围与备选。方向敲定后可调整到方案阶段。⚠️ 本阶段禁止修改代码。可以读取代码验证可行性，但不得创建、修改或删除任何源代码文件。如确需修改代码，必须先通过 feedback 获得用户二次确认并切换到开发阶段。' },
-      { id: 'plan', label: '方案', description: '方案设计与评审拍板', prompt: '当前处于方案设计阶段。决策确认→问题拆解→数据流→不变量→边界→影响面→备选→验收。阅读代码和文档，注意核对方案可行性，确保实施阶段的逻辑闭环；通过 feedback 与用户逐项确认，将每条决策写入会话文档「关键决策」。决策全部锁定后等待用户确认再进入开发。⚠️ 本阶段禁止修改代码。可以读取代码验证可行性，但不得创建、修改或删除任何源代码文件。如确需修改代码，必须先通过 feedback 获得用户二次确认并切换到开发阶段。' },
-      { id: 'dev', label: '开发', description: '编码实施与增量验证', prompt: '当前处于开发执行阶段。改前先读相关代码与文档，沿用项目惯用模式。每完成一个逻辑单元立即增量验证（lint/type-check→build），不等全部完成再统一修。改 import/接口/类型时检查所有引用方。每 200-500 行改动即 commit。如发现方案和代码冲突，先记录并尝试解决，解决不了则向用户汇报，并回退到方案阶段。开发完成后进入验证阶段。' },
-      { id: 'verify', label: '验证', description: '三件套通过与功能验证', prompt: '当前处于部署验证阶段。执行三件套：lint/type-check→build→功能验证。部署、DB迁移、push main 等不可逆操作必须二次确认。完成标准 = 功能 + 类型 + 编译 + 校验 + 文档同步 + 配置同步 + 开发记录，每条须有可验证证据。验证失败回退到开发阶段修复，验证成功进入完成阶段，使用 feedback 汇报。' },
-      { id: 'done', label: '完成', description: '汇报完成与等待下一步', prompt: '当前阶段的开发任务完成。通过 feedback 提交最终汇报：修改内容、原因、影响范围、验证结果与后续建议。盘点后台进程和未提交变更，归档会话文档。等待用户确认下一步需求或结束会话。' },
-    ]
-  })
+  settingsStore.resetPhaseTemplate()
   phaseEditingIdx.value = null
 }
 </script>
 
 <template>
   <div class="space-y-4">
+    <!-- 出厂预设更新了、而你改过它们：待选择（稍后之后的入口） -->
+    <div
+      v-if="settingsStore.presetConflicts.length > 0"
+      class="p-2.5 rounded-xs border border-amber-500/40 bg-amber-500/10 flex items-center justify-between gap-3"
+      data-testid="preset-conflict-banner"
+    >
+      <span class="text-xs leading-relaxed">有 {{ settingsStore.presetConflicts.length }} 条出厂预设更新了，而你改过它们，等你选择怎么处理（均保留 / 使用最新 / 使用旧版）。</span>
+      <button
+        type="button"
+        class="shrink-0 text-xs font-mono px-2.5 py-1 rounded-xs border border-amber-500/50 hover:bg-amber-500/15 cursor-pointer transition-colors"
+        data-testid="preset-conflict-open"
+        @click="settingsStore.reopenPresetConflicts()"
+      >
+        逐条处理
+      </button>
+    </div>
+
     <!-- 0. 阶段滑块模板 -->
     <div class="space-y-3">
       <div class="flex items-center justify-between pb-1.5 border-b border-border/70">
@@ -258,12 +261,12 @@ function resetPhaseTemplate() {
       </div>
     </div>
 
-    <!-- 1. 状态专属预设 -->
+    <!-- 1. 快捷回复预设（输入区上方的标签） -->
     <div class="space-y-3">
       <div class="flex items-center justify-between pb-1.5 border-b border-border/70">
         <div class="flex items-center gap-1.5">
           <MessageSquareQuote class="w-3.5 h-3.5 text-primary" />
-          <span class="text-xs font-bold font-mono text-foreground">状态专属预设指令与快捷回复</span>
+          <span class="text-xs font-bold font-mono text-foreground">快捷回复预设（输入区上方的标签）</span>
         </div>
         <div class="flex items-center gap-2">
           <button
@@ -272,7 +275,7 @@ function resetPhaseTemplate() {
             @click="openCreateDialog('status')"
           >
             <Plus class="w-3 h-3" />
-            <span>新建状态预设</span>
+            <span>新建快捷回复</span>
           </button>
           <button
             type="button"
@@ -285,41 +288,7 @@ function resetPhaseTemplate() {
         </div>
       </div>
 
-      <!-- 状态小Tab -->
-      <div class="flex items-center gap-1 border-b border-border/60 pb-1">
-        <button
-          type="button"
-          class="px-2.5 py-1 rounded-xs text-xs font-mono transition-all cursor-pointer border"
-          :class="activeStatusTab === 'online'
-            ? 'border-emerald-500/40 bg-emerald-500/10 text-foreground font-bold shadow-2xs'
-            : 'border-transparent text-muted-foreground hover:bg-muted'"
-          @click="activeStatusTab = 'online'"
-        >
-          🟢 在线模式预设
-        </button>
-        <button
-          type="button"
-          class="px-2.5 py-1 rounded-xs text-xs font-mono transition-all cursor-pointer border"
-          :class="activeStatusTab === 'away'
-            ? 'border-amber-500/40 bg-amber-500/10 text-foreground font-bold shadow-2xs'
-            : 'border-transparent text-muted-foreground hover:bg-muted'"
-          @click="activeStatusTab = 'away'"
-        >
-          🟡 暂离模式预设
-        </button>
-        <button
-          type="button"
-          class="px-2.5 py-1 rounded-xs text-xs font-mono transition-all cursor-pointer border"
-          :class="activeStatusTab === 'autopilot'
-            ? 'border-indigo-500/40 bg-indigo-500/10 text-foreground font-bold shadow-2xs'
-            : 'border-transparent text-muted-foreground hover:bg-muted'"
-          @click="activeStatusTab = 'autopilot'"
-        >
-          🟣 托管模式预设
-        </button>
-      </div>
-
-      <!-- 状态标签列表 -->
+      <!-- 快捷回复标签列表 -->
       <div class="p-3 rounded-xs border border-border/70 bg-card/60 space-y-2.5">
         <div class="flex flex-wrap gap-2">
           <div
@@ -434,12 +403,15 @@ function resetPhaseTemplate() {
       </div>
     </div>
 
+    <!-- 3. 版本留存：出厂预设更新 / 恢复默认时被换下来的旧版、没启用的新版 -->
+    <PresetVersionArchive />
+
     <!-- Quick Preset Edit Dialog -->
     <QuickPresetEditDialog
       v-model:open="isDialogOpen"
       :preset-item="editingPreset"
       :is-new="isNewPreset"
-      :status-context="activeStatusTab"
+      :status-context="STATUS_KEY"
       :available-presets="dialogTargetType === 'status' ? currentStatusPresets : currentGeneralPresets"
       @save="handleSavePreset"
       @delete="handleDeletePreset"

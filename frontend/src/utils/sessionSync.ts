@@ -2,11 +2,12 @@
  * 会话同步的纯逻辑：载荷分类、补丁合并、列表拉取合并、单飞、合并调度、离开时长判定。
  *
  * 全部不依赖 Vue / Pinia / 网络，便于脱离浏览器做单元测试（sessionSync.test.ts）。
- * 设计背景见 .cursor/planning/2026-09-30-web-perf-plan.md（P1）：
+ * 设计背景：
  *  - 服务端的会话类 SSE 事件载荷与 GET /sessions/:id 等价（含实时字段、图片只带引用），带完整载荷的事件只需补丁，不必整表重拉；
  *  - 整表校准仍然存在（重连、久别回到前台、兜底），但必须单飞合并，且不能用较旧的服务端快照覆盖期间到达的本地补丁。
  */
 import type { FeedbackSession } from '../api/types'
+import { isNotice } from '../lib/asyncMode'
 
 // ---------------------------------------------------------------------------
 // 载荷分类
@@ -66,8 +67,9 @@ export function isStaleIncoming(
  * 服务端对空值指针字段使用 omitempty：字段缺席即表示已被清除（例如撤回清空 consumed_at，
  * 保活记录被删除后不再返回 last_keepalive_at）。直接展开合并会把旧值一直留着，所以这些字段缺席时要显式删除。
  * 仅用于「完整会话」载荷；简略列表行不走这里。
+ * body_omitted 也在其中（#169 第二期）：完整会话载荷带着全部正文，缓存里原来是轻量行的，补丁之后就是完整行了。
  */
-const CLEARABLE_KEYS = ['consumed_at', 'deadline_at', 'mcp_active_at', 'mcp_timeout_seconds', 'last_keepalive_at'] as const
+const CLEARABLE_KEYS = ['consumed_at', 'responded_at', 'deadline_at', 'mcp_active_at', 'mcp_timeout_seconds', 'last_keepalive_at', 'body_omitted'] as const
 
 export function mergeSessionPatch(base: FeedbackSession, incoming: FeedbackSession): FeedbackSession {
   const merged: FeedbackSession = { ...base, ...incoming }
@@ -82,6 +84,42 @@ export function isSameSessionData(a: FeedbackSession | null | undefined, b: Feed
   if (a === b) return true
   if (!a || !b) return false
   return JSON.stringify(a) === JSON.stringify(b)
+}
+
+// ---------------------------------------------------------------------------
+// 选中项跟随新的待答复会话
+// ---------------------------------------------------------------------------
+
+/**
+ * 新的待答复会话首次成为「当前会话」时，页面上选中的会话要不要跟过去。
+ * 输入区的模式（回复 / 追加反馈 / 追加指令）和页头的状态都看选中项：选中项停在上一轮（已完成）时，
+ * 用户在输入框里写的话会进收件箱，而不是答复这个正在等的提问（#134）。
+ *
+ * - 什么都没选、或选中的就是它：跟；
+ * - 选中的在别的工作流：不跟——后台别的对话的提问不能把正在看的对话抢走；
+ * - 同一个工作流：选中的是最新一轮（或其后的进度通知）= 在跟进这段对话，跟到新轮次；
+ *   选中的比某一轮更早 = 用户特意翻到了历史（通知深链、任务里的「关联会话」），不拽走。
+ *
+ * 只在「新的待答复会话首次出现」那一刻调用；稳态轮询不走这里，所以不会把有意选的旧轮次拽回来。
+ * 时间解析不了时保守地认为「选中的就是最新」（默认位置就在末尾）。
+ */
+export function shouldFollowNewPending(
+  selected: Pick<FeedbackSession, 'session_id' | 'workflow_id' | 'created_at'> | null | undefined,
+  incoming: Pick<FeedbackSession, 'session_id' | 'workflow_id'>,
+  workflowSessions: readonly Pick<FeedbackSession, 'session_id' | 'created_at' | 'kind'>[]
+): boolean {
+  if (!selected) return true
+  if (selected.session_id === incoming.session_id) return true
+  if (!incoming.workflow_id || selected.workflow_id !== incoming.workflow_id) return false
+  const selectedAt = parseTime(selected.created_at)
+  if (Number.isNaN(selectedAt)) return true
+  for (const s of workflowSessions) {
+    if (s.session_id === incoming.session_id || s.session_id === selected.session_id) continue
+    if (isNotice(s)) continue
+    const at = parseTime(s.created_at)
+    if (!Number.isNaN(at) && at > selectedAt) return false
+  }
+  return true
 }
 
 // ---------------------------------------------------------------------------

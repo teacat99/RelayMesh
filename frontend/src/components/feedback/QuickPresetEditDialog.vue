@@ -22,7 +22,7 @@ const props = defineProps<{
   open: boolean
   presetItem: QuickPresetItem | null
   isNew?: boolean
-  statusContext?: 'online' | 'away' | 'autopilot'
+  statusContext?: 'online'
   availablePresets?: QuickPresetItem[]
 }>()
 
@@ -292,7 +292,7 @@ function handleDelete() {
                   </div>
                 </div>
                 <div v-else class="p-2 rounded-xs bg-muted/20 border border-border/50 text-[10px] text-muted-foreground italic text-center">
-                  当前状态分组下暂无其他快捷预设
+                  暂无其他快捷回复预设
                 </div>
               </div>
             </div>
