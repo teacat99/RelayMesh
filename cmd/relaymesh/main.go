@@ -35,6 +35,7 @@ Available Commands:
   agent         Run / install the terminal Agent on this machine (see "relaymesh agent help")
   reset-auth    Reset admin web login credentials to environment defaults
   rebind-workflow  Move a workflow to a new project directory / host after migrating a project
+  branch-link   Turn an existing session into a branch of another (and "branch-unlink" to undo)
   version       Print RelayMesh version
   help          Show this help message
 
@@ -45,6 +46,7 @@ Examples:
   relaymesh agent run --server https://relay.example.com   # Let the Web terminal reach this machine
   relaymesh reset-auth          # Reset authentication credentials
   relaymesh rebind-workflow --list   # Show where each workflow is bound (dry-run by default, see --help)
+  relaymesh branch-link --list  # Show main/branch session relations (dry-run by default, see --help)
   relaymesh version             # Display version
 `, version)
 }
@@ -105,6 +107,12 @@ func main() {
 
 	case "rebind-workflow":
 		os.Exit(runRebindWorkflow(args[1:]))
+
+	case "branch-link":
+		os.Exit(runBranchLink(args[1:]))
+
+	case "branch-unlink":
+		os.Exit(runBranchUnlink(args[1:]))
 
 	case "help", "--help", "-h":
 		printUsage()

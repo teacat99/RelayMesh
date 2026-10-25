@@ -1,6 +1,6 @@
 // 运行：pnpm --dir frontend run test:unit
 // 卡片摞里有哪几种类型（#160，追加 #248 / Q24 选 a）：类型怎么数、摞头的类型标签、右侧轨摞刻度的分段、属性往返，
-// 以及源码级防线（只有预览的 compact 摞头画标签，经典的摞头一个字不动）。
+// 以及源码级防线（折叠的摞头是事件行、在里面画标签，展开后的头部不画）。
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -133,14 +133,14 @@ describe('右侧轨摞刻度的分段：stackRailSegments / formatStackParts / p
   })
 })
 
-describe('源码防线：只有预览的 compact 摞头画类型标签，经典摞头一个字不动', () => {
+describe('源码防线：折叠的摞头（事件行）画类型标签，展开后的头部不画', () => {
   const stackSrc = read('components/feedback/CardStack.vue')
   const railSrc = read('components/feedback/preview-view/PreviewTimelineRail.vue')
   // 刻度列表从 #158 起拆到 PreviewRailTicks：刻度的分段与无障碍标签在它里面，悬停提示与排布指纹仍在轨本体里
   const ticksSrc = read('components/feedback/preview-view/PreviewRailTicks.vue')
   const lib = read('lib/timelineRail.ts')
 
-  it('compact 分支：lead 槽里画标签（带 data-type 与 testid），用 stackChipModel 取数', () => {
+  it('折叠的事件行：lead 槽里画标签（带 data-type 与 testid），用 stackChipModel 取数', () => {
     assert.match(stackSrc, /stackChipModel\(stackTypeCounts\(props\.entries\)\)/)
     assert.match(stackSrc, /data-testid="card-stack-types"/)
     assert.match(stackSrc, /data-testid="card-stack-type"/)
@@ -148,11 +148,12 @@ describe('源码防线：只有预览的 compact 摞头画类型标签，经典�
     assert.match(stackSrc, /CARD_CHIP_CLASS, c\.toneClass/)
   })
 
-  it('经典分支（v-else 的整行按钮）与展开后的头部没有类型标签', () => {
-    const classic = stackSrc.slice(stackSrc.indexOf('<button\n        v-else'))
-    assert.ok(classic.length > 100, '找到了经典分支')
-    assert.doesNotMatch(classic, /card-stack-type/)
-    assert.doesNotMatch(classic, /chipModel/)
+  it('折叠态只有事件行一支（v-else 的整行按钮在 #247 删掉了）；展开后的头部没有类型标签', () => {
+    assert.doesNotMatch(stackSrc, /<button\n\s+v-else/, '折叠态不该再有 v-else 的整行按钮')
+    const expanded = stackSrc.slice(stackSrc.indexOf('<template v-else>'))
+    assert.ok(expanded.length > 100, '找到了展开态')
+    assert.doesNotMatch(expanded, /card-stack-type/)
+    assert.doesNotMatch(expanded, /chipModel/)
   })
 
   it('右侧轨：摞的刻度按 parts 分段画（每段一个类型色调），悬停提示 / 无障碍标签带上张数，排布指纹含 parts', () => {

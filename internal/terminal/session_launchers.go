@@ -40,9 +40,13 @@ type SessionLauncherView struct {
 	HostTitle string `json:"host_title,omitempty"`
 	Dir       string `json:"dir"`
 	// ConversationID 是这次运行实际要接着的对话（预设里固定的，或工作流里最近一个有动静的）；还不知道是空。
+	// 新会话与最近会话（见 Mode）没有对话编号，也是空。
 	ConversationID string `json:"conversation_id,omitempty"`
-	Model          string `json:"model,omitempty"`
-	Posture        string `json:"posture"`
+	// Mode 是这次运行实际接对话的方式（#191）：resume（指定会话）/ new（新会话：新开对话）/ continue（最近会话：--continue，
+	// 接哪个由 Cursor CLI 决定）。检查没通过、还没有结论时按预设的配置给（通常是 resume）。
+	Mode    string `json:"mode,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Posture string `json:"posture"`
 	// MaxRunSeconds 是这次运行的最长运行时间（秒）。
 	MaxRunSeconds int `json:"max_run_seconds"`
 	// Command 是拼出的整行命令（只读预览；缺对话编号时为空）。
@@ -87,12 +91,18 @@ type SessionLaunchersView struct {
 }
 
 // sameDir 判断两个主机上的绝对路径是不是同一个目录（容忍多余的斜杠与 . / ..）；不是绝对路径一律不算。
+// Windows 路径（盘符 / UNC，#178）两种斜杠等价、不分大小写，POSIX 路径与 Windows 路径互不相等。
 func sameDir(a, b string) bool {
-	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
-	if !strings.HasPrefix(a, "/") || !strings.HasPrefix(b, "/") {
+	ca, cb := cleanHeadlessDir(a), cleanHeadlessDir(b)
+	switch {
+	case ca == "" || cb == "":
 		return false
+	case strings.HasPrefix(ca, "/") != strings.HasPrefix(cb, "/"):
+		return false
+	case strings.HasPrefix(ca, "/"):
+		return ca == cb
 	}
-	return path.Clean(a) == path.Clean(b)
+	return strings.EqualFold(ca, cb)
 }
 
 // followsSession 判断预设跟的是不是这个会话：工作流相同，或固定的对话编号就是这个会话的对话。
@@ -120,9 +130,7 @@ func (g *guardService) sessionLaunchers(ctx context.Context, workflowID string, 
 	v.ConversationID = in.conv
 	sessionHost := in.sessionHost // 客户端没报主机名时 store 填的占位值也算「没上报」；还没有状态会话时用工作流上记录的主机（#182）
 	v.SessionHost = sessionHost
-	if strings.HasPrefix(in.dir, "/") {
-		v.Dir = path.Clean(in.dir)
-	}
+	v.Dir = cleanHeadlessDir(in.dir) // 不是绝对路径（POSIX 或 Windows 写法都不是）时为空
 	// 名字对得上的主机；只有恰好一台时才算「唯一确定」（同名多台要人选；in.host 可能是其中在线的那一台，这里不采用）。
 	named := map[string]bool{}
 	for _, h := range in.hosts {
@@ -165,7 +173,7 @@ func (g *guardService) sessionLaunchers(ctx context.Context, workflowID string, 
 func (g *guardService) sessionLauncherOf(ctx context.Context, p store.TerminalLauncher, now time.Time) SessionLauncherView {
 	pin := g.inspectLauncher(ctx, p, now)
 	it := SessionLauncherView{
-		ID: p.ID, Name: p.Name, Host: p.Host, HostTitle: p.Host, Dir: p.Dir, ConversationID: pin.conv,
+		ID: p.ID, Name: p.Name, Host: p.Host, HostTitle: p.Host, Dir: p.Dir, ConversationID: pin.conv, Mode: pin.modeName(),
 		Model: pin.run.Model, Posture: pin.run.EffectivePosture(), MaxRunSeconds: pin.maxRunSec,
 		Command: pin.command, Warnings: pin.warnings, CanRun: len(pin.errs) == 0,
 	}
@@ -230,6 +238,12 @@ func (g *guardService) suggestSessionLauncher(in *sessionRunInspect, v *SessionL
 
 // launcherDirBase 取目录最后一段当作项目名；根目录或取不到时用「会话」。
 func launcherDirBase(dir string) string {
+	if _, rest, ok := winPathParts(dir); ok { // Windows 路径（#178）：盘符根、UNC 共享根都当「根目录」
+		if len(rest) == 0 {
+			return "会话"
+		}
+		return rest[len(rest)-1]
+	}
 	b := path.Base(path.Clean(dir))
 	if b == "/" || b == "." || b == "" {
 		return "会话"

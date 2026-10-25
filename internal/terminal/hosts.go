@@ -233,6 +233,40 @@ func (h *Hub) listHosts(ctx context.Context) ([]HostView, []PendingView, error) 
 	return hosts, pend, nil
 }
 
+// HostPresence 是一台已启用的 Agent 主机此刻的在线情况，给巡检器用（主机掉线告警，#235）。
+type HostPresence struct {
+	MachineCode string
+	// Name 是显示名（备注优先，其次主机名）；都没有就是空——告警里宁可不写，也不拿机器码凑数。
+	Name   string
+	Online bool
+}
+
+// HostPresence 列出已启用的持久 Agent 主机与它们此刻是否在线。比 listHosts 轻得多：只查主机表、看连接，
+// 不填升级、守护、会话这些展示字段。不含临时启用的主机（它们本来就是来了又走）、SSH 主机（没有常驻连接，
+// 「可达」是探测出来的另一回事）与已停用 / 屏蔽的主机。nil 安全。
+func (h *Hub) HostPresence(ctx context.Context) ([]HostPresence, error) {
+	if h == nil || h.store == nil {
+		return nil, nil
+	}
+	recs, err := h.store.ListTerminalHosts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]HostPresence, 0, len(recs))
+	for _, r := range recs {
+		if r.IsSSH() || r.Status != termproto.HostStatusEnabled {
+			continue
+		}
+		a := h.onlineAgent(r.MachineCode)
+		out = append(out, HostPresence{
+			MachineCode: r.MachineCode,
+			Name:        displayNameOf(r.Remark, r.Hostname),
+			Online:      a != nil && a.isEnabled(),
+		})
+	}
+	return out, nil
+}
+
 func (h *Hub) fillOnline(v *HostView) {
 	if a := h.onlineAgent(v.MachineCode); a != nil && a.isEnabled() {
 		v.Online = true

@@ -14,10 +14,6 @@ export function isLightRow(s: Pick<FeedbackSession, 'body_omitted'> | null | und
   return s?.body_omitted === true
 }
 
-export function hasLightRows(rows: readonly FeedbackSession[] | undefined): boolean {
-  return !!rows && rows.some(isLightRow)
-}
-
 function timeOf(iso: string | undefined): number {
   return iso ? Date.parse(iso) : Number.NaN
 }

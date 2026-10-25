@@ -574,10 +574,12 @@ func (s *Store) ListTasks(ctx context.Context, projectID, state, cursor string, 
 		return nil, err
 	}
 
+	// 多取的那一条只用来判断「后面还有没有」。游标必须是本页最后一条的编号：
+	// 下一页的条件是 id > cursor，如果这里放「下一页第一条」，它自己会被跳过（每个页界漏一条，#250）。
 	var nextCursor string
 	if len(tasks) > limit {
-		nextCursor = tasks[limit].ID
 		tasks = tasks[:limit]
+		nextCursor = tasks[limit-1].ID
 	}
 
 	summaries := make([]model.TaskSummary, len(tasks))

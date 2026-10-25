@@ -3,9 +3,9 @@ import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useSettingsStore } from '../../stores/settings'
 import { useAuthStore } from '../../stores/auth'
 import { useCredentialsStore } from '../../stores/credentials'
+import { useSettingsUiStore } from '../../stores/settingsUi'
 import type { MCPCredential, MCPPermissions } from '../../api/client'
 import CredentialPolicyEditor from './CredentialPolicyEditor.vue'
-import OAuthSettingsPanel from './OAuthSettingsPanel.vue'
 import {
   GOVERNANCE_OPTIONS,
   LAUNCHER_OPTIONS,
@@ -66,6 +66,7 @@ import { REVEAL_AUTO_HIDE_MS, revealErrorInfo } from '../../lib/credentialReveal
 const settingsStore = useSettingsStore()
 const authStore = useAuthStore()
 const credStore = useCredentialsStore()
+const settingsUi = useSettingsUiStore()
 const terminalStore = useTerminalStore()
 const router = useRouter()
 
@@ -982,8 +983,6 @@ function credTerminalSummary(cred: MCPCredential): string {
       </div>
     </div>
 
-    <OAuthSettingsPanel class="mt-4" />
-
     <!-- 5. MCP 凭据管理 (Credential Management) -->
     <div class="p-3.5 rounded-xs border border-border/80 bg-card/40 space-y-3">
       <div class="flex items-center justify-between border-b border-border/60 pb-2.5">
@@ -994,6 +993,10 @@ function credTerminalSummary(cred: MCPCredential): string {
             <p class="text-[10px] text-muted-foreground font-sans mt-0.5">
               为 AI 客户端分发独立 Token，每条凭据可绑定主机名（<code class="text-primary/80">host_name</code>）和细粒度权限。
               MCP 令牌只用于 <code class="text-primary/80">/mcp</code> 端点，不能访问 Web 管理接口；令牌分 RelayMesh（默认）、ExecMesh（只含终端执行）与自定义三档。
+            </p>
+            <p class="text-[10px] text-muted-foreground font-sans mt-0.5" data-testid="security-to-oauth-note">
+              用 ChatGPT / Claude 的「添加自定义连接器」接入、不想手动复制令牌？去
+              <button type="button" class="underline underline-offset-2 hover:text-foreground cursor-pointer" data-testid="security-to-oauth" @click="settingsUi.select('oauth')">「OAuth 授权」页</button>。
             </p>
           </div>
         </div>

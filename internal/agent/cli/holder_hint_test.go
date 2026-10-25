@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -131,7 +132,9 @@ func TestRestartHintSentence(t *testing.T) {
 }
 
 func TestSystemHolderHint(t *testing.T) {
-	const sysSocket = "/var/lib/relaymesh-agent/holder/holder.sock"
+	// 被测代码用 holder.SocketPath（filepath.Join）拼出系统级套接字：在 Windows 主机上模拟 linux 时分隔符是反斜杠，
+	// 所以期望值按主机的写法给（Linux / macOS 上 FromSlash 不改任何字符，仍是下面这个字面量）。
+	sysSocket := filepath.FromSlash("/var/lib/relaymesh-agent/holder/holder.sock")
 	userSocket := "/home/alice/.local/state/relaymesh-agent/holder/holder.sock"
 	unit := "/etc/systemd/system/" + systemdHolderUnitName
 	has := func(paths ...string) func(string) bool {

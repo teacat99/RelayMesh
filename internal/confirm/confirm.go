@@ -157,6 +157,75 @@ func FormatAnswerLine(item *model.ConfirmItem, optionIDs []string, note, custom 
 	return line
 }
 
+// FormatMainAnswerLine 生成「主会话代为定夺」的答复文案（#236 P2）：在 FormatAnswerLine 前面写明这不是用户本人的答复，
+// 分支里的智能体读到时能分清是谁拍的板（涉及它自己的底线规则时，要不要再向用户本人确认由它判断）。
+func FormatMainAnswerLine(item *model.ConfirmItem, optionIDs []string, note, custom string) string {
+	return "【主会话代为定夺，不是用户本人的答复】" + FormatAnswerLine(item, optionIDs, note, custom)
+}
+
+// routedAskBodyRunes 是写进主会话收件箱的请示说明的字数上限（原文可能长达两万字，收件箱一行放不下；超出的部分截断并注明）。
+const routedAskBodyRunes = 1500
+
+// FormatRoutedAskLine 生成「分支里的请示路由给主会话」时写进主会话收件箱的一段话（#236 P2）。
+// 主会话也可能很久之后才读到，所以把定夺需要的东西一次写全：编号、标题、风险档、说明、带 id 的选项，以及怎么答 / 怎么转交 / 多久会自动升级。
+// l2Guard 为真且请示是 L2 时，写明「平台兜底：只能转交」，免得主会话白答一次被拒绝。
+func FormatRoutedAskLine(branchWF, branchTitle string, item *model.ConfirmItem, escalateMinutes int, l2Guard bool) string {
+	view := model.NewConfirmItemView(item)
+	ref := model.ConfirmRef(item.Seq)
+	who := "分支（" + branchWF + "）"
+	if t := strings.TrimSpace(branchTitle); t != "" {
+		who = fmt.Sprintf("分支「%s」（%s）", clipRunes(t, 40), branchWF)
+	}
+	choose := "单选"
+	if item.Multi {
+		choose = "多选"
+	}
+	extra := ""
+	if item.AllowNote {
+		extra = "，可附备注"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s有一项请示在等你定夺：%s「%s」（风险 %s，%s%s", who, ref, clipRunes(item.Title, answerTitleRunes), item.Risk, choose, extra)
+	if item.Kind == model.ConfirmKindPlan {
+		fmt.Fprintf(&b, "，计划确认·任务 #%d", item.TaskSeq)
+	}
+	b.WriteString("）")
+	if body := strings.TrimSpace(item.Body); body != "" {
+		if utf8.RuneCountInString(body) > routedAskBodyRunes {
+			body = string([]rune(body)[:routedAskBodyRunes]) + "…（说明较长，已截断）"
+		}
+		b.WriteString("\n说明：" + body)
+	}
+	if len(view.Options) > 0 {
+		parts := make([]string, 0, len(view.Options))
+		for _, o := range view.Options {
+			p := o.ID + ". " + clipRunes(o.Label, 60)
+			if d := strings.TrimSpace(o.Detail); d != "" {
+				p += "（" + clipRunes(d, 80) + "）"
+			}
+			if o.Recommended {
+				p += " [推荐]"
+			}
+			parts = append(parts, p)
+		}
+		b.WriteString("\n选项：" + strings.Join(parts, "；"))
+	}
+	if l2Guard && item.Risk == model.ConfirmRiskL2 {
+		fmt.Fprintf(&b, "\n平台开着「L2 请示不由主会话代答」的兜底开关：这项只能转交用户 → branch(action:\"escalate\", branch:\"%s\", ref:\"%s\", note:\"…\")。", branchWF, ref)
+	} else {
+		first := "a"
+		if len(view.Options) > 0 {
+			first = view.Options[0].ID
+		}
+		fmt.Fprintf(&b, "\n作答：branch(action:\"answer\", branch:\"%s\", ref:\"%s\", options:[\"%s\"])；预设选项都不合适时可以不选、改用 text 写自定义答复。", branchWF, ref, first)
+		fmt.Fprintf(&b, "\n定夺不了（含不可逆 / 需要用户本人批准的事）：branch(action:\"escalate\", branch:\"%s\", ref:\"%s\", note:\"为什么转给用户\")。", branchWF, ref)
+	}
+	if escalateMinutes > 0 {
+		fmt.Fprintf(&b, "\n超过 %d 分钟没有答复会自动转交给用户；用户也可能随时直接答复，先到先得。", escalateMinutes)
+	}
+	return b.String()
+}
+
 // FormatDismissLine 生成「用户放弃这个确认项」的收件箱文案。
 func FormatDismissLine(item *model.ConfirmItem, reason string) string {
 	line := fmt.Sprintf("%s「%s」已被用户忽略（不需要你再等它的答复）", model.ConfirmRef(item.Seq), clipRunes(item.Title, answerTitleRunes))

@@ -228,6 +228,13 @@ func (s *Store) CreateConfirmItem(ctx context.Context, in ConfirmCreateInput) (i
 		}
 	}
 
+	// 决策路由（#236 P2）：分支里智能体发的 ask / plan 请示，分支开放了「定夺」就先送主会话。
+	// 这里（事务外）只预读分支标题、升级时限等写文案要用的东西；是否路由由事务里重验后的关系决定。
+	var route *branchRoute
+	if createdBy == model.ConfirmCreatedByAgent && (kind == model.ConfirmKindAsk || kind == model.ConfirmKindPlan) {
+		route = s.prepareBranchRoute(ctx, wf)
+	}
+
 	now := time.Now()
 	err = s.WithTx(ctx, func(tx *gorm.DB) error {
 		if createdBy == model.ConfirmCreatedByAgent {
@@ -258,6 +265,15 @@ func (s *Store) CreateConfirmItem(ctx context.Context, in ConfirmCreateInput) (i
 		if err != nil {
 			return err
 		}
+		// 路由：事务里重新取一次关系（活动 + 开了定夺），预读之后关系变了就按最新的来。
+		parent := ""
+		if route != nil {
+			if rel, err := activeDecideBranchTx(tx, wf); err != nil {
+				return err
+			} else if rel != nil {
+				parent = rel.ParentWorkflowID
+			}
+		}
 		row := model.ConfirmItem{
 			WorkflowID: wf, Seq: seq, Kind: kind, Title: title, Body: body,
 			OptionsJSON: optsJSON, Multi: in.Multi, AllowNote: in.AllowNote,
@@ -266,8 +282,22 @@ func (s *Store) CreateConfirmItem(ctx context.Context, in ConfirmCreateInput) (i
 			OptionsFP: fp, Status: model.ConfirmStatusPending, CreatedBy: createdBy,
 			CreatedAt: now, UpdatedAt: now,
 		}
+		if parent != "" {
+			row.Addressee = model.ConfirmAddresseeMain(parent)
+		}
 		if err := tx.Create(&row).Error; err != nil {
 			return err
+		}
+		if parent != "" {
+			// 同一事务里给主会话收件箱写一行请示：请示落库了主会话却不知道，会让它白等 30 分钟。
+			line := confirm.FormatRoutedAskLine(wf, route.branchTitle, &row, route.minutes, route.l2Guard)
+			if err := tx.Create(&model.QueuedFeedback{
+				WorkflowID: parent, ResponseText: line, Status: "pending", Kind: model.InboxKindBranch, SenderRef: wf,
+				OriginRef: confirmOriginRef(row.Seq), // c:Q12：收件箱渲染据此认出「路由来的请示」
+				Actor:     model.MsgActor{Kind: model.ActorKindBranch, Workflow: wf}.String(), CreatedAt: now, UpdatedAt: now,
+			}).Error; err != nil {
+				return err
+			}
 		}
 		item = &row
 		created = true
@@ -499,9 +529,15 @@ func answerConfirmTx(tx *gorm.DB, item *model.ConfirmItem, optionIDs []string, n
 //
 // originRef 记下这条答复属于哪些确认项（c:Q12，多条用逗号分隔），聊天消息流据此把投递状态挂回对应的卡。
 func queueAnswerMessageTx(tx *gorm.DB, workflowID, text, originRef string, now time.Time) error {
+	return queueAnswerMessageActorTx(tx, workflowID, text, originRef, "", now)
+}
+
+// queueAnswerMessageActorTx 同上，并标明答复人（queued_feedbacks.actor 的 JSON）：分支里的请示由主会话代答时带 {"kind":"main",…}，
+// 会话页据此标注「主会话代为定夺」；空 = 用户本人（和以前一样）。
+func queueAnswerMessageActorTx(tx *gorm.DB, workflowID, text, originRef, actor string, now time.Time) error {
 	q := model.QueuedFeedback{
 		WorkflowID: workflowID, ResponseText: text, Status: "pending",
-		Kind: model.InboxKindAnswer, OriginRef: originRef, CreatedAt: now, UpdatedAt: now,
+		Kind: model.InboxKindAnswer, OriginRef: originRef, Actor: actor, CreatedAt: now, UpdatedAt: now,
 	}
 	return tx.Create(&q).Error
 }

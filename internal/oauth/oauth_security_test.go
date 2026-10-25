@@ -166,7 +166,7 @@ func TestOAuthSoftSwitchOffRejectsIssuedAccessTokens(t *testing.T) {
 	}
 }
 
-// 策略（总开关 / 对外地址 / DCR / 受信来源）与签发令牌同级：保存要终端解锁；读取不要。
+// 策略（总开关 / 对外地址 / DCR）与签发令牌同级：保存要终端解锁；读取不要。
 func TestOAuthPolicyPutRequiresUnlock(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	st, _ := store.New(":memory:")
@@ -319,6 +319,10 @@ func TestOAuthConsentRoutesFollowRuntimeSwitch(t *testing.T) {
 	setEnabled(true)
 	if w := call(http.MethodGet, "/api/v1/oauth/requests/nope", nil); w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "expired") {
 		t.Fatalf("打开后接口应存在（业务层 404），got %d %s", w.Code, w.Body.String())
+	}
+	// 默认的自动注册方式是限时窗口（#239）：登记之前先开一个接入窗口，和用户在设置里做的一样。
+	if w := call(http.MethodPost, "/api/v1/oauth/window", []byte(`{}`)); w.Code != http.StatusOK {
+		t.Fatalf("运行中打开总开关后应能开接入窗口，got %d %s", w.Code, w.Body.String())
 	}
 	clientID, redirectURI, resource, verifier, challenge := registerTestClient(t, engine)
 	if code := approveFlow(t, engine, jwt, unlock, clientID, redirectURI, resource, challenge, verifier); code == "" {

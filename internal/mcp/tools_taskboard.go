@@ -9,7 +9,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/teacat99/RelayMesh/v2/internal/asyncmode"
 	"github.com/teacat99/RelayMesh/v2/internal/model"
 	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
@@ -377,6 +379,7 @@ func (s *Server) taskBoardOverview(ctx context.Context, args taskBoardArgs) (any
 			out["warnings"] = warnings
 		}
 	}
+	s.addWrapupOverview(ctx, wf, out)
 	return out, nil
 }
 
@@ -688,20 +691,34 @@ func (s *Server) taskBoardBatch(ctx context.Context, args taskBoardArgs) (any, e
 	pol := s.newWorkPolicy(ctx, wf, args.SessionID)
 	actor := pol.actor
 	var policyHints []string // audit 档下被记了违规的写入：在回执里提醒一次（不阻止），去重
+	var branchHints []string // 刚把任务派给自己活动分支的写入：提醒「派单不会叫醒对方」（#236 P5），按分支去重
 	addHint := func(res *store.WorkItemResult) {
 		if h := pol.hint(res); h != "" {
+			dup := false
 			for _, old := range policyHints {
+				if old == h {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				policyHints = append(policyHints, h)
+			}
+		}
+		if h := s.branchAssignHint(ctx, wf, res); h != "" {
+			for _, old := range branchHints {
 				if old == h {
 					return
 				}
 			}
-			policyHints = append(policyHints, h)
+			branchHints = append(branchHints, h)
 		}
 	}
 	resolver := &moduleResolver{s: s, ctx: ctx, wf: wf, cache: map[string]*model.WorkModule{}, failed: map[string]bool{}}
 	results := make([]map[string]any, 0, len(args.Ops))
 	var created, updated, unchanged, exists, failed int
 	itemsChanged := false
+	var boardResults []*store.WorkItemResult // 产生协作事件的写入，批量结束后一起写进群里
 	// 结构体检要用的两项：新建任务里没写 module 的数量，以及以轮次 / 批次开头的标题。
 	createdNoModule := 0
 	var roundTitles []string
@@ -778,6 +795,7 @@ func (s *Server) taskBoardBatch(ctx context.Context, args taskBoardArgs) (any, e
 				continue
 			}
 			addHint(res)
+			boardResults = append(boardResults, res)
 			e := batchEntry(i, res.Item, "created")
 			results = append(results, e)
 			created++
@@ -839,6 +857,7 @@ func (s *Server) taskBoardBatch(ctx context.Context, args taskBoardArgs) (any, e
 				action = "updated"
 				updated++
 				itemsChanged = true
+				boardResults = append(boardResults, res)
 			} else {
 				unchanged++
 			}
@@ -850,6 +869,8 @@ func (s *Server) taskBoardBatch(ctx context.Context, args taskBoardArgs) (any, e
 	if modulesChanged || itemsChanged {
 		s.notifyWorkBoard(wf, modulesChanged, itemsChanged)
 	}
+	// 整批里产生的协作事件（派活、交付、验收……）一起交给群：同一种事件、同一对人合成一条（#180 B3c）。
+	s.postBoardLines(ctx, boardResults...)
 	status := "ok"
 	switch {
 	case failed > 0 && created+updated+unchanged+exists == 0 && len(args.Ops) > 0:
@@ -862,6 +883,9 @@ func (s *Server) taskBoardBatch(ctx context.Context, args taskBoardArgs) (any, e
 	out["results"] = results
 	if warnings := append(planWarnings, batchWarnings(createdNoModule, roundTitles)...); len(warnings) > 0 {
 		out["warnings"] = warnings
+	}
+	if len(branchHints) > 0 {
+		out["branch_hint"] = strings.Join(branchHints, " ｜ ")
 	}
 	if len(policyHints) > 0 {
 		out["policy_hint"] = strings.Join(policyHints, " ｜ ")
@@ -914,5 +938,74 @@ func (s *Server) taskDigestHeader(ctx context.Context, workflowID string) string
 	case d.Unassigned > 0:
 		line += fmt.Sprintf(" ｜ 未归类 %d 条：用 task_board batch 归入模块", d.Unassigned)
 	}
+	line += s.wrapupMarker(ctx, workflowID)
 	return line + " ｜ task_board 查看 / 成批更新"
+}
+
+// wrapupMarker 返回回执 tasks: 行末尾与「收尾」有关的三条提示（#232 D2），都只在异步生效的会话里出现：
+//   - 收尾门：门开着、没被「本次放行」、本会话名下确有未完成任务；它与 window: 行互补——窗口为空
+//     （没起算或已用完）时没有 window: 行，这条仍然说明「现在还不能收尾」；
+//   - 暂缓缘由：最近刚置「暂缓」、进展里却没写在等哪张确认卡 / 等什么的任务（软提醒，见 asyncmode.ShelveNote）；
+//   - 答复未接：确认卡已被答复、挂着它的任务却还在暂缓且答复后没人动过（反向软提醒，见 asyncmode.AnsweredNote）。
+//
+// 同步会话、门已关或已放行、没有这类任务时都返回空串，回执与升级前逐字一致。
+func (s *Server) wrapupMarker(ctx context.Context, workflowID string) string {
+	now := time.Now()
+	info, err := s.store.WorkflowModeInfo(ctx, workflowID, now)
+	if err != nil || !info.State.Effective {
+		return ""
+	}
+	var out string
+	if !info.Row.StrictWrapupOff && !info.Row.GateReleased {
+		if g, err := s.store.WorkflowGate(ctx, workflowID); err == nil {
+			out += asyncmode.GateMarker(g.Tasks, g.Total)
+		}
+	}
+	tasks, total := s.store.ShelvedUnexplained(ctx, workflowID, now, asyncmode.GateListMax)
+	out += asyncmode.ShelveMarker(tasks, total)
+	answered, answeredTotal := s.store.ShelvedAfterAnswer(ctx, workflowID, now, asyncmode.GateListMax)
+	return out + asyncmode.AnsweredMarker(answered, answeredTotal)
+}
+
+// addWrapupOverview 在 task_board overview 里补收尾门与暂缓缘由（#232 D2）；非异步会话什么都不加，概览与以前一致。
+//   - wrapup_gate：门开着且有未完成任务时，列出挡着收尾的任务（含状态与标题）和放下它们的两条出路；
+//   - warnings：刚暂缓却没写缘由的任务、确认卡已答复而任务还在暂缓的任务（追加在结构性警告之后）。
+func (s *Server) addWrapupOverview(ctx context.Context, wf string, out map[string]any) {
+	now := time.Now()
+	info, err := s.store.WorkflowModeInfo(ctx, wf, now)
+	if err != nil || !info.State.Effective {
+		return
+	}
+	if !info.Row.StrictWrapupOff {
+		if g, err := s.store.WorkflowGate(ctx, wf); err == nil && g.Total > 0 {
+			// 只给 seq / state / title：智能体用板内序号（#12）引用任务，全局主键 id 只会让它混淆
+			shown := make([]map[string]any, 0, len(g.Tasks))
+			for _, it := range g.Tasks {
+				shown = append(shown, map[string]any{"seq": it.Seq, "state": it.State, "title": it.Title})
+			}
+			gate := map[string]any{
+				"total": g.Total,
+				"tasks": shown,
+				"how":   "这些任务清零前回复窗口不走、也不能收尾：做完的置 done（带结论）；必须等用户拍板的先发确认卡（async_ask）再置 shelved 并在进展里写 Q<N>；等外部条件的置 shelved 并写明等什么。",
+			}
+			if g.Total > len(shown) {
+				gate["more"] = g.Total - len(shown)
+			}
+			if g.Released {
+				gate["released"] = true
+				gate["how"] = "用户已「本次放行」收尾门：窗口照常倒计时，这些任务不再挡着；能做完的仍请做完，其余置 shelved 并写明缘由。"
+			}
+			out["wrapup_gate"] = gate
+		}
+	}
+	if tasks, total := s.store.ShelvedUnexplained(ctx, wf, now, asyncmode.GateListMax); total > 0 {
+		warn := fmt.Sprintf("刚置「暂缓」的 %s 进展里没写缘由：%s。", asyncmode.GateNames(tasks, total), asyncmode.ShelveNote)
+		prev, _ := out["warnings"].([]string)
+		out["warnings"] = append(prev, warn)
+	}
+	if items, total := s.store.ShelvedAfterAnswer(ctx, wf, now, asyncmode.GateListMax); total > 0 {
+		warn := fmt.Sprintf("确认卡已答复、任务还在暂缓：%s——%s。", asyncmode.AnsweredNames(items, total), asyncmode.AnsweredNote)
+		prev, _ := out["warnings"].([]string)
+		out["warnings"] = append(prev, warn)
+	}
 }

@@ -43,6 +43,13 @@ type asyncModeView struct {
 	ActiveTasks        int  `json:"active_tasks,omitempty"`
 	WindowAddMinutes   int  `json:"window_add_minutes"`
 	WaitSliceMinutes   int  `json:"wait_slice_minutes"`
+	// 严格收尾门（#232 D2）：StrictWrapup 是开关（默认开）。开着时回复窗口按「本会话名下未完成任务（待办 / 进行中 /
+	// 验证中，不按时间截断）」暂停；GateTasks 是挡着收尾的任务（至多 20 个，按编号升序），GateTotal 是总数，
+	// GateReleased 表示这一轮已被「本次放行」（窗口照常倒计时）。关着时后三项为空，窗口回到老口径。
+	StrictWrapup bool                 `json:"strict_wrapup"`
+	GateReleased bool                 `json:"gate_released,omitempty"`
+	GateTotal    int                  `json:"gate_total,omitempty"`
+	GateTasks    []asyncmode.GateTask `json:"gate_tasks,omitempty"`
 }
 
 func (h *APIHandler) asyncModeViewFor(c *gin.Context, workflowID string) (asyncModeView, error) {
@@ -70,6 +77,12 @@ func (h *APIHandler) asyncModeViewFor(c *gin.Context, workflowID string) (asyncM
 		EnabledAt:        info.Row.EnabledAt,
 		ProfileID:        info.Row.ProfileID,
 		Profile:          profile,
+		StrictWrapup:     !info.Row.StrictWrapupOff,
+	}
+	if info.State.Ever {
+		if g, gerr := h.store.WorkflowGate(ctx, workflowID); gerr == nil {
+			v.GateReleased, v.GateTotal, v.GateTasks = g.Released, g.Total, g.Tasks
+		}
 	}
 	if info.State.Effective {
 		if w, _, werr := h.store.ReconcileReplyWindow(ctx, workflowID, time.Now()); werr == nil {
@@ -112,24 +125,45 @@ func (h *APIHandler) GetAsyncMode(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"async_mode": v})
 }
 
-// UpdateAsyncMode PUT /api/v1/workflows/:workflow_id/async-mode  { "enabled"?: bool, "profile_id"?: number }
+// UpdateAsyncMode PUT /api/v1/workflows/:workflow_id/async-mode  { "enabled"?: bool, "profile_id"?: number, "strict_wrapup"?: bool }
 // 开启需要这个工作流收到过 hook 事件，否则 409 并说明怎么办；关闭永远允许。
+// strict_wrapup 开关「严格收尾门」（默认开；关掉后回复窗口回到老口径），见 asyncModeView 的说明。
 func (h *APIHandler) UpdateAsyncMode(c *gin.Context) {
 	wf := c.Param("workflow_id")
 	var req struct {
-		Enabled   *bool `json:"enabled"`
-		ProfileID *uint `json:"profile_id"`
+		Enabled      *bool `json:"enabled"`
+		ProfileID    *uint `json:"profile_id"`
+		StrictWrapup *bool `json:"strict_wrapup"`
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式不对：" + err.Error()})
 		return
 	}
-	if req.Enabled == nil && req.ProfileID == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "没有要修改的内容：请带 enabled 或 profile_id"})
+	if req.Enabled == nil && req.ProfileID == nil && req.StrictWrapup == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "没有要修改的内容：请带 enabled、profile_id 或 strict_wrapup"})
 		return
 	}
-	if _, err := h.store.UpdateWorkflowMode(c.Request.Context(), wf, store.ModePatch{Enabled: req.Enabled, ProfileID: req.ProfileID}, time.Now()); err != nil {
+	patch := store.ModePatch{Enabled: req.Enabled, ProfileID: req.ProfileID, StrictWrapup: req.StrictWrapup}
+	if _, err := h.store.UpdateWorkflowMode(c.Request.Context(), wf, patch, time.Now()); err != nil {
+		respondDocError(c, err)
+		return
+	}
+	h.broadcastWorkflowMode(wf)
+	v, err := h.asyncModeViewFor(c, wf)
+	if err != nil {
+		respondDocError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"async_mode": v})
+}
+
+// ReleaseGate POST /api/v1/workflows/:workflow_id/async-mode/release-gate
+// 「本次放行」：这一轮回复窗口不再被未完成任务挡住、立刻恢复倒计时；任务一概不动，下次用户回复或窗口重新起算时自动复位。
+// 没有窗口在等 / 门已关时返回 409 并说明原因。
+func (h *APIHandler) ReleaseGate(c *gin.Context) {
+	wf := c.Param("workflow_id")
+	if _, err := h.store.ReleaseGate(c.Request.Context(), wf, time.Now()); err != nil {
 		respondDocError(c, err)
 		return
 	}

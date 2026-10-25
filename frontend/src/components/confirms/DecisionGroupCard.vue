@@ -3,7 +3,7 @@
 // 所以这里只出一张「文档《xxx》有 N 项待决策」的卡，去文档页逐张作答（文档页顶部还有一键采用推荐）。
 //
 // compact（#120 预览视图，默认关）：换成 32px 的事件行（阶段 C2：[决策]《文档》…… 状态句 · 状态 · 去文档页作答）。
-// 经典列表不传它，经典的标记一个字没动。
+// 会话页的预览列表一律传 compact；群聊页（GroupEventRow）不传它，那里的标记一个字没动。
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { BookOpen, CheckCircle2 } from 'lucide-vue-next'
@@ -22,7 +22,7 @@ const store = useConfirmStore()
 
 const done = computed(() => props.group.pending === 0)
 
-// 事件行的状态句：与经典同一句话（经典里待决策的数字加粗，这里是单行截断的纯文字）
+// 事件行的状态句：与不传 compact 的版式同一句话（那里待决策的数字加粗，这里是单行截断的纯文字）
 const TONE = CARD_TONE_CLASS[CARD_TYPES.decision.tone]
 const stateText = computed(() =>
   done.value

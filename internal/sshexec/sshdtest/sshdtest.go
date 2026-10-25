@@ -103,6 +103,17 @@ func NewSigner(t testing.TB) ssh.Signer {
 	return s
 }
 
+// NeedShell 在没有 /bin/sh 的环境（Windows 原生）里跳过调用它的测试。
+//
+// 本服务器对每个 exec 请求用 /bin/sh -c 真正执行命令；没有 POSIX shell 时，命令根本起不来（退出码 127），
+// 失败的原因在测试服务器而不在被测代码。需要真实执行命令的用例开头调用它；不执行命令的用例（握手、认证、主机密钥）不必调用。
+func NeedShell(t testing.TB) {
+	t.Helper()
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("需要 /bin/sh（POSIX 环境）：测试用的 SSH 服务器用它真正执行命令")
+	}
+}
+
 // Start 启动服务器，测试结束时自动关闭。
 func Start(t testing.TB, o Options) *Server {
 	t.Helper()

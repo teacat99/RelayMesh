@@ -24,6 +24,12 @@ export interface ConfirmAnswer {
   by: string
 }
 
+/** 一次转交 / 升级：by 是 agent:<主会话工作流>（主会话自己转的）| timeout（主会话超时没答）| system（分支结束 / 关掉定夺等关系变化）。 */
+export interface ConfirmEscalation {
+  by: string
+  note?: string
+}
+
 export interface ConfirmItem {
   id: number
   workflow_id: string
@@ -47,31 +53,25 @@ export interface ConfirmItem {
   status: ConfirmStatus
   answer?: ConfirmAnswer
   answered_at?: string
+  /** 决策路由（#236 P2）：wf:<主会话工作流> = 分支智能体的请示先送主会话定夺（用户还没接手）；转交 / 升级后清空，作答后保留（标注「曾路由给主会话」）。 */
+  addressee?: string
+  /** 主会话转交 / 超时升级 / 关系结束善后的时刻。 */
+  escalated_at?: string
+  escalation?: ConfirmEscalation
   created_by: string
   created_at: string
   updated_at: string
 }
 
-/** 「待确认」区里一条守护告警（会话崩溃 / 停摆，等你决定要不要唤醒）。 */
-export interface ConfirmBoardGuard {
-  preset_id: string
-  name: string
-  host?: string
-  verdict: { state: string; reason?: string; since?: string; [k: string]: unknown }
-  wake_mode?: string
-}
-
 export interface ConfirmCounts {
   pending: number
   items: number
-  guard_alerts: number
   by_risk: Record<string, number>
   by_kind: Record<string, number>
 }
 
 export interface ConfirmBoard {
   items: ConfirmItem[]
-  guard_alerts: ConfirmBoardGuard[]
   counts: ConfirmCounts
 }
 
@@ -101,8 +101,7 @@ export const confirmsApi = {
     const { data } = await api.get<ConfirmBoard>(`${base(workflowId)}/board`)
     return {
       items: data?.items ?? [],
-      guard_alerts: data?.guard_alerts ?? [],
-      counts: data?.counts ?? { pending: 0, items: 0, guard_alerts: 0, by_risk: {}, by_kind: {} },
+      counts: data?.counts ?? { pending: 0, items: 0, by_risk: {}, by_kind: {} },
     }
   },
 

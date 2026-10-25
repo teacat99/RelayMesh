@@ -91,12 +91,13 @@ func TestProtocol_NotificationHandling(t *testing.T) {
 	}
 	resMap := toolsRes.Response.Result.(map[string]any)
 	if toolsList, ok := resMap["tools"].([]ToolDefinition); ok {
-		if len(toolsList) != 15 {
-			t.Fatalf("expected 15 tools for stdio credential, got %d", len(toolsList))
+		// 15 个（含 usage_guide）+ 分支会话 branch（#236）+ 会话参数 session_params（#236 P3）。
+		if len(toolsList) != 17 {
+			t.Fatalf("expected 17 tools for stdio credential, got %d", len(toolsList))
 		}
 	} else if toolsAny, ok := resMap["tools"].([]any); ok {
-		if len(toolsAny) != 15 {
-			t.Fatalf("expected 15 tools for stdio credential, got %d", len(toolsAny))
+		if len(toolsAny) != 17 {
+			t.Fatalf("expected 17 tools for stdio credential, got %d", len(toolsAny))
 		}
 	} else {
 		t.Fatalf("unexpected type for tools in result: %T", resMap["tools"])

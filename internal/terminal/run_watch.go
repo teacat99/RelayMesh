@@ -17,7 +17,7 @@ import (
 
 // 非交互运行的输出监视（#129）。
 //
-// RelayMesh 自己用 `agent -p --output-format stream-json` 续聊一个对话时（守护的非交互唤醒、预设的非交互续聊），
+// RelayMesh 自己用 `agent -p --output-format stream-json` 续聊一个对话时（预设的非交互续聊、会话页运行），
 // 输出里的每个思考、工具调用、回复与终局都是确定的事件——比编辑器 hook 准：hook 在非交互模式下不报 stop、
 // 恢复对话不报 sessionStart，智能体停了 hook 也不知道。所以运行期间由 Hub 读这份输出来判定这个对话的状态
 // （来源记为 run），hook 的汇报只留记录、不改状态（store 的「运行权威」标记）。
@@ -108,6 +108,13 @@ type runWatchTarget struct {
 	// Learn 表示这是新开对话的运行（命令里没有 --resume，Conversation 为空，#176）：对话编号要从输出的 init 事件里学到——
 	// 学到之后记成这个工作流的对话编号（之后的运行就是续聊），监视也从此按这个对话判定状态；学到之前读到的信号一律不记。
 	Learn bool
+	// LearnAfter 是新开对话的运行（Learn）之后的去向（store.HeadlessAfter*，#191）：只决定「新对话已建立」那句系统行怎么说；
+	// 空 = 记下编号（旧行为）。每次都新开的预设里，学到的编号照样记成工作流当前的对话，让 Web 显示与状态监视有依据。
+	LearnAfter string
+	// Peek 表示这是「最近会话」（--continue，#191）的运行：接到哪个对话是 Cursor CLI 的决定，Conversation 为空。
+	// 监视只从输出的 init 事件里看一眼它实际接上的对话，写一条系统行说明（运行记录里能看出这次接上了谁），然后收工——
+	// **不**把它记成工作流的对话、也不按它判定状态或认领：它可能是编辑器里的别的对话，不能凭它认定「这是这个工作流的对话」。
+	Peek bool
 	// Timeout 是这次运行自己的超时（0 = 不知道）：监视的寿命据此收短（见 runWatchTiming.lifetime）。
 	Timeout time.Duration
 	// Restored 表示这是 Hub 重启后接回来的运行：它的输出里已经有一段历史，第一次读完只需要还原「现在的状态」，
@@ -130,6 +137,7 @@ type runWatch struct {
 	logged  bool
 
 	claimLogged bool // 认领对话失败只记一次日志（见 claim）
+	peeked      bool // 最近会话（Peek）：已经看到实际接上的对话并写了系统行，监视可以收工
 }
 
 // runWatcher 管理所有在监视的运行。
@@ -150,7 +158,7 @@ func newRunWatcher(h *Hub) *runWatcher {
 
 // start 开始监视一次运行。重复登记、缺字段、已达上限、已在关闭都静默忽略（监视是旁路，不能影响运行本身）。
 func (r *runWatcher) start(t runWatchTarget) {
-	if r == nil || t.RunID == "" || t.Machine == "" || t.WorkflowID == "" || (t.Conversation == "" && !t.Learn) {
+	if r == nil || t.RunID == "" || t.Machine == "" || t.WorkflowID == "" || (t.Conversation == "" && !t.Learn && !t.Peek) {
 		return
 	}
 	r.mu.Lock()
@@ -247,6 +255,9 @@ func (r *runWatcher) loop(rw *runWatch) {
 		}
 		polled := r.h.now()
 		r.poll(ctx, rw)
+		if rw.peeked {
+			return // 最近会话：看到实际接上的对话就够了，不再监视这次运行的输出
+		}
 
 		timer := time.NewTimer(r.pollEvery(rw))
 		select {
@@ -354,6 +365,14 @@ func (r *runWatcher) signals(rw *runWatch, sigs []runSignal) {
 	if len(sigs) == 0 {
 		return
 	}
+	if rw.t.Peek {
+		for _, sig := range sigs {
+			if sig.Conv != "" && r.peek(rw, sig.Conv) {
+				break
+			}
+		}
+		return // 最近会话不记状态信号（见 runWatchTarget.Peek）
+	}
 	if rw.t.Conversation == "" {
 		// 新开对话的运行：对话编号只能从输出里学。init 是输出的第一行，它之前不会有别的信号；
 		// 还没学到就什么都不记（不知道记到哪个对话上），也不算「动过这个对话」。
@@ -444,7 +463,7 @@ func (r *runWatcher) notify(ev AgentStateEvent) {
 	(*p)(ev)
 }
 
-// learn 在新开对话的运行输出里学到对话编号（#176）：记成这个工作流的对话编号——之后会话页「运行」、预设运行与守护
+// learn 在新开对话的运行输出里学到对话编号（#176）：记成这个工作流的对话编号——之后会话页「运行」与预设运行
 // 都能接着它，所以新开只会发生一次——并让监视从此按这个对话判定状态。
 // 编号格式不对（不是 Cursor 的会话编号）就不学，返回 false，下一个带编号的信号再试。
 func (r *runWatcher) learn(rw *runWatch, conv string) bool {
@@ -458,8 +477,37 @@ func (r *runWatcher) learn(rw *runWatch, conv string) bool {
 	if !rw.replay { // 重启接回的运行读的是历史：这句话当时已经记过了
 		meta, _ := json.Marshal(map[string]any{"mode": "launcher_conversation", "run_id": rw.t.RunID})
 		r.h.guardian.addWakeLine(r.h.bgCtx, rw.t.WorkflowID, "system", launcherLearnActor,
-			"新对话已建立（对话 "+shortConv(ev.ConversationID)+"）：之后的运行都会接着它，不会再新开", string(meta), now)
+			learnLineText(ev.ConversationID, rw.t.LearnAfter), string(meta), now)
 	}
+	return true
+}
+
+// learnLineText 是「新对话已建立」的系统行：after 是「新会话」运行之后的去向（空 = 记下编号）。
+func learnLineText(conv, after string) string {
+	head := "新对话已建立（对话 " + shortConv(conv) + "）："
+	switch after {
+	case store.HeadlessAfterStay:
+		return head + "这个预设每次运行都会新开对话，不会接着这一个"
+	case store.HeadlessAfterContinue:
+		return head + "这次运行成功之后，预设会自动切换成「最近会话」"
+	}
+	return head + "之后的运行都会接着它，不会再新开"
+}
+
+// peek 在「最近会话」（--continue）的运行输出里看一眼它实际接上的对话（#191）：写一条系统行说明，仅此而已——
+// 不记成工作流的对话、不判定状态、不认领（见 runWatchTarget.Peek）。编号格式不对就不认，返回 false，下一个带编号的信号再试。
+func (r *runWatcher) peek(rw *runWatch, conv string) bool {
+	ev, ok := store.NormalizeAgentEvent(store.AgentEvent{ConversationID: conv})
+	if !ok || ev.ConversationID == "" {
+		return false
+	}
+	rw.peeked = true
+	if rw.replay { // 重启接回的运行读的是历史：这句话当时已经记过了
+		return true
+	}
+	meta, _ := json.Marshal(map[string]any{"mode": "launcher_continue", "run_id": rw.t.RunID, "conversation": ev.ConversationID})
+	r.h.guardian.addWakeLine(r.h.bgCtx, rw.t.WorkflowID, "system", launcherLearnActor,
+		"这次运行接上了对话 "+shortConv(ev.ConversationID)+"（最近会话：由 Cursor CLI 决定，不一定是这个工作流的）", string(meta), r.h.now())
 	return true
 }
 
@@ -548,6 +596,14 @@ func stopStatusOf(state string) string {
 
 var resumeArgRe = regexp.MustCompile(`--resume[ =]'?([A-Za-z0-9_-]{1,64})'?`)
 
+// continueArgRe 认命令里的 `--continue` 参数（最近会话，#191）：整词匹配，提示词里（单引号包着、前面不是空白）的同样字样不会误中——
+// 提示词是单个单引号包裹的词，里面的 --continue 前面是别的字符或空格；这里要求它是命令里独立的一个词，所以只在提示词恰好以 " --continue " 出现时才会误判，
+// 而提示词里的空白已被折叠成单个空格，这种误判理论上存在，代价只是多一次「peek」监视（不改任何状态）。
+var continueArgRe = regexp.MustCompile(`(?:^|\s)--continue(?:\s|$)`)
+
+// isContinueCommand 判断一条非交互续聊命令是不是「最近会话」（--continue）。
+func isContinueCommand(cmd string) bool { return continueArgRe.MatchString(cmd) }
+
 // convFromRunCommand 从非交互续聊命令里取出被续聊的对话编号（命令是脱敏副本，--resume 参数不含密钥，会保留）。
 func convFromRunCommand(cmd string) string {
 	m := resumeArgRe.FindStringSubmatch(cmd)
@@ -555,6 +611,33 @@ func convFromRunCommand(cmd string) string {
 		return ""
 	}
 	return strings.TrimSpace(m[1])
+}
+
+// convFromRunOutput 从一次运行输出的开头预览里取出它实际接上的对话编号（stream-json 的 init 事件里的 session_id，#191）；认不出返回空。
+// 开头预览是已脱敏的副本，对话编号不受影响；预览被截断时 init 是第一行，不会丢。
+func convFromRunOutput(head string) string {
+	if strings.TrimSpace(head) == "" {
+		return ""
+	}
+	var p streamParser
+	sigs := append(p.Feed([]byte(head)), p.Flush()...)
+	for _, sig := range sigs {
+		if sig.Conv == "" {
+			continue
+		}
+		if ev, ok := store.NormalizeAgentEvent(store.AgentEvent{ConversationID: sig.Conv}); ok && ev.ConversationID != "" {
+			return ev.ConversationID
+		}
+	}
+	return ""
+}
+
+// convOfRun 是一次运行实际接着的对话编号：命令里有 --resume 就是它；新会话 / 最近会话（命令里没有编号）从输出里的 init 事件取；认不出返回空。
+func convOfRun(rec model.TerminalRun) string {
+	if c := convFromRunCommand(rec.Command); c != "" {
+		return c
+	}
+	return convFromRunOutput(rec.PreviewHead)
 }
 
 // restore 在 Hub 重启、恢复未终结的运行记录后，为其中系统发起的非交互运行重新接上监视。
@@ -565,10 +648,12 @@ func (r *runWatcher) restore(rec model.TerminalRun) {
 		return
 	}
 	conv := convFromRunCommand(rec.Command)
+	cont := conv == "" && isContinueCommand(rec.Command)
 	r.start(runWatchTarget{
 		RunID: rec.RunID, Machine: rec.Target, WorkflowID: strings.TrimSpace(rec.WorkflowID),
-		// 命令里没有 --resume 的是新开对话的运行（#176）：对话编号重新从输出的 init 事件里读（历史输出整段重放）。
-		Conversation: conv, Learn: conv == "", Restored: true,
+		// 命令里有 --continue 的是最近会话的运行（#191）：只看一眼实际接上的对话；
+		// 都没有 --resume 与 --continue 的是新开对话的运行（#176）：对话编号重新从输出的 init 事件里读（历史输出整段重放）。
+		Conversation: conv, Learn: conv == "" && !cont, Peek: cont, Restored: true,
 		Timeout: time.Duration(rec.TimeoutSec) * time.Second,
 	})
 }

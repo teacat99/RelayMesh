@@ -4,16 +4,16 @@
 // 还没答复的提问不会出现在摞里（见 lib/timeline 的 isStackable）：该您点的卡永远摊开。
 import { computed } from 'vue'
 import dayjs from 'dayjs'
-import { ChevronDown, ChevronUp, Layers } from 'lucide-vue-next'
+import { ChevronUp, Layers } from 'lucide-vue-next'
 import { entryPreview, stackSummaryText, summarizeStack, type TimelineEntry } from '../../lib/timeline'
 import { EVENT_BOX } from '../../lib/eventRow'
 import { CARD_CHIP_CLASS, CARD_CHIP_PLAIN_CLASS, CARD_TONE_CLASS, CARD_TYPES } from '../../lib/messageCard'
 import { stackChipModel, stackTypeCounts } from '../../lib/stackTypes'
 import EventRowHead from './EventRowHead.vue'
 
-// compact（#120 预览视图，默认关）：折叠的汇总行换成 32px 的事件行（阶段 C2：[摞图标] N 张卡片 …… 概要 · 最新：… · 时间范围 ˅），
-// 背板仍留着（两层错开的边，看起来是「一摞」）。经典列表不传它，汇总行的外观不变。
-const props = defineProps<{ entries: TimelineEntry[]; expanded: boolean; compact?: boolean }>()
+// 折叠的汇总行是 32px 的事件行（#120 预览视图，阶段 C2：[摞图标] N 张卡片 …… 概要 · 最新：… · 时间范围 ˅），
+// 背板仍留着（两层错开的边，看起来是「一摞」）。
+const props = defineProps<{ entries: TimelineEntry[]; expanded: boolean }>()
 const emit = defineEmits<{ (e: 'toggle'): void }>()
 
 const summary = computed(() => summarizeStack(props.entries))
@@ -21,7 +21,7 @@ const summaryText = computed(() => stackSummaryText(summary.value))
 const latest = computed(() => props.entries[props.entries.length - 1])
 const preview = computed(() => (latest.value ? entryPreview(latest.value) : ''))
 const TONE = CARD_TONE_CLASS[CARD_TYPES.task.tone]
-// 预览视图：摞头给内含的每种类型一个色标签（任务 / 提问 / 计划 / 决策），悬停写出各自的张数（#160，追加 #248 / Q24）
+// 摞头给内含的每种类型一个色标签（任务 / 提问 / 计划 / 决策），悬停写出各自的张数（#160，追加 #248 / Q24）
 const chipModel = computed(() => stackChipModel(stackTypeCounts(props.entries)))
 
 function clock(at: string): string {
@@ -48,9 +48,9 @@ const range = computed(() => {
       <!-- 两层错开的背板，让它看起来是「一摞」而不是一条普通的横幅 -->
       <div class="pointer-events-none absolute inset-x-3 -bottom-1.5 h-3 rounded-b-sm border border-t-0 border-border/40 bg-muted/20" aria-hidden="true"></div>
       <div class="pointer-events-none absolute inset-x-1.5 -bottom-0.5 h-3 rounded-b-sm border border-t-0 border-border/50 bg-muted/30" aria-hidden="true"></div>
-      <!-- 事件行（预览视图，compact）：整行是展开按钮；概要、「最新：…」与时间范围只在宽屏出现
+      <!-- 事件行：整行是展开按钮；概要、「最新：…」与时间范围只在宽屏出现
            （手机上 [摞图标] + 最多 3 个类型标签 + 跨天的时间范围放不下 390px 的一行，会把行末箭头挤出卡片，#167） -->
-      <div v-if="compact" :class="[EVENT_BOX, TONE]" class="shadow-2xs">
+      <div :class="[EVENT_BOX, TONE]" class="shadow-2xs">
         <EventRowHead
           :title="`${entries.length} 张卡片`"
           :time="range"
@@ -84,25 +84,6 @@ const range = computed(() => {
           </template>
         </EventRowHead>
       </div>
-      <button
-        v-else
-        type="button"
-        class="relative flex w-full cursor-pointer items-start gap-2 rounded-sm border border-border/70 bg-card px-3 py-2 text-left text-xs shadow-2xs transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/50"
-        :aria-expanded="false"
-        data-testid="card-stack-toggle"
-        @click="emit('toggle')"
-      >
-        <Layers class="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-        <span class="min-w-0 flex-1 space-y-0.5">
-          <span class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-            <span class="font-medium text-foreground" data-testid="card-stack-count">{{ entries.length }} 张卡片</span>
-            <span class="text-[11px] text-muted-foreground" data-testid="card-stack-summary">{{ summaryText }}</span>
-          </span>
-          <span class="block truncate text-[11px] text-muted-foreground/80" data-testid="card-stack-preview">最新：{{ preview }}</span>
-        </span>
-        <span class="shrink-0 font-mono text-[10px] text-muted-foreground/70">{{ range }}</span>
-        <ChevronDown class="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-      </button>
     </template>
 
     <template v-else>

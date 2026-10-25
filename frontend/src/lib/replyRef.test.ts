@@ -1,7 +1,7 @@
 // 运行：pnpm --dir frontend run test:unit
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { capsuleRefToken, confirmRefToken, insertQuoteRef, replyHash, replyRefToken } from './replyRef'
+import { buildSessionHashIndex, capsuleRefToken, confirmRefToken, insertQuoteRef, replyHash, replyRefToken } from './replyRef'
 
 describe('replyHash / replyRefToken', () => {
   it('取会话编号 sess- 之后的十六进制，统一成小写', () => {
@@ -100,5 +100,32 @@ describe('insertQuoteRef', () => {
     const second = insertQuoteRef(first.text, first.caret, first.caret, '【恢复 r8】')
     assert.equal(second.inserted, true)
     assert.equal(second.text, `${T} 【恢复 r8】 `)
+  })
+})
+
+describe('buildSessionHashIndex（#186 C2a）', () => {
+  it('按短哈希建索引：哈希统一小写，后出现的同哈希行覆盖前面的，没有哈希的行不进索引', () => {
+    const rows = [
+      { session_id: 'sess-9F02517C', n: 1 },
+      { session_id: 'legacy-id', n: 2 },
+      { session_id: 'sess-aaaaaa', n: 3 },
+      { session_id: 'sess-9f02517c', n: 4 },
+    ]
+    const idx = buildSessionHashIndex(rows)
+    assert.deepEqual([...idx.keys()].sort(), ['9f02517c', 'aaaaaa'])
+    assert.equal(idx.get('9f02517c')?.n, 4)
+    assert.equal(idx.get('aaaaaa')?.n, 3)
+    assert.equal(buildSessionHashIndex([]).size, 0)
+  })
+
+  it('与逐行 replyHash 的写法结果一致（共用 store 之前每个实例的写法）', () => {
+    const ids = ['sess-0a1b2c3d', 'sess-ffffff', 'x', '', 'sess-12345', 'sess-0a1b2c3d4e5f', 'SESS-ABCDEF01']
+    const rows = ids.map((session_id, n) => ({ session_id, n }))
+    const want = new Map<string, (typeof rows)[number]>()
+    for (const r of rows) {
+      const h = replyHash(r.session_id)
+      if (h) want.set(h, r)
+    }
+    assert.deepEqual([...buildSessionHashIndex(rows)], [...want])
   })
 })

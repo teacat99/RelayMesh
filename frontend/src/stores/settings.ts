@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { DEFAULT_PHASE_TEMPLATE, DEFAULT_SERVER_INSTRUCTIONS } from '@/lib/defaultPrompts.generated'
 import { normalizePhaseTemplate } from '@/lib/phases'
 import { dropRetiredSettings, hasRetiredSettings } from '@/lib/retiredSettings'
+import type { PromptTemplateOverrides } from '@/lib/residentPrompt'
+import type { WakeTemplateOverrides } from '@/lib/wakePrompts'
 import {
   archiveReplaced,
   clearArchive,
@@ -123,6 +125,10 @@ export interface AppSettings {
   imageRateLimitKB: number
   /** 快捷标签预设的版本留存：出厂文案的基线、历史与旧版 / 新版留存区（见 lib/presetVersions.ts）。 */
   presetVersions?: PresetVersions
+  /** 会话提示词模板的全局覆盖（#232）：没覆盖的用出厂文字；只影响以后套用的会话（见 lib/residentPrompt.ts）。 */
+  promptTemplates?: PromptTemplateOverrides
+  /** 唤醒词的全局覆盖（#232 D3）：续聊 / 新开对话 / 网页启动提示词；没覆盖的用内置默认（见 lib/wakePrompts.ts）。 */
+  wakeTemplates?: WakeTemplateOverrides
 }
 
 const STORAGE_KEY = 'relaymesh.settings'
@@ -604,9 +610,17 @@ export const useSettingsStore = defineStore('settings', () => {
     save(true)
   }
 
+  // 读取按「发出的先后」落地：晚发的先到之后，早发的慢响应不能再盖回去。
+  // 启动时的读取、settings_updated 触发的读取与实时流连上之后的补取（#243）可能同时在路上，响应的到达顺序不由发出顺序决定。
+  let fetchRemoteIssued = 0
+  let fetchRemoteApplied = 0
+
   async function fetchRemoteSettings() {
+    const mine = ++fetchRemoteIssued
     try {
       const res = await settingsApi.get()
+      if (mine < fetchRemoteApplied) return
+      fetchRemoteApplied = mine
       if (res && res.settings && Object.keys(res.settings).length > 0) {
         // 服务端若还留着已下线功能（我的状态：暂离 / 托管）的字段：丢掉，并在同步完后存一次，让它们从服务端也消失
         const retiredOnServer = hasRetiredSettings(res.settings)
@@ -635,6 +649,14 @@ export const useSettingsStore = defineStore('settings', () => {
     } catch (e) {
       console.warn('Failed to fetch remote settings, using local settings:', e)
     }
+  }
+
+  /**
+   * 实时流（首次或重新）连上：页面载入到连上之间、断线期间别处改了全局设置，settings_updated 没人听见也不会补发，
+   * 这里重取一次（#243）。取失败时 fetchRemoteSettings 自己兜住并继续用本地副本。
+   */
+  function onConnected() {
+    void fetchRemoteSettings()
   }
 
   function save(notify = false) {
@@ -698,6 +720,7 @@ export const useSettingsStore = defineStore('settings', () => {
     resetPhaseTemplate,
     resetGeneralPresets,
     fetchRemoteSettings,
+    onConnected,
     fetchBlockedIPs,
     unblockIP,
     clearAllBlockedIPs,

@@ -186,6 +186,32 @@ func lastSegment(dir string) string {
 	return d
 }
 
+// expandRefs 把正文里的成员占位 {{m:<编号>}} 换成这个群里当前的显示名（含重名消歧）。
+// 协作系统行（共享任务板，#180 B3c）的正文是带占位的一句话，名字读出来时才解析，所以成员改名后旧行也跟着变；
+// 不完整的占位原样保留，群里没有的编号显示编号本身。
+func (e *groupEnv) expandRefs(text string) string {
+	const open, closing = "{{m:", "}}"
+	if !strings.Contains(text, open) {
+		return text
+	}
+	var b strings.Builder
+	for {
+		i := strings.Index(text, open)
+		if i < 0 {
+			break
+		}
+		j := strings.Index(text[i:], closing)
+		if j < 0 {
+			break
+		}
+		b.WriteString(text[:i])
+		b.WriteString(e.label(text[i+len(open) : i+j]))
+		text = text[i+j+len(closing):]
+	}
+	b.WriteString(text)
+	return b.String()
+}
+
 // systemText 把系统行的事件码翻成一句话。
 func (e *groupEnv) systemText(event, ref string) string {
 	who := e.label(ref)
@@ -203,7 +229,8 @@ func (e *groupEnv) systemText(event, ref string) string {
 	case model.GroupEventCooling:
 		return "群里 Agent 之间的消息太密，已暂停互相投递；你说一句话即可恢复"
 	}
-	return event
+	// 不是事件码：是一句带成员占位的完整系统行（协作系统行），把名字换上。
+	return e.expandRefs(event)
 }
 
 // message 把一行群消息翻成统一消息。states 是被点名成员的提醒行状态（可为空）。

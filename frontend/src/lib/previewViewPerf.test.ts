@@ -3,8 +3,7 @@
 // 这里只守住「度量查出来的那几处结构」不被改回去：
 //   1. 右侧轨：刻度列表独立成 PreviewRailTicks，会话列表每滚一帧只更新可视窗口框，不再带着几百道刻度一起重渲染；
 //      排布 / 窗口框用 shallowRef（不给刻度数据套深层响应式代理）；渐隐样式只依赖两个布尔量；
-//   2. 「⋯」菜单：未被碰过的卡只画朴素按钮，Reka 下拉菜单在悬停 / 点击 / ArrowDown 时才挂载（一千多张卡不再各挂一整套）；
-//   3. 经典视图一个字不碰：谁也不引用这里新增的组件。
+//   2. 「⋯」菜单：未被碰过的卡只画朴素按钮，Reka 下拉菜单在悬停 / 点击 / ArrowDown 时才挂载（一千多张卡不再各挂一整套）。
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -155,14 +154,6 @@ describe('预览视图渲染压力（#158）：历史轮次离屏跳过渲染', 
     assert.match(rule[1], /overflow-clip-margin: 8px;/)
     assert.equal([...css.matchAll(/\.pv-cv(?![-\w])/g)].length, 1, 'pv-cv 只在这一处定义（pv-cv-notice 是另一条规则）')
   })
-
-  it('经典视图一个字不碰：谁也不引用 pv-cv / settle', () => {
-    for (const rel of ['components/feedback/FeedbackMessageList.vue', 'components/FeedbackView.vue']) {
-      if (!existsSync(join(srcDir(), rel))) continue
-      const src = read(rel)
-      assert.ok(!/pv-cv|useScrollSettle|settleScroll/.test(src), `${rel} 不应引用预览视图的离屏渲染与滚动校准`)
-    }
-  })
 })
 
 describe('预览视图渲染压力（#169）：进度通知卡离屏跳过渲染', () => {
@@ -201,13 +192,6 @@ describe('预览视图渲染压力（#169）：进度通知卡离屏跳过渲染
     assert.ok(!/pv-cv|content-visibility|noticeCv/.test(card), '离屏跳过渲染只在列表这一层套，卡片自己不管')
     assert.match(card, /data-testid="notice-bubble"/)
   })
-
-  it('经典视图一个字不碰：谁也不引用 pv-cv-notice / noticeCv', () => {
-    for (const rel of ['components/feedback/FeedbackMessageList.vue', 'components/feedback/AsyncTimelineEntry.vue', 'components/FeedbackView.vue']) {
-      if (!existsSync(join(srcDir(), rel))) continue
-      assert.ok(!/pv-cv-notice|noticeCv/.test(read(rel)), `${rel} 不应引用预览视图的通知卡离屏渲染`)
-    }
-  })
 })
 
 describe('预览视图渲染压力（#169 第三期）：末尾通知渐进渲染 + 次要请求让路', () => {
@@ -234,11 +218,24 @@ describe('预览视图渲染压力（#169 第三期）：末尾通知渐进渲�
   it('补齐：空闲时一批一批（requestIdleCallback，Safari 退回定时器）；钉锚点用独立的 useScrollSettle 实例，不打断平滑滚动校准', () => {
     assert.match(list, /window\.requestIdleCallback\(run, \{ timeout: TAIL_FILL_IDLE_TIMEOUT_MS \}\)/)
     assert.match(list, /setTimeout\(run, TAIL_FILL_FALLBACK_MS\)/)
-    assert.match(list, /const \{ hold: holdTailAnchor, isActive: tailJobActive \} = useScrollSettle\(\)/)
+    assert.match(list, /const \{ hold: holdTailAnchor, cancel: cancelTailHold, isActive: tailJobActive \} = useScrollSettle\(\)/)
     assert.equal([...list.matchAll(/useScrollSettle\(\)/g)].length, 2, '补齐与原来的滚动校准各用各的实例')
     assert.match(list, /holdTailAnchor\(container, first, firstTop\)/)
-    assert.match(list, /const hold = first !== null && shouldHoldFirst\(firstTop\)/)
     assert.match(list, /onBeforeUnmount\(cancelTailFill\)/)
+  })
+
+  it('补齐一批的视口保持（#252）：停在底部走贴底（followBottom）、不钉锚点，并撤掉前一批留下的钉锚点；没贴底才钉；用户刚向上看时按没贴底算', () => {
+    const body = list.match(/async function fillTailBatch\(\) \{([\s\S]*?)\n\}\n/)?.[1] ?? ''
+    assert.ok(body, '找得到 fillTailBatch')
+    // 模式由纯函数定；贴底以「最近一次滚动之后是否仍紧贴底部」的标记为准，没有标记再看几何；用户刚向上看（让位期内）传 Infinity
+    assert.match(body, /const mode = first === null \? 'none' : tailHoldMode\(firstTop, gap\)/)
+    // 「是否贴底」与 repinIfPinned 同一口径：标记 / 上一次的大小推算 / 让掉那次的判定（#252 残留：迟到的 scroll 事件把标记翻成假，批不能因此钉锚点）
+    assert.match(body, /const wasPinned = pinnedAtBottom \|\| deferredPinned \|\| wasPinnedBeforeResize\(lastSize, container\.scrollTop\)/)
+    assert.match(body, /userHolding\(lastUpIntentAt, performance\.now\(\)\)\s*\n\s*\? Number\.POSITIVE_INFINITY\s*\n\s*: wasPinned\s*\n\s*\? 0\s*\n\s*: bottomGap\(/)
+    // 贴底：撤掉旧的钉锚点（在改起点之前），批插入之后 followBottom；锚点只在 'anchor' 模式下钉
+    assert.match(body, /if \(mode === 'bottom'\) cancelTailHold\(\)\s*\n\s*pinTailStart\(nextTailStart\(tailStart\.value\)\)\s*\n\s*await nextTick\(\)\s*\n\s*if \(mode === 'bottom'\) followBottom\(\)/)
+    assert.match(body, /else if \(mode === 'anchor' && first && first\.isConnected && chatScrollContainer\.value === container\) holdTailAnchor\(container, first, firstTop\)/)
+    assert.ok(!/shouldHoldFirst/.test(list), '列表里不再直接用 shouldHoldFirst（经 tailHoldMode）')
   })
 
   it('被点名要看的块先露出来：右侧轨 / 搜索命中走 revealEntry，「待答复」徽标 / Q 引用走 focusRef；滚动时探测用户是否在向上够', () => {
@@ -247,13 +244,6 @@ describe('预览视图渲染压力（#169 第三期）：末尾通知渐进渲�
     assert.match(list, /if \(tailStart\.value > 0\) probeTailFill\(\)/)
     // 末尾容器的选择器不能在脚本里写 data-testid 字面量（对等测试的负向对照按文字找模板里的 testid）
     assert.match(list, /querySelector<HTMLElement>\('\[data-tail-total\] > \[data-timeline-key\]'\)/)
-  })
-
-  it('经典视图一个字不碰：谁也不引用渐进渲染与让路栅栏', () => {
-    for (const rel of ['components/feedback/FeedbackMessageList.vue', 'components/feedback/AsyncTimelineEntry.vue']) {
-      if (!existsSync(join(srcDir(), rel))) continue
-      assert.ok(!/tailWindow|tailStart|visibleTailBlocks|secondaryGate/.test(read(rel)), `${rel} 不应引用预览视图的末尾渐进渲染`)
-    }
   })
 
   it('次要请求让路：整表非强制加载立栅栏、成败都放行；强制刷新与用户动作的跟进请求不让路；四个次要请求都走 whenSecondaryOpen / wait', () => {
@@ -279,21 +269,4 @@ describe('预览视图渲染压力（#169 第三期）：末尾通知渐进渲�
     assert.match(store, /timelineActive = active\s*\n\s*timelineShown\.value = active/)
     assert.match(store, /setTimelineActive,\s*\n\s*timelineShown,/)
   })
-})
-
-describe('预览视图渲染压力（#158）：经典视图一个字不碰', () => {
-  const NEW_PARTS = ['PreviewRailTicks']
-  const CLASSIC_FILES = [
-    'components/feedback/FeedbackMessageList.vue',
-    'components/feedback/AsyncTimelineEntry.vue',
-    'components/feedback/CompactTaskRow.vue',
-    'components/FeedbackView.vue',
-  ]
-  for (const rel of CLASSIC_FILES) {
-    it(`${rel} 不引用新增的预览组件`, () => {
-      if (!existsSync(join(srcDir(), rel))) return
-      const src = read(rel)
-      for (const name of NEW_PARTS) assert.ok(!src.includes(name), `${rel} 不应引用 ${name}`)
-    })
-  }
 })

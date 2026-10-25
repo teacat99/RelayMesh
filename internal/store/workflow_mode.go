@@ -75,6 +75,8 @@ func (s *Store) IsAsyncEffective(ctx context.Context, workflowID string, now tim
 type ModePatch struct {
 	Enabled   *bool
 	ProfileID *uint // 0 表示跟随默认档位
+	// StrictWrapup 开关「严格收尾门」（#232 D2）：true = 开（默认），false = 关、回到老口径。
+	StrictWrapup *bool
 }
 
 // UpdateWorkflowMode 开关异步对话 / 选档位。
@@ -106,6 +108,12 @@ func (s *Store) UpdateWorkflowMode(ctx context.Context, workflowID string, patch
 				}
 			}
 			row.ProfileID = *patch.ProfileID
+		}
+		if patch.StrictWrapup != nil {
+			if off := !*patch.StrictWrapup; row.StrictWrapupOff != off {
+				row.StrictWrapupOff = off
+				row.GateReleased = false // 口径一变，上一轮的「本次放行」作废
+			}
 		}
 		if patch.Enabled != nil {
 			switch {
@@ -175,23 +183,29 @@ func (s *Store) activeTaskCount(ctx context.Context, workflowID string) int {
 
 // ReconcileReplyWindow 读出窗口并按任务情况对齐：有任务在做就把走动中的窗口暂停（剩余攒进 BankSec），
 // 任务清零后再从攒着的时间接着走。changed 表示这次对齐改动了数据（调用方据此广播）。
+// 「有任务在做」收尾门开着时按门口径数（本会话名下未完成、不按时间截断），门关着时按老口径（见 windowLoad）。
 func (s *Store) ReconcileReplyWindow(ctx context.Context, workflowID string, now time.Time) (w ReplyWindow, changed bool, err error) {
+	w, _, changed, err = s.reconcileReplyWindow(ctx, workflowID, now)
+	return w, changed, err
+}
+
+// reconcileReplyWindow 同 ReconcileReplyWindow，另外把读到的行也交出去（累加窗口时要用其中的收尾门设置）。
+func (s *Store) reconcileReplyWindow(ctx context.Context, workflowID string, now time.Time) (w ReplyWindow, row model.WorkflowMode, changed bool, err error) {
 	wf := strings.TrimSpace(workflowID)
 	if wf == "" {
-		return w, false, nil
+		return w, row, false, nil
 	}
-	var row model.WorkflowMode
 	if err := s.db.WithContext(ctx).Where("workflow_id = ?", wf).Take(&row).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return w, false, nil
+			return w, model.WorkflowMode{}, false, nil
 		}
-		return w, false, err
+		return w, model.WorkflowMode{}, false, err
 	}
 	w = ReplyWindow{Until: row.ReplyWindowUntil, BankSec: row.ReplyWindowBankSec}
 	if w.Until == nil && w.BankSec <= 0 {
-		return w, false, nil
+		return w, row, false, nil
 	}
-	w.ActiveTasks = s.activeTaskCount(ctx, wf)
+	s.windowLoad(ctx, wf, row).apply(&w)
 	switch {
 	case w.ActiveTasks > 0 && w.Until != nil:
 		left := int(w.Until.Sub(now) / time.Second)
@@ -207,7 +221,7 @@ func (s *Store) ReconcileReplyWindow(ctx context.Context, workflowID string, now
 		err = s.db.WithContext(ctx).Model(&model.WorkflowMode{}).Where("workflow_id = ?", wf).
 			Updates(map[string]any{"reply_window_until": w.Until, "reply_window_bank_sec": w.BankSec}).Error
 	}
-	return w, changed, err
+	return w, row, changed, err
 }
 
 // ExtendReplyWindow 把工作流的回复窗口累加 add（封顶见 asyncmode.WindowMax）。
@@ -220,11 +234,21 @@ func (s *Store) ExtendReplyWindow(ctx context.Context, workflowID string, add ti
 		return out, nil
 	}
 	// 先对齐，再在对齐后的状态上累加
-	cur, _, err := s.ReconcileReplyWindow(ctx, wf, now)
+	cur, row0, _, err := s.reconcileReplyWindow(ctx, wf, now)
 	if err != nil {
 		return out, err
 	}
-	active := s.activeTaskCount(ctx, wf)
+	if row0.WorkflowID == "" {
+		return out, nil
+	}
+	// 窗口从空（或已用完）重新起算：上一轮的「本次放行」到此为止，这一轮收尾门照常生效。
+	// 任务负载要在事务外算（事务里再走 s.db 查询会和事务抢同一条连接而死锁），所以先在这里定好。
+	fresh := (cur.Until == nil && cur.BankSec <= 0) || (cur.Until != nil && !cur.Until.After(now))
+	resetRelease := fresh && row0.GateReleased
+	if resetRelease {
+		row0.GateReleased = false
+	}
+	load := s.windowLoad(ctx, wf, row0)
 	err = s.WithTx(ctx, func(tx *gorm.DB) error {
 		var row model.WorkflowMode
 		if err := tx.Where("workflow_id = ?", wf).Take(&row).Error; err != nil {
@@ -234,34 +258,38 @@ func (s *Store) ExtendReplyWindow(ctx context.Context, workflowID string, add ti
 			return err
 		}
 		upd := map[string]any{}
-		if active > 0 {
+		if resetRelease {
+			upd["gate_released"] = false
+		}
+		if load.Active > 0 {
 			bank := time.Duration(cur.BankSec)*time.Second + add
 			if bank > asyncmode.WindowMax {
 				bank = asyncmode.WindowMax
 			}
 			upd["reply_window_bank_sec"] = int(bank / time.Second)
 			upd["reply_window_until"] = nil
-			out = ReplyWindow{BankSec: int(bank / time.Second), ActiveTasks: active}
+			out = ReplyWindow{BankSec: int(bank / time.Second)}
 		} else {
 			next := asyncmode.ExtendWindow(row.ReplyWindowUntil, now, add)
 			upd["reply_window_until"] = next
 			upd["reply_window_bank_sec"] = 0
 			out = ReplyWindow{Until: &next}
 		}
+		load.apply(&out)
 		return tx.Model(&model.WorkflowMode{}).Where("workflow_id = ?", wf).Updates(upd).Error
 	})
 	return out, err
 }
 
-// ClearReplyWindow 用户回复了：窗口清零（走动中的和攒着的都清）。没有窗口时什么都不做。
+// ClearReplyWindow 用户回复了：窗口清零（走动中的和攒着的都清），上一轮的「本次放行」也一并复位。没有窗口时什么都不做。
 func (s *Store) ClearReplyWindow(ctx context.Context, workflowID string) error {
 	wf := strings.TrimSpace(workflowID)
 	if wf == "" {
 		return nil
 	}
 	return s.db.WithContext(ctx).Model(&model.WorkflowMode{}).
-		Where("workflow_id = ? AND (reply_window_until IS NOT NULL OR reply_window_bank_sec > 0)", wf).
-		Updates(map[string]any{"reply_window_until": nil, "reply_window_bank_sec": 0}).Error
+		Where("workflow_id = ? AND (reply_window_until IS NOT NULL OR reply_window_bank_sec > 0 OR gate_released = ?)", wf, true).
+		Updates(map[string]any{"reply_window_until": nil, "reply_window_bank_sec": 0, "gate_released": false}).Error
 }
 
 // typingBeat 记每个工作流上一次「正在输入」心跳的时间，用来把心跳间隔补进窗口（等于暂停倒计时）。

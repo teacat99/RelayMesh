@@ -753,11 +753,12 @@ export function countByState(items: WorkItem[]): Record<WorkState, number> {
  * 搜索框与状态芯片本来就摆在面板外面，不计入。筛选条件会记在本机，下次进来还在——面板收起时靠这个数字提醒「这里有条件在生效」。
  */
 export function countActiveWorkFilters(
-  f: { kind: string; sort: TaskSort; closedDays: number; showClosedWindow: boolean; assignee?: string },
+  f: { kind: string; sort: TaskSort; closedDays: number; showClosedWindow: boolean; assignee?: string; quick?: string },
   defaultClosedDays: number
 ): number {
   const assignee = f.assignee && f.assignee !== ASSIGNEE_ALL ? 1 : 0
-  return (f.kind ? 1 : 0) + assignee + (f.sort !== 'plan' ? 1 : 0) + (f.showClosedWindow && f.closedDays !== defaultClosedDays ? 1 : 0)
+  const quick = f.quick ? 1 : 0
+  return (f.kind ? 1 : 0) + assignee + quick + (f.sort !== 'plan' ? 1 : 0) + (f.showClosedWindow && f.closedDays !== defaultClosedDays ? 1 : 0)
 }
 
 export interface FilterOptions {
@@ -766,6 +767,9 @@ export interface FilterOptions {
   query?: string
   /** 按承接者过滤：ASSIGNEE_ALL / 空 = 不过滤，ASSIGNEE_NONE = 没有指派的，其余 = 这个工作流的。 */
   assignee?: string
+  /** 协作快捷筛选（#180 B3b）：空 = 不过滤；to_me / by_me 要结合 viewer（正在看的工作流）。 */
+  quick?: string
+  viewer?: string
 }
 
 export function matchesQuery(item: WorkItem, query: string): boolean {
@@ -791,6 +795,7 @@ export function filterItems(items: WorkItem[], opts: FilterOptions): WorkItem[] 
     if (opts.workflowId && it.workflow_id !== opts.workflowId) return false
     if (opts.kind && it.kind !== opts.kind) return false
     if (opts.assignee && !matchesAssignee(it, opts.assignee)) return false
+    if (opts.quick && !matchesQuick(it, opts.quick, opts.viewer || '')) return false
     if (opts.query && !matchesQuery(it, opts.query)) return false
     return true
   })
@@ -1110,6 +1115,124 @@ export function assigneeOptions(items: Pick<WorkItem, 'assignee_workflow_id'>[],
  */
 export function showCreator(item: Pick<WorkItem, 'workflow_id'>, viewer: string, sharedBoard: boolean): boolean {
   return sharedBoard && !!viewer && !!item.workflow_id && item.workflow_id !== viewer
+}
+
+// ---------- 待接取与协作快捷筛选（#180 B3b） ----------
+
+/**
+ * 指派超过这么久还没人接，行上的「已等」标红：这是出厂默认（2 小时）。#180 B3d 起阈值可以在设置里改，
+ * 实际用的是服务端给出的生效值（stores/notifyPrefs 的 boardStaleMs，与回执头 board: 行、久无人接的提醒同一个数）；
+ * 这里的常量只在偏好还没取到、或没传阈值时顶替。
+ */
+export const OFFER_STALE_MS = 2 * 60 * 60 * 1000
+
+/** 服务端 GET /work-items 的 offered：某个工作流手上待接取的协作任务个数与最早派出时间（侧栏徽标用）。 */
+export interface WorkOffered {
+  workflow_id: string
+  count: number
+  oldest_at?: string
+}
+
+/** 等待时长的人话：不到 1 分钟 / 45 分钟 / 3 小时 20 分 / 2 天 3 小时（48 小时以内按小时 + 分钟，再久按天 + 小时）。 */
+export function formatWaited(ms: number): string {
+  const min = Math.floor(Math.max(0, ms) / 60_000)
+  if (min < 1) return '不到 1 分钟'
+  if (min < 60) return `${min} 分钟`
+  const hours = Math.floor(min / 60)
+  if (hours < 48) {
+    const rest = min % 60
+    return rest ? `${hours} 小时 ${rest} 分` : `${hours} 小时`
+  }
+  const days = Math.floor(hours / 24)
+  const restHours = hours % 24
+  return restHours ? `${days} 天 ${restHours} 小时` : `${days} 天`
+}
+
+type OfferFields = Pick<WorkItem, 'state' | 'claim_state' | 'assignee_workflow_id' | 'assigned_by_workflow_id' | 'assigned_at'>
+
+/** 待接取的协作任务已经等了多久（毫秒）；不是「协作任务、待接取、还没结束」或没有派出时间时返回 null。 */
+export function offerWaitMs(item: OfferFields, now: number = Date.now()): number | null {
+  if (item.claim_state !== 'offered' || !item.assignee_workflow_id || isClosedState(item.state)) return null
+  if ((item.assigned_by_workflow_id || '') === item.assignee_workflow_id) return null
+  const at = item.assigned_at ? Date.parse(item.assigned_at) : NaN
+  if (Number.isNaN(at)) return null
+  return Math.max(0, now - at)
+}
+
+export interface OfferWaitView {
+  /** 「已等 3 小时 20 分」；还不到 1 分钟写「刚派出」（「已等 不到 1 分钟」读着别扭）。 */
+  label: string
+  /** 等到了阈值（设置里的「久无人接」时长，默认 2 小时）：标红，提醒派发者去催或改派。 */
+  stale: boolean
+}
+
+/** 行上「已等 X」的取值；不是待接取的协作任务返回 null（行与以前一样）。staleMs 是「久无人接」的阈值（毫秒），等于即算。 */
+export function offerWaitView(item: OfferFields, now: number = Date.now(), staleMs: number = OFFER_STALE_MS): OfferWaitView | null {
+  const ms = offerWaitMs(item, now)
+  if (ms === null) return null
+  return { label: ms < 60_000 ? '刚派出' : `已等 ${formatWaited(ms)}`, stale: ms >= staleMs }
+}
+
+/** 侧栏徽标的悬停说明：「3 项指派在等这个工作流接取，最久已等 47 分钟」；最早的一项也还不到 1 分钟时写「刚派出」。 */
+export function offeredBadgeTitle(o: WorkOffered, now: number = Date.now()): string {
+  const at = o.oldest_at ? Date.parse(o.oldest_at) : NaN
+  let tail = ''
+  if (!Number.isNaN(at)) tail = now - at < 60_000 ? '，刚派出' : `，最久已等 ${formatWaited(now - at)}`
+  return `${o.count} 项指派在等这个工作流接取${tail}`
+}
+
+/** 任务页的协作快捷筛选：指派给我 / 我派出的 / 待接取。「我」= 任务页正在看的工作流。 */
+export const WORK_QUICK_KEYS = ['to_me', 'by_me', 'offered'] as const
+export type WorkQuickKey = (typeof WORK_QUICK_KEYS)[number]
+
+export const WORK_QUICK_META: Record<WorkQuickKey, { label: string; hint: string }> = {
+  to_me: { label: '指派给我', hint: '别人（或你在网页上）派给当前工作流的任务，不含自己派给自己的' },
+  by_me: { label: '我派出的', hint: '当前工作流派给别的工作流的任务' },
+  offered: { label: '待接取', hint: '已派出、承接者还没有答复的任务' },
+}
+
+export function isWorkQuick(v: unknown): v is WorkQuickKey {
+  return typeof v === 'string' && (WORK_QUICK_KEYS as readonly string[]).includes(v)
+}
+
+/**
+ * 任务页地址里 ?seq=N 的取值（板内序号 #N，#242）。只认正整数的十进制写法，多值取第一个；
+ * 空、abc、0、-1、1.5、1e3、0x10、前导零之类一律 null（调用方只把参数去掉、不打开任何任务）。
+ *
+ * 它和 ?task=（任务的数据库编号）是两回事：#N 是每张板各自从 1 数起的序号，写进 ?task= 会打开别的任务。
+ */
+export function parseSeqQuery(raw: unknown): number | null {
+  const v = (Array.isArray(raw) ? raw[0] : raw) as unknown
+  if (typeof v !== 'string') return null
+  const s = v.trim()
+  return /^[1-9]\d{0,8}$/.test(s) ? Number(s) : null
+}
+
+type QuickFields = Pick<WorkItem, 'state' | 'claim_state' | 'assignee_workflow_id' | 'assigned_by_workflow_id'>
+
+/** 是否匹配协作快捷筛选（空串 / 不认识的值 = 都匹配）。to_me / by_me 没有 viewer 时什么都不匹配。 */
+export function matchesQuick(item: QuickFields, quick: string, viewer: string): boolean {
+  if (!isWorkQuick(quick)) return true
+  const assignee = item.assignee_workflow_id || ''
+  const by = item.assigned_by_workflow_id || ''
+  switch (quick) {
+    case 'to_me':
+      return !!viewer && assignee === viewer && by !== viewer
+    case 'by_me':
+      return !!viewer && by === viewer && !!assignee && assignee !== viewer
+    case 'offered':
+      return item.claim_state === 'offered' && !isClosedState(item.state)
+  }
+}
+
+/** 三个快捷项上的数字：还没结束的任务里各有几个（已结束的是历史，不算「待办」）。 */
+export function quickCounts(items: QuickFields[], viewer: string): Record<WorkQuickKey, number> {
+  const out: Record<WorkQuickKey, number> = { to_me: 0, by_me: 0, offered: 0 }
+  for (const it of items) {
+    if (isClosedState(it.state)) continue
+    for (const k of WORK_QUICK_KEYS) if (matchesQuick(it, k, viewer)) out[k]++
+  }
+  return out
 }
 
 // ---------- 发起改进需求 ----------

@@ -11,7 +11,8 @@ import (
 // 「新消息类」通知（agent_text / ask_card / mention / approval_waiting）的推送，由统一通知闸（internal/notify）放行后交来。
 //
 // 与老三类（新反馈请求 / 运行结束 / 守护告警）不同，它们按设计稿 07 §7 的格式推送：
-//   - 标题「会话名 · 发送者」，正文是预览（≤ 120 字）或「有新消息」；优先级穿透类 4、其余 3；点击打开深链；
+//   - 标题「会话名 · 发送者」，正文是预览（≤ 120 字）或「有新消息」；优先级取「各类消息的优先级」表里这一类的值
+//     （内置默认与升级前一致：穿透类 4、其余 3，见 priority.go），表里设成不推送的类型直接不推；点击打开深链；
 //   - 同一个会话里非穿透类的多条消息先聚合一小会儿再推一条（单条原文、多条「N 条新消息」），
 //     同一会话相邻两次推送至少隔一段冷却；穿透类立即推送、不聚合；
 //   - 全局限流（每分钟 20 条）与老三类共用同一份额度。
@@ -80,6 +81,10 @@ func (n *Notifier) NotifyEvent(in EventInfo) {
 
 // handleEvent 处理一条新消息类事件：去重之后，穿透类立即限流并发送，其余进入会话聚合。
 func (n *Notifier) handleEvent(cfg Config, in EventInfo) {
+	// 这一类在表里设成了不推送：连去重记录和限流额度都不占（以后再打开时，之前被挡掉的事件不会被当成「已经推过」）。
+	if kind, ok := eventPushKind(in.Kind); ok && !cfg.kindEnabled(kind) {
+		return
+	}
 	if !n.firstSight("evt:" + in.ID) {
 		return
 	}
@@ -159,6 +164,10 @@ func (n *Notifier) stopBatches() {
 
 // handleFlush 发送一批聚合后的消息。
 func (n *Notifier) handleFlush(cfg Config, f flushItem) {
+	// 聚合的几秒里设置可能改过：到期发送前再看一次这一类还推不推。
+	if kind, ok := eventPushKind(f.info.Kind); ok && !cfg.kindEnabled(kind) {
+		return
+	}
 	merged, ok := n.allow()
 	if !ok {
 		return
@@ -173,9 +182,13 @@ func BuildEventMessage(cfg Config, in EventInfo, count, merged int) Message {
 	if merged > 0 {
 		lines = append(lines, mergedNote(merged))
 	}
+	// 优先级取「各类消息的优先级」表里这一类的值；闸里没有对应行的种类退回老规则（穿透类 4，其余 3）。
 	priority := eventPriorityNormal
 	if in.Penetrate {
 		priority = eventPriorityHigh
+	}
+	if kind, ok := eventPushKind(in.Kind); ok {
+		priority = cfg.msgPriority(kind)
 	}
 	return Message{
 		Title:    eventTitle(in),
@@ -222,6 +235,8 @@ func eventBody(in EventInfo, count int) string {
 		return "有人 @ 了你"
 	case "approval_waiting":
 		return "终端在等你批准"
+	case "board_stale":
+		return "有指派很久没人接"
 	}
 	return "有新消息"
 }
@@ -234,6 +249,8 @@ func eventTag(kind string) string {
 		return "bell"
 	case "approval_waiting":
 		return "warning"
+	case "board_stale":
+		return "hourglass_flowing_sand"
 	}
 	return "speech_balloon"
 }

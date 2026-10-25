@@ -1,0 +1,1 @@
+function c(n){var o;const i=n==null?void 0:n.back;return typeof i!="string"?!1:((o=i.split("#")[0])==null?void 0:o.split("?")[0])==="/"}function p(n,i=window.history.state){c(i)?n.back():n.push("/")}function s(n){const i=n==null?void 0:n.back;return typeof i=="string"&&i.length>0}function f(n,i=window.history.state){s(i)?n.back():n.push("/")}export{p as a,f as b};

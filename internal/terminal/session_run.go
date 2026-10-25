@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/sessionprompt"
 	"github.com/teacat99/RelayMesh/v2/internal/store"
 	"github.com/teacat99/RelayMesh/v2/internal/termexec"
 	"github.com/teacat99/RelayMesh/v2/internal/termproto"
@@ -128,6 +129,9 @@ type sessionRunInspect struct {
 	command  string
 	warnings []string
 	errs     []*wakeError
+	// windows / shell：选中的主机是 Windows 时命令是 PowerShell 写法（#178），shell 是 Agent 要用的 pwsh / powershell；其他主机为空。
+	windows bool
+	shell   string
 
 	// sessionHost 是会话上报的主机名（占位值与没上报都是空）。工作流还没有智能体状态会话时（hook 还没汇报过，
 	// 或汇报被记到了别的工作流名下），取工作流上记录的主机——见 inspectSessionRun 的目录与主机兜底（#182）。
@@ -199,12 +203,18 @@ func (g *guardService) inspectSessionRun(ctx context.Context, req sessionRunRequ
 	switch {
 	case in.dir == "":
 		in.add(http.StatusConflict, "no_dir", "不知道要在主机的哪个目录运行（会话没有上报项目目录）：请求里带上 dir（主机上的绝对路径）")
-	case !strings.HasPrefix(in.dir, "/") || strings.ContainsAny(in.dir, "\x00\r\n"):
+	case !headlessDirShapeOK(in.dir):
 		in.add(http.StatusBadRequest, "bad_dir", "目录必须是主机上的绝对路径")
 	}
 
 	// 主机。
 	g.resolveSessionRunHost(ctx, in)
+	// 目录的写法要和主机系统对得上（Windows 主机要盘符 / UNC 路径，其余主机要 / 开头）；上面只能先查「是不是某种绝对路径」。
+	if in.host != nil && in.dir != "" && headlessDirShapeOK(in.dir) {
+		if derr := headlessDirOK(in.dir, in.windows); derr != nil {
+			in.add(http.StatusBadRequest, "bad_dir", derr.Error())
+		}
+	}
 
 	// 同一个工作流上一次会话页运行还没结束。它排在所有原因的最前面：上一次运行正在跑时，
 	// 对话多半也显示「工作中」，但「上一次运行还没结束」才是更准确、也更有用的说法。
@@ -214,16 +224,23 @@ func (g *guardService) inspectSessionRun(ctx context.Context, req sessionRunRequ
 	}
 
 	// 提示词与命令。选项不合法时不拼命令（规整后的字段可能是空的）。
-	in.prompt = renderLauncherPrompt(run.Prompt, req.WorkflowID)
-	if verr == nil && in.conv != "" && strings.HasPrefix(in.dir, "/") {
+	in.prompt = renderLauncherWake(ctx, g.h.store, launcherWake{
+		Kind: sessionprompt.KindResume, Custom: run.Prompt, WorkflowID: req.WorkflowID, Project: in.dir, NoLimitNote: true,
+	}).Text
+	if verr == nil && in.conv != "" && headlessDirOK(in.dir, in.windows) == nil {
 		cmd, berr := headlessCmd{
 			Bin: run.EffectiveBin(), ChatID: in.conv, Dir: in.dir, Posture: run.EffectivePosture(),
-			Prompt: in.prompt, Model: run.Model,
+			Prompt: in.prompt, Model: run.Model, Windows: in.windows,
 		}.build()
 		if berr != nil {
 			in.add(http.StatusConflict, "headless_command", berr.Error())
 		} else {
 			in.command = cmd
+			if in.windows {
+				if _, n := winNeutralize(in.prompt); n > 0 {
+					in.warnings = append(in.warnings, winPromptNote(n))
+				}
+			}
 		}
 	}
 
@@ -337,13 +354,19 @@ func (g *guardService) resolveSessionRunHost(ctx context.Context, in *sessionRun
 		}
 	}
 	in.host = pick
-	switch {
-	case strings.Contains(strings.ToLower(pick.OS), "windows"):
-		in.add(http.StatusConflict, "unsupported_os", "暂不支持 Windows 主机")
-	default:
-		if a := g.h.onlineAgent(pick.MachineCode); a == nil || !a.isEnabled() {
-			in.add(http.StatusConflict, "host_offline", "主机离线，现在没法运行")
+	in.windows = isWindowsOS(pick.OS)
+	a := g.h.onlineAgent(pick.MachineCode)
+	if a == nil || !a.isEnabled() {
+		in.add(http.StatusConflict, "host_offline", "主机离线，现在没法运行")
+		a = nil
+	}
+	if in.windows {
+		// Windows 主机：命令是 PowerShell 写法（#178），要先确认主机上有 PowerShell；离线时没法问，预览按 powershell 算。
+		sh, serr := windowsShell(a)
+		if serr != nil {
+			in.add(http.StatusConflict, "no_powershell", serr.Error())
 		}
+		in.shell = sh
 	}
 }
 
@@ -382,7 +405,9 @@ func (g *guardService) sessionRunPreview(ctx context.Context, req sessionRunRequ
 	pv := SessionRunPreview{
 		WorkflowID: in.req.WorkflowID, ConversationID: in.conv, Host: "", Hosts: in.hosts, Dir: in.dir,
 		Bin: in.run.EffectiveBin(), Model: in.run.Model, Posture: in.run.EffectivePosture(),
-		Prompt: in.prompt, DefaultPrompt: renderLauncherPrompt("", in.req.WorkflowID),
+		Prompt: in.prompt, DefaultPrompt: renderLauncherWake(ctx, g.h.store, launcherWake{
+			Kind: sessionprompt.KindResume, WorkflowID: in.req.WorkflowID, Project: in.dir, NoLimitNote: true,
+		}).Text,
 		Command: in.command, Warnings: in.warnings, CanRun: len(in.errs) == 0,
 	}
 	if pv.Hosts == nil {
@@ -460,7 +485,7 @@ func (g *guardService) runSession(ctx context.Context, req sessionRunRequest, no
 	}
 	res, serr := g.h.exec.submitHeadless(ctx, headlessSubmit{
 		Caller: sessionRunCaller, UserAgent: "relaymesh-session-run",
-		Machine: in.host.MachineCode, Workflow: wf, Conversation: in.conv, Cwd: in.dir, Command: in.command,
+		Machine: in.host.MachineCode, Workflow: wf, Conversation: in.conv, Cwd: in.dir, Command: in.command, Shell: in.shell,
 		Description: fmt.Sprintf("会话页运行：接着对话 %s 的非交互续聊", shortConv(in.conv)), Thread: sessionThreadFor(wf),
 	})
 	if serr != nil {

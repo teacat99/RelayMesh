@@ -187,7 +187,7 @@ func TestPlanAutoResumeSuccessfulResumeClearsTheBudget(t *testing.T) {
 	if !ps.AutoResumes[2].Settled || ps.AutoResumes[2].Quick || ps.AutoResumes[0].Settled || ps.AutoResumes[1].Settled {
 		t.Fatalf("只认定出事的那次续跑（d）: %+v", ps.AutoResumes)
 	}
-	if n := ps.AutoResumeStartedSince(now.Add(-guardWakeWindow)); n != 0 {
+	if n := ps.AutoResumeStartedSince(now.Add(-autoResumeWindow)); n != 0 {
 		t.Fatalf("认定之后预算用量应是 0: %d", n)
 	}
 
@@ -619,7 +619,7 @@ func TestAutoResumeBreaksAfterConsecutiveQuickFailuresAndNotifies(t *testing.T) 
 		t.Fatalf("熔断之后不该再动: runs=%d events=%d", f.sim.runCount(), len(ev.list()))
 	}
 	// 熔断那次放弃的登记不占预算：真正开跑的只有 2 次（都还在 24 小时窗口里）。
-	if n := f.autoPreset(t, id).AutoResumeStartedSince(clock.Now().Add(-guardWakeWindow)); n != 2 {
+	if n := f.autoPreset(t, id).AutoResumeStartedSince(clock.Now().Add(-autoResumeWindow)); n != 2 {
 		t.Fatalf("预算用量应是 2: %d", n)
 	}
 }
@@ -919,7 +919,7 @@ func TestAutoResumeWaitsForTheHostThenGivesUpOnALateStart(t *testing.T) {
 	if r.State != store.AutoResumePending || !r.StartedAt.IsZero() {
 		t.Fatalf("主机离线应继续等，不占预算: %+v", r)
 	}
-	if n := f.autoPreset(t, id).AutoResumeStartedSince(clock.Now().Add(-guardWakeWindow)); n != 0 {
+	if n := f.autoPreset(t, id).AutoResumeStartedSince(clock.Now().Add(-autoResumeWindow)); n != 0 {
 		t.Fatalf("没开跑不该占预算: %d", n)
 	}
 
@@ -951,7 +951,7 @@ func TestAutoResumeReleasesTheBudgetWhenTheGateRefuses(t *testing.T) {
 	if r.State != store.AutoResumeGaveUp || r.Why == "" || r.RunID != "" || !r.StartedAt.IsZero() {
 		t.Fatalf("被闸门拒绝应放弃并还回名额: %+v", r)
 	}
-	if n := f.autoPreset(t, id).AutoResumeStartedSince(clock.Now().Add(-guardWakeWindow)); n != 0 {
+	if n := f.autoPreset(t, id).AutoResumeStartedSince(clock.Now().Add(-autoResumeWindow)); n != 0 {
 		t.Fatalf("名额应还回去: %d", n)
 	}
 	if f.sim.runCount() != 1 || len(ev.list()) != 1 {
@@ -1024,7 +1024,7 @@ func TestAutoResumeOKMinutesRoundTripsAndIsValidated(t *testing.T) {
 		t.Fatalf("超过上限的收进上限（1 天）: %d", launchers[0].Run.AutoResumeOKMinutes)
 	}
 
-	res := f.env.call("PUT", "/api/v1/terminal/launchers/"+id, map[string]any{
+	res := f.env.putLauncher("/api/v1/terminal/launchers/"+id, map[string]any{
 		"name": "续聊", "host": f.a.code, "dir": "/work/app", "kind": "headless",
 		"run": map[string]any{"workflow_id": launcherWF, "auto_resume": true, "auto_resume_ok_minutes": -3},
 	}, f.adm...)

@@ -141,6 +141,26 @@ func cliErrorLine(preview string) (kind, code, msg, raw string, ok bool) {
 	return "", "", "", "", false
 }
 
+// noPreviousChatsText 是「最近会话」找不到旧对话时的说明：发生了什么、可以怎么办。
+const noPreviousChatsText = "没有可接着的旧对话（Cursor CLI：No previous chats found.）：这个目录里还没有对话——先把预设改成「新会话」跑一次，或先在这个目录里开过一个对话"
+
+// hasNoPreviousChats 在运行输出的末尾找 Cursor CLI 的 `No previous chats found.`（不分大小写）：整行就是这句话（容许前后标点与空白）。
+func hasNoPreviousChats(preview string) bool {
+	lines := strings.Split(ansiRe.ReplaceAllString(preview, ""), "\n")
+	seen := 0
+	for i := len(lines) - 1; i >= 0 && seen < exitScanLines; i-- {
+		ln := strings.TrimSpace(lines[i])
+		if ln == "" {
+			continue
+		}
+		seen++
+		if strings.EqualFold(strings.Trim(ln, " .。"), "No previous chats found") {
+			return true
+		}
+	}
+	return false
+}
+
 // cliErrorText 把 CLI 的错误类别、错误码与消息写成一句中文。消息只有「Error」这类没有信息的词时不重复。
 func cliErrorText(kind, code, msg string) string {
 	label := cliKindLabel[kind]
@@ -191,6 +211,12 @@ func classifyRunExit(rec model.TerminalRun) RunExit {
 			text += "（像是被人或系统有意结束的）"
 		}
 		return RunExit{Class: ExitCrashed, Text: text, Retry: retry}
+	}
+	// 「最近会话」（--continue，#191）在目录里没有旧对话时，Cursor CLI 只打一行 `No previous chats found.` 就以退出码 1 结束，
+	// 不带错误类别：单独认出来，说清「该怎么办」；它不是重试能解决的，所以归「需要你处理」、不自动续跑。
+	// 只在命令确实带 --continue 时才认：同样的字样出现在别的运行里不改分类。
+	if isContinueCommand(rec.Command) && hasNoPreviousChats(exitSource(rec)) {
+		return RunExit{Class: ExitActionRequired, Text: noPreviousChatsText, Raw: "No previous chats found."}
 	}
 	if kind, code, msg, raw, ok := cliErrorLine(exitSource(rec)); ok {
 		out := RunExit{Code: code, Text: cliErrorText(kind, code, msg), Raw: oneLineClip(raw, 200)}

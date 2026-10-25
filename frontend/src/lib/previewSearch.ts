@@ -107,10 +107,17 @@ export function nearestRoundBefore(rounds: ReadonlyArray<{ session_id: string; c
   return best ?? first?.id ?? null
 }
 
-/** 命中是哪一类消息（给结果行的小标签）。 */
+/**
+ * 命中是哪一类消息（给结果行的小标签）。
+ * 群聊里的消息（source 是 chat_message）没有汇报 / 提问这类划分，小标签改写「谁说的」：
+ * 您自己的话写「您」（与消息卡上的发送者同一个叫法），其余写发送者的名字（没有名字写「成员」）。
+ * 群消息的搜索服务端只搜文字（kind = text），系统行不会出现在结果里，所以这里不单独处理系统行。
+ */
 export function hitKindLabel(m: Pick<ChatMessage, 'kind' | 'sender' | 'source'>): string {
   const human = m.sender?.kind === 'human'
   switch (m.source?.type) {
+    case 'chat_message':
+      return human ? '您' : m.sender?.name?.trim() || '成员'
     case 'feedback_session':
       return human ? '回复' : m.kind === 'progress' ? '进度' : '汇报'
     case 'queued_feedback':

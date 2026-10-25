@@ -6,11 +6,15 @@ import { groupBlocks, inRoundKey, type TimelineBlock, type TimelineEntry } from 
 import {
   UNREAD_KINDS,
   isAgentEntry,
+  newDynamicsText,
+  newSinceAway,
   newestAgentMessage,
   readVerdict,
   renderedAgentMs,
   unreadDividerKey,
   unreadItems,
+  unseenNewCount,
+  type NewItem,
   type UnreadItem,
 } from './previewUnread'
 
@@ -32,11 +36,10 @@ describe('isAgentEntry：哪些条目计入未读（与服务端 CountUnreadAgen
     assert.equal(isAgentEntry(entry('confirm', 'confirm-2', T(1), { kind: 'plan' })), true)
   })
 
-  it('授权等其他确认卡、您的追加、决策汇总、告警、恢复胶囊不计', () => {
+  it('授权等其他确认卡、您的追加、决策汇总、恢复胶囊不计', () => {
     assert.equal(isAgentEntry(entry('confirm', 'confirm-3', T(1), { kind: 'grant' })), false)
     assert.equal(isAgentEntry(entry('inbox', 'inbox-1', T(1))), false)
     assert.equal(isAgentEntry(entry('decisions', 'decisions-d1', T(1))), false)
-    assert.equal(isAgentEntry(entry('guard', 'guard-x', T(1))), false)
     assert.equal(isAgentEntry(entry('capsule', 'capsule-3', T(1))), false)
   })
 })
@@ -59,9 +62,9 @@ describe('unreadItems：与显示顺序一致（间隙块 → 轮次 → …… 
     )
   })
 
-  it('不是 Agent 发的条目（您的追加、告警等）不带时间；轮次自带汇报时间', () => {
+  it('不是 Agent 发的条目（您的追加、恢复胶囊等）不带时间；轮次自带汇报时间', () => {
     const blocks: Record<string, TimelineBlock[]> = {
-      r2: groupBlocks([entry('inbox', 'inbox-1', T(5)), entry('guard', 'guard-1', T(6))]),
+      r2: groupBlocks([entry('inbox', 'inbox-1', T(5)), entry('capsule', 'capsule-1', T(6))]),
     }
     const items = unreadItems(rounds, blocks, [])
     assert.deepEqual(items.find(i => i.key === 'inbox-1')?.agentAt, [])
@@ -189,5 +192,70 @@ describe('readVerdict：能不能推进已读游标', () => {
   it('有未读却找不到最新的 Agent 消息（数据对不上）：wait，由调用方限次后兜底', () => {
     assert.equal(readVerdict({ unread: 1, newestMs: null, renderedMs: ms(9) }), 'wait')
     assert.equal(readVerdict({ unread: 1, newestMs: Number.NaN, renderedMs: ms(9) }), 'wait')
+  })
+})
+
+describe('离开底部之后的新动态（#254）：哪些算新的、数字怎么跟着滚动变', () => {
+  const item = (key: string, ...mins: number[]): UnreadItem => ({ key, agentAt: mins.map(T) })
+
+  it('newSinceAway：只列「严格晚于」离开那一刻的 Agent 消息，按项汇总条数，保持显示顺序', () => {
+    const items = [item('s1', 1), item('notice-a', 2, 3), item('s2', 4, 5, 6), item('s3', 7)]
+    assert.deepEqual(newSinceAway(items, ms(3)), [
+      { key: 's2', count: 3 },
+      { key: 's3', count: 1 },
+    ])
+    // 整数毫秒相等不算新的（与已读游标同一条规则）
+    assert.deepEqual(newSinceAway(items, ms(7)), [])
+    assert.deepEqual(newSinceAway(items, ms(0)).map(n => n.key), ['s1', 'notice-a', 's2', 's3'])
+  })
+
+  it('newSinceAway：轮次里夹的卡也算（一项里多条各计一条）；没有 Agent 消息的项（如只有您的话）不出现', () => {
+    const items: UnreadItem[] = [item('s1', 1, 9, 10), { key: 'mine', agentAt: [] }]
+    assert.deepEqual(newSinceAway(items, ms(5)), [{ key: 's1', count: 2 }])
+  })
+
+  it('newSinceAway：向上载入的更早轮次时间不晚于离开那一刻，不会被算成新的；时间解析不了的不计', () => {
+    const items: UnreadItem[] = [item('older', 0), item('s1', 1), { key: 'bad', agentAt: ['not-a-time', undefined, null] }]
+    assert.deepEqual(newSinceAway(items, ms(1)), [])
+  })
+
+  it('newSinceAway：renderedAgentMs 当离开时刻 → 之后追加的一条通知 / 一轮汇报各是一条新动态', () => {
+    const before = [item('s1', 1), item('s2', 2)]
+    const away = renderedAgentMs(before)
+    assert.deepEqual(newSinceAway(before, away), [])
+    const after = [...before, item('notice-x', 3), item('s3', 4)]
+    assert.deepEqual(newSinceAway(after, away), [{ key: 'notice-x', count: 1 }, { key: 's3', count: 1 }])
+  })
+
+  const LIST: NewItem[] = [
+    { key: 'a', count: 1 },
+    { key: 'b', count: 2 },
+    { key: 'c', count: 1 },
+  ]
+
+  it('unseenNewCount：顶边进入视口的项不再计；数字 = 还在视口下方的条数', () => {
+    const seen = (visible: string[]) => (key: string) => visible.includes(key)
+    assert.deepEqual(unseenNewCount(LIST, seen([])), { count: 4, seen: [] })
+    assert.deepEqual(unseenNewCount(LIST, seen(['a'])), { count: 3, seen: ['a'] })
+    assert.deepEqual(unseenNewCount(LIST, seen(['a', 'b'])), { count: 1, seen: ['a', 'b'] })
+    assert.deepEqual(unseenNewCount(LIST, seen(['a', 'b', 'c'])), { count: 0, seen: ['a', 'b', 'c'] })
+  })
+
+  it('unseenNewCount：看过的项记进 seenKeys 之后，往上滚、它又落到视口下方也不会重新计', () => {
+    const seenKeys = new Set(['a', 'b'])
+    // a、b 现在又在视口下方了（用户往上滚去看历史），但它们已经看过
+    assert.deepEqual(unseenNewCount(LIST, () => false, seenKeys), { count: 1, seen: [] })
+    assert.deepEqual(unseenNewCount(LIST, () => true, seenKeys), { count: 0, seen: ['c'] })
+  })
+
+  it('unseenNewCount：还没渲染出来的项（调用方的 seen 回答 false）按没看到算；空列表是 0', () => {
+    assert.deepEqual(unseenNewCount(LIST, () => false), { count: 4, seen: [] })
+    assert.deepEqual(unseenNewCount([], () => true), { count: 0, seen: [] })
+  })
+
+  it('newDynamicsText：任何条数都带数字（不再有「1 条时没有数字」的特例）', () => {
+    assert.equal(newDynamicsText(1), '收到 1 条新动态')
+    assert.equal(newDynamicsText(3), '收到 3 条新动态')
+    assert.equal(newDynamicsText(12), '收到 12 条新动态')
   })
 })

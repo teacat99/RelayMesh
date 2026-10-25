@@ -72,7 +72,8 @@ describe('projectDocs 仓库：后台刷新失败不留未处理的 Promise 拒�
     const src = squash(DOCS_STORE)
     assert.doesNotMatch(src, /void loadList\(/)
     assert.doesNotMatch(src, /void loadDetail\(/)
-    assert.match(src, /loadList\(listWf\)\.catch\(ignoreBackgroundError\)/)
+    // 重取目录时带着筛选条件（listFilter，#243）：不带的话筛选着的目录会在事件 / 实时流连上之后变回没筛选
+    assert.match(src, /loadList\(listWf, listFilter\)\.catch\(ignoreBackgroundError\)/)
     assert.equal((src.match(/loadDetail\(cur\.workflow_id, cur\.path, true\)\.catch\(ignoreBackgroundError\)/g) ?? []).length, 2)
     assert.match(src, /const ignoreBackgroundError = \(\) => \{\}/)
   })

@@ -45,10 +45,13 @@ describe('预览视图阶段 B：列表里的进度通知', () => {
     assert.deepEqual(blocks.map(b => b.type), ['single', 'single', 'single'])
   })
 
-  it('摞与兜底分支里的 TimelineCardEntry 仍是紧凑行（其余卡片阶段 C 再换）', () => {
+  it('摞与兜底分支里的 TimelineCardEntry 仍是事件行：它固定渲染事件行，已没有 compact 参数（#247）', () => {
     const entries = [...src.matchAll(/<TimelineCardEntry\b([^>]*)>/g)].map(m => m[1])
     assert.ok(entries.length >= 2)
-    for (const a of entries) assert.ok(/(^|\s):?compact(\s|=|$)/.test(a), `<TimelineCardEntry> 应传 compact：${a.trim()}`)
+    for (const a of entries) assert.ok(!/(^|\s):?compact(\s|=|$)/.test(a), `<TimelineCardEntry> 不再接收 compact：${a.trim()}`)
+    const entry = read('components/feedback/TimelineCardEntry.vue')
+    assert.match(entry, /<ConfirmTimelineCard\b[^>]*\bcompact\b/, '已处理的提问固定是事件行')
+    assert.match(entry, /<DecisionGroupCard\b[^>]*\bcompact\b/, '决策汇总固定是事件行')
   })
 })
 
@@ -153,9 +156,8 @@ describe('预览视图阶段 B：统一消息卡骨架', () => {
   })
 })
 
-describe('预览视图阶段 B：经典视图一个字不碰', () => {
+describe('预览视图阶段 B：共享叶子不反过来依赖预览专属组件', () => {
   const FILES = [
-    'components/feedback/FeedbackMessageList.vue',
     'components/feedback/AsyncTimelineEntry.vue',
     'components/feedback/CompactTaskRow.vue',
     'components/feedback/TimelineCardEntry.vue',
@@ -166,9 +168,8 @@ describe('预览视图阶段 B：经典视图一个字不碰', () => {
     'components/confirms/ConfirmCard.vue',
     'components/confirms/ConfirmTimelineCard.vue',
     'components/confirms/DecisionGroupCard.vue',
-    'components/confirms/GuardAlertCard.vue',
   ]
-  it('经典列表与共享叶子不引用 preview-view 里的任何组件', () => {
+  it('共享叶子不引用 preview-view 里的任何组件（依赖方向只能是列表 → 叶子）', () => {
     for (const rel of FILES) {
       const src = read(rel)
       assert.ok(

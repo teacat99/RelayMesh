@@ -1,6 +1,6 @@
 // 运行：pnpm --dir frontend run test:unit
 // 预览视图阶段 E-c2（#120）未读的源码级防线：
-//   · 分隔线 / 已读标记的逻辑只活在预览视图那几个文件里，经典列表与共享叶子一个字不碰（侧栏只多认一个开关）；
+//   · 分隔线 / 已读标记的逻辑只活在预览视图那几个文件里，共享叶子一个字不碰；
 //   · 已读游标只有在「标签页可见 + 停在底部 + 那条消息已经渲染出来」时才推进，且一定带游标（不会把「现在」之前没渲染的消息标成已读）；
 //   · 列表接线：换工作流重新冻结游标、滚动 / 新消息重新计时、分隔线画在日期分隔之后、紧挨着那个条目；
 //   · 侧栏：预览视图开着时也关注各会话的摘要并显示未读数（聊天视图原有的开关不变）。
@@ -149,13 +149,13 @@ describe('预览视图阶段 E-c2：列表接线', () => {
 })
 
 describe('预览视图阶段 E-c2：侧栏', () => {
-  it('预览视图开着时关注各会话的摘要、显示未读数（#165：旧的聊天视图开关已删除，只剩这一个）', () => {
+  it('侧栏关注各会话的摘要、显示未读数（不再有视图开关：#166 删掉经典视图）', () => {
     const bar = read('components/AppSidebar.vue')
-    assert.match(bar, /previewView\.enabled\.value \? displayedItems\.value/)
-    assert.ok(!/chatPreview/.test(bar), '侧栏不应再有聊天视图的开关')
+    assert.match(bar, /\(\) => displayedItems\.value\.filter\(i => i\.type === 'feedback' && i\.workflow_id\)/)
+    assert.ok(!/chatPreview|previewView/.test(bar), '侧栏不应再有任何视图开关')
     const card = read('components/sidebar/SidebarItemCard.vue')
-    assert.match(card, /v-if="previewView\.enabled\.value && item\.type === 'feedback' && chatStore\.unreadOf\(item\.workflow_id\) > 0"/)
-    assert.ok(!/chatPreview/.test(card), '侧栏卡片不应再有聊天视图的开关')
+    assert.match(card, /v-if="item\.type === 'feedback' && chatStore\.unreadOf\(item\.workflow_id\) > 0"/)
+    assert.ok(!/chatPreview|previewView/.test(card), '侧栏卡片不应再有任何视图开关')
     assert.match(card, /data-testid="sidebar-unread"/)
   })
 })

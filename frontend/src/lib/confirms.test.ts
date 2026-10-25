@@ -5,7 +5,9 @@ import {
   adoptPreview,
   ageText,
   adoptableItems,
+  answerLead,
   answerText,
+  answeredByMain,
   canAdoptRecommended,
   checkSelection,
   clockText,
@@ -13,6 +15,7 @@ import {
   decisionAdoptPreview,
   decisionAnswerText,
   decisionAnswerable,
+  escalationText,
   groupByRisk,
   matchDecisionViews,
   pendingChipText,
@@ -20,7 +23,9 @@ import {
   recallOptions,
   recallTimes,
   recommendedIds,
+  riskHint,
   riskTone,
+  routedToMain,
   selectionAfterCustomToggle,
   summarizeDecisions,
   toggleSelection,
@@ -199,20 +204,23 @@ describe('adoptableItems / adoptPreview', () => {
 })
 
 describe('待答复徽标 / riskTone', () => {
-  it('提问与告警都为 0 时没有文案，否则按来源列出', () => {
-    assert.equal(pendingChipText(0, 0), '')
-    assert.equal(pendingChipText(3, 0), '待答复 3')
-    assert.equal(pendingChipText(0, 2), '告警 2')
-    assert.equal(pendingChipText(3, 1), '待答复 3 · 告警 1')
-    assert.equal(pendingChipTitle(0, 0), '')
-    assert.equal(pendingChipTitle(2, 0), '2 项提问等你答复；点开可定位到对话里的卡片')
-    assert.equal(pendingChipTitle(2, 1), '2 项提问等你答复、1 条守护告警；点开可定位到对话里的卡片')
+  it('没有待答复的提问时没有文案，否则写出条数', () => {
+    assert.equal(pendingChipText(0), '')
+    assert.equal(pendingChipText(3), '待答复 3')
+    assert.equal(pendingChipTitle(0), '')
+    assert.equal(pendingChipTitle(2), '2 项提问等你答复；点开可定位到对话里的卡片')
   })
   it('风险色调', () => {
     assert.equal(riskTone('L2'), 'danger')
     assert.equal(riskTone('L1'), 'warn')
     assert.equal(riskTone('L0'), 'muted')
     assert.equal(riskTone(undefined), 'muted')
+  })
+  it('风险标签的悬停说明：L2 写明批准前不会执行（#217），L0 / L1 照旧只写等级', () => {
+    assert.match(riskHint('L2'), /^L2 · 不可逆 \/ 高风险：/)
+    assert.match(riskHint('L2'), /在您明确批准前不会执行这一步/)
+    assert.equal(riskHint('L1'), 'L1 · 可回滚的改动')
+    assert.equal(riskHint('L0'), 'L0 · 只读 / 随时可回滚')
   })
 })
 
@@ -368,5 +376,39 @@ describe('clockText / recallTimes', () => {
       recallTimes({ status: 'answered', created_at: at(9, 0), updated_at: at(9, 45) }),
       '提出于 10-15 09:00 · 答复于 10-15 09:45',
     )
+  })
+})
+
+describe('决策路由（#236 P2）：请示先送主会话时的判断与文案', () => {
+  it('routedToMain：只有「待处理 + addressee 是 wf:<主会话>」才算在等主会话；转交后 addressee 清空、作答后保留都不算', () => {
+    assert.equal(routedToMain(item({ addressee: 'wf:wf-main' })), true)
+    assert.equal(routedToMain(item({})), false, '普通请示')
+    assert.equal(routedToMain(item({ addressee: '' })), false)
+    assert.equal(routedToMain(item({ addressee: 'wf:' })), false, '没有主会话编号')
+    assert.equal(routedToMain(item({ addressee: 'user:x' })), false, '不是路由给主会话的')
+    assert.equal(routedToMain(item({ addressee: 'wf:wf-main', status: 'answered' })), false, '答复后保留 addressee，但不再「在等」')
+    assert.equal(routedToMain(item({ addressee: 'wf:wf-main', status: 'dismissed' })), false)
+  })
+
+  it('answeredByMain / answerLead：答复者是 agent:<主会话> 才写「主会话代答」；用户自己答 / 老答复没有 by 都是「已答复」', () => {
+    const answered = (by?: string) => item({ status: 'answered', answer: { options: ['a'], by: by as string } })
+    assert.equal(answeredByMain(answered('agent:wf-main')), true)
+    assert.equal(answerLead(answered('agent:wf-main')), '主会话代答')
+    for (const by of ['human', 'doc', '', undefined]) {
+      assert.equal(answeredByMain(answered(by)), false, String(by))
+      assert.equal(answerLead(answered(by)), '已答复', String(by))
+    }
+    assert.equal(answeredByMain(item({ status: 'pending', answer: { options: [], by: 'agent:wf-main' } })), false, '没答复完不算')
+    assert.equal(answerLead(item({ status: 'answered' })), '已答复', '没有 answer 字段也不报错')
+  })
+
+  it('escalationText：主会话转的带它写的原因；超时 / 系统的说明本身是整句；缺说明时给兜底句；没转交过为空', () => {
+    assert.equal(escalationText(item({})), '')
+    assert.equal(escalationText(item({ escalation: { by: 'agent:wf-main', note: ' 涉及预算 ' } })), '主会话转交给您：涉及预算')
+    assert.equal(escalationText(item({ escalation: { by: 'agent:wf-main' } })), '主会话转交给您定夺')
+    assert.equal(escalationText(item({ escalation: { by: 'timeout', note: '主会话 30 分钟没有答复，自动转交给你' } })), '主会话 30 分钟没有答复，自动转交给你')
+    assert.equal(escalationText(item({ escalation: { by: 'system', note: '分支已结束，请示改由你定夺' } })), '分支已结束，请示改由你定夺')
+    assert.equal(escalationText(item({ escalation: { by: 'timeout' } })), '主会话一直没有答复，已转交给您')
+    assert.equal(escalationText(item({ escalation: { by: 'system' } })), '已转交给您定夺')
   })
 })

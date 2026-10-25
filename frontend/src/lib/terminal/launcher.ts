@@ -1,21 +1,19 @@
-import type { HeadlessPosture, HostView, LauncherRun, SessionInfo, TerminalLauncher, TerminalPrefsLimits } from '../../api/terminal'
-import { classifyLauncherExec } from './launcherExec'
+import type { HeadlessPosture, HostView, LauncherAfterNew, LauncherRun, LauncherSource, TerminalLauncher, TerminalPrefsLimits } from '../../api/terminal'
 import { hostTitle, runLimitText } from './format'
 import { canHumanTerminal } from './hosts'
 
-// 终端启动器（会话页顶栏的「终端」入口）：一份预设 = 在哪台主机、哪个目录、会话就绪后自动输入什么命令。
-// 这里是不碰界面的那一部分：预设草稿的校验（与服务端 internal/store/terminal_launchers.go 一致）、主机是否可用、
-// 认出预设已经在运行的会话、要自动输入的那一行命令，以及「什么时候可以输入」的判断。
+// 终端启动器（会话页顶栏的「终端」入口）：一份预设 = 在哪台主机、哪个目录、接着哪个对话运行一次（「非交互续聊」，#126）。
+// 这里是不碰界面的那一部分：预设草稿的校验（与服务端 internal/store/terminal_launchers.go 一致）、主机是否可用、目录的写法提醒。
+// 旧版的交互式「开终端」预设已经下线（#245）：自动输入命令、认出运行中的会话、会话守护的那些代码都不在了。
 
 // ---------- 取值范围 ----------
 
 export interface LauncherLimits {
   /** 预设最多几个。 */
   max: number
-  /** 以下三项按字符数。 */
+  /** 以下两项按字符数。 */
   name: number
   dir: number
-  command: number
   /** Hub 认不认识「非交互续聊」预设（#126）：旧版 Hub 没有，界面就不提供这种预设。 */
   runSupported: boolean
   /** 「非交互续聊」的提示词 / 模型名 / 可执行文件的最大长度（按字符数）。 */
@@ -32,11 +30,11 @@ export interface LauncherLimits {
 
 /** 旧版 Hub 不返回 limits 时用这一组；与服务端的默认上限一致。 */
 export const LAUNCHER_DEFAULT_LIMITS: LauncherLimits = {
-  max: 20, name: 40, dir: 512, command: 1000,
-  runSupported: false, runPrompt: 600, runModel: 64, runBin: 128, runPromptDefault: '', runNewPromptDefault: '', runMaxMinutes: 0,
+  max: 20, name: 40, dir: 512,
+  runSupported: false, runPrompt: 1500, runModel: 64, runBin: 128, runPromptDefault: '', runNewPromptDefault: '', runMaxMinutes: 0,
 }
 
-/** 工作流编号的最大长度：与服务端 store.MaxGuardWorkflowRunes 一致（守护与续聊预设共用）。 */
+/** 工作流编号的最大长度：与服务端 store.MaxGuardWorkflowRunes 一致。 */
 export const RUN_WORKFLOW_MAX = 128
 /** 对话编号：与服务端 agentConvRe（^[A-Za-z0-9_-]{1,64}$）一致。 */
 const CONVERSATION_RE = /^[A-Za-z0-9_-]{1,64}$/
@@ -50,6 +48,48 @@ const PREFIX_CMDS = new Set([
   'setsid', 'timeout', 'xargs', 'sh', 'bash', 'zsh', 'fish',
 ])
 
+// ---------- Windows 主机上的路径与可执行文件（#178）：规则与服务端 store/headless_paths.go 一致 ----------
+//
+// Windows 上的命令走 PowerShell，而 agent 往往是 agent.cmd 这样的批处理垫片：PowerShell 把参数交给 cmd.exe 时，
+// 双引号、% ^ & | < > ! 会被当成 cmd 自己的语法，所以目录与可执行文件的路径里一律不许出现它们（提示词里的由服务端换成全角）。
+
+const WIN_DRIVE_RE = /^[A-Za-z]:[\\/]/
+const WIN_UNC_RE = /^\\\\[^\\/]+[\\/]+[^\\/]+/
+/** Windows 上「命令名」写法的可执行文件（agent、agent.cmd）：没有路径分隔符、空白与 ~，不以点开头。 */
+const WIN_BARE_BIN_RE = /^[A-Za-z0-9_+-][A-Za-z0-9_.+-]*$/
+const WIN_PATH_BAD = '"%^&|<>!*?'
+const WIN_SHELL_NAMES = new Set(['cmd', 'powershell', 'pwsh', 'wsl', 'bash', 'sh', 'zsh', 'fish'])
+const WIN_ONLY_SHELL_NAMES = new Set(['cmd', 'powershell', 'pwsh', 'wsl'])
+
+/** 是不是 Windows 的绝对路径：盘符（C:\work、C:/work）或 UNC（\\服务器\共享\…）。 */
+export const isWindowsAbsPath = (p: string) => WIN_DRIVE_RE.test(p) || WIN_UNC_RE.test(p)
+
+/** Windows 路径里不该出现的字符；没问题返回空串，有就返回可直接接在「目录」「可执行文件」后面的一句话。 */
+export function windowsPathProblem(p: string): string {
+  for (let i = 0; i < p.length; i++) {
+    const ch = p[i]
+    if (CONTROL_RE.test(ch)) return '里不能有换行或控制字符'
+    if (WIN_PATH_BAD.includes(ch)) return `里不能有「${ch}」：这些字符（${[...WIN_PATH_BAD].join(' ')}）会被 cmd.exe 当成命令语法，或者路径里本来就不允许`
+    if (ch === ':' && i !== 1) return '里的冒号只能出现在盘符后面（如 C:\\work）'
+  }
+  return ''
+}
+
+const binBase = (bin: string) => (bin.split(/[\\/]/).pop() ?? '').toLowerCase().replace(/\.exe$/, '')
+
+/** 这个可执行文件能不能用在 Windows 主机上：命令名（agent、agent.cmd），或盘符 / UNC 绝对路径；不能是 shell，路径里没有 cmd 语法字符。 */
+export function validWindowsBin(bin: string): boolean {
+  if (!bin || bin !== bin.trim() || WIN_SHELL_NAMES.has(binBase(bin))) return false
+  if (isWindowsAbsPath(bin)) return windowsPathProblem(bin) === '' && !/[\\/]$/.test(bin)
+  return WIN_BARE_BIN_RE.test(bin) && !PREFIX_CMDS.has(bin)
+}
+
+/** 可执行文件的写法是否合法，不分主机系统（预设保存时用）：POSIX 的命令名或路径（一直以来的规则），或 Windows 的命令名、盘符 / UNC 路径。 */
+export function validHeadlessBin(bin: string): boolean {
+  if (BIN_RE.test(bin)) return !PREFIX_CMDS.has(bin) && !WIN_ONLY_SHELL_NAMES.has(binBase(bin))
+  return validWindowsBin(bin)
+}
+
 const positive = (v: number | undefined, fallback: number) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback)
 
 export function launcherLimits(l?: Partial<TerminalPrefsLimits> | null): LauncherLimits {
@@ -58,7 +98,6 @@ export function launcherLimits(l?: Partial<TerminalPrefsLimits> | null): Launche
     max: positive(l?.launcher_max, d.max),
     name: positive(l?.launcher_name_max, d.name),
     dir: positive(l?.launcher_dir_max, d.dir),
-    command: positive(l?.launcher_command_max, d.command),
     runSupported: positive(l?.launcher_run_prompt_max, 0) > 0,
     runPrompt: positive(l?.launcher_run_prompt_max, d.runPrompt),
     runModel: positive(l?.launcher_run_model_max, d.runModel),
@@ -100,8 +139,15 @@ export interface RunDraft {
   autoResume?: boolean
   /** 「续跑成功」的判定时长（#172）：输入框里的整数分钟；留空 = 默认 10 分钟。只在开着自动续跑时有意义；会话页「运行」不用它，所以可以没有。 */
   autoResumeOk?: string
-  /** 第一次运行时新开对话（#176 第三期）：命令里没有 --resume，之后的运行接着学到的新对话。需要填工作流编号、不能固定对话编号。会话页「运行」不用它，所以可以没有。 */
-  newConversation?: boolean
+  /**
+   * 对话来源（#191，三选一）：resume = 指定会话（命令带 --resume；填了 conversation 就固定接它，留空 = 工作流里最近汇报的对话）；
+   * new = 新会话（命令不带 --resume，Hub 从输出里学到新对话的编号；需要填工作流编号）；
+   * continue = 最近会话（命令用 --continue，接着目录里 Cursor CLI 认的最近对话；需要填工作流编号）。
+   * 没有它按 resume 处理（会话页「运行」不用它）。只有 resume 会提交 conversation。
+   */
+  source?: LauncherSource
+  /** 「新会话」运行之后的去向（#559）：remember = 记下编号、之后接着它（默认）/ stay = 不切换、每次都新开 / continue = 成功后切成最近会话。只在 source 是 new 时有意义。 */
+  afterNew?: LauncherAfterNew
   /** 预设的来源标记（enable_agent = 由「启用 Agent」创建）：表单不让改，只负责在编辑保存时原样带回去（否则编辑一次标记就丢了）。 */
   origin?: string
 }
@@ -111,14 +157,13 @@ export interface LauncherDraft {
   name: string
   host: string
   dir: string
-  command: string
-  /** 有它就是「非交互续聊」预设（点「运行」由 Hub 运行一次，没有命令、没有守护）；终端预设没有这个字段。 */
-  run?: RunDraft
+  /** 「非交互续聊」预设的运行选项（点「运行」由 Hub 运行一次，没有命令）。 */
+  run: RunDraft
 }
 
 export const blankRunDraft = (): RunDraft => ({
   bin: '', model: '', posture: 'allowlist', workflow: '', conversation: '', prompt: '', maxRun: '', maxRunUnit: 'hour', autoResume: false, autoResumeOk: '',
-  newConversation: false, origin: '',
+  source: 'resume', afterNew: 'remember', origin: '',
 })
 
 /** 「续跑成功」判定时长的默认值与上限（分钟，#172）：与服务端 store.DefaultAutoResumeOKMinutes / MaxAutoResumeOKMinutes 一致。 */
@@ -166,23 +211,23 @@ export function newLauncherId(): string {
   return 'l-' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
 }
 
-export function blankDraft(host = ''): LauncherDraft {
-  return { id: newLauncherId(), name: '', host, dir: '', command: '' }
-}
-
-/** 「Cursor CLI」模板：用来在空白状态下一键起一个常用预设。命令写 agent；有的主机装的是旧名字 cursor-agent，界面上提示可以改。 */
-export const CURSOR_CLI_NAME = 'Cursor CLI'
-export const CURSOR_CLI_COMMAND = 'agent'
-
-export function cursorCliDraft(host = ''): LauncherDraft {
-  return { id: newLauncherId(), name: CURSOR_CLI_NAME, host, dir: '', command: CURSOR_CLI_COMMAND }
-}
-
 /** 「Cursor CLI 续聊」模板：非交互续聊的空白起点（#126）。 */
 export const CURSOR_CLI_RESUME_NAME = 'Cursor CLI 续聊'
 
 export function headlessDraft(host = ''): LauncherDraft {
-  return { id: newLauncherId(), name: CURSOR_CLI_RESUME_NAME, host, dir: '', command: '', run: blankRunDraft() }
+  return { id: newLauncherId(), name: CURSOR_CLI_RESUME_NAME, host, dir: '', run: blankRunDraft() }
+}
+
+/** 预设实际的对话来源（#191）：设了 source 就用它；存量预设（没有 source）按旧字段推导——勾了「新开对话」是 new，其余是 resume。与服务端 EffectiveSource 一致。 */
+export function effectiveSource(r: Pick<LauncherRun, 'source' | 'new_conversation'> | undefined): LauncherSource {
+  if (r?.source === 'resume' || r?.source === 'new' || r?.source === 'continue') return r.source
+  return r?.new_conversation === true ? 'new' : 'resume'
+}
+
+/** 「新会话」运行之后的去向：来源不是新会话时是 ''；没设就是默认的「记下编号」。与服务端 EffectiveAfterNew 一致。 */
+export function effectiveAfterNew(r: Pick<LauncherRun, 'source' | 'new_conversation' | 'after_new'> | undefined): LauncherAfterNew | '' {
+  if (effectiveSource(r) !== 'new') return ''
+  return r?.after_new === 'stay' || r?.after_new === 'continue' ? r.after_new : 'remember'
 }
 
 export function runDraftOf(r: LauncherRun | undefined): RunDraft {
@@ -196,19 +241,26 @@ export function runDraftOf(r: LauncherRun | undefined): RunDraft {
     ...maxRunFields(r?.max_run_minutes),
     autoResume: r?.auto_resume === true,
     autoResumeOk: typeof r?.auto_resume_ok_minutes === 'number' && r.auto_resume_ok_minutes > 0 ? String(Math.floor(r.auto_resume_ok_minutes)) : '',
-    newConversation: r?.new_conversation === true,
+    source: effectiveSource(r),
+    afterNew: effectiveAfterNew(r) || 'remember',
     origin: r?.origin ?? '',
   }
 }
 
 export function draftOf(l: TerminalLauncher): LauncherDraft {
-  const d: LauncherDraft = { id: l.id, name: l.name, host: l.host, dir: l.dir ?? '', command: l.command ?? '' }
-  if (l.kind === 'headless') d.run = runDraftOf(l.run)
-  return d
+  return { id: l.id, name: l.name, host: l.host, dir: l.dir ?? '', run: runDraftOf(l.run) }
 }
 
 /** 这条预设是不是「非交互续聊」。 */
 export const isHeadlessPreset = (l: Pick<TerminalLauncher, 'kind'>) => l.kind === 'headless'
+
+/**
+ * 旧版（已停用）的交互式「开终端」预设（#245 第一期）：不是「非交互续聊」的都算。
+ * 它们不能再新建、修改、启动，清单里只留删除；服务端仍把它们原样读出来（第三期才清理），所以界面要认得它们，并说清楚为什么只有删除。
+ */
+export const isLegacyPreset = (l: Pick<TerminalLauncher, 'kind'>) => !isHeadlessPreset(l)
+export const LEGACY_PRESET_BADGE = '旧版（已停用）'
+export const LEGACY_PRESET_HINT = '交互式「开终端」预设已停用，只能删除。要在这台主机上开终端，请直接用 ExecMesh 的网页终端。'
 
 /** 名字是单行文本：各种空白折叠成一个空格。与服务端的规整一致（同时也是会话名被终端子系统规整后的样子）。 */
 export function normalizeName(s: string): string {
@@ -220,14 +272,23 @@ export function collapseSpaces(s: string): string {
   return s.split(/\s+/).filter(Boolean).join(' ')
 }
 
+/** 草稿里选的对话来源：没有（会话页「运行」的草稿）或不认识就是指定会话。 */
+export function draftSource(r: Pick<RunDraft, 'source'>): LauncherSource {
+  return r.source === 'new' || r.source === 'continue' ? r.source : 'resume'
+}
+
 /** 草稿 → 提交给服务端的运行配置：空字段不带。 */
 export function toRun(r: RunDraft): LauncherRun {
   const out: LauncherRun = { posture: r.posture }
   const bin = r.bin.trim()
   const model = r.model.trim()
   const workflow = r.workflow.trim()
-  const conversation = r.conversation.trim()
+  const source = draftSource(r)
+  // 只有「指定会话」提交对话编号：另外两种来源下输入框是藏起来的，藏着的内容不该悄悄生效（所见即所存）。
+  const conversation = source === 'resume' ? r.conversation.trim() : ''
   const prompt = collapseSpaces(r.prompt)
+  out.source = source
+  if (source === 'new') out.after_new = r.afterNew === 'stay' || r.afterNew === 'continue' ? r.afterNew : 'remember'
   if (bin) out.bin = bin
   if (model) out.model = model
   if (workflow) out.workflow_id = workflow
@@ -241,7 +302,6 @@ export function toRun(r: RunDraft): LauncherRun {
     const ok = parseAutoResumeOk(r.autoResumeOk)
     if (ok !== null && Number.isFinite(ok) && ok >= 1) out.auto_resume_ok_minutes = Math.min(ok, AUTO_RESUME_OK_MAX_MINUTES)
   }
-  if (r.newConversation) out.new_conversation = true
   // 来源标记不是表单的选项：原样带回去，免得编辑一次「启用 Agent」创建的预设就把标记丢了
   const origin = (r.origin ?? '').trim()
   if (origin) out.origin = origin
@@ -249,23 +309,18 @@ export function toRun(r: RunDraft): LauncherRun {
 }
 
 export function toLauncher(d: LauncherDraft): TerminalLauncher {
-  const base = { id: d.id, name: normalizeName(d.name), host: d.host.trim(), dir: d.dir.trim() }
-  // 非交互续聊没有命令、没有守护：运行的命令由 run 里的选项拼出来。
-  if (d.run) return { ...base, kind: 'headless', run: toRun(d.run) }
-  return { ...base, command: d.command.trim() }
+  // 非交互续聊没有命令：运行的命令由 run 里的选项拼出来。
+  return { id: d.id, name: normalizeName(d.name), host: d.host.trim(), dir: d.dir.trim(), kind: 'headless', run: toRun(d.run) }
 }
 
 // ---------- 校验 ----------
 
-export type DraftField = 'name' | 'host' | 'dir' | 'command' | 'bin' | 'model' | 'workflow' | 'conversation' | 'prompt' | 'maxRun' | 'autoResumeOk'
+export type DraftField = 'name' | 'host' | 'dir' | 'bin' | 'model' | 'workflow' | 'conversation' | 'prompt' | 'maxRun' | 'autoResumeOk'
 export type DraftErrors = Partial<Record<DraftField, string>>
 
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/
-/** 完整路径：POSIX 绝对路径、~ 开头的家目录路径，或 Windows 的盘符 / UNC 路径。 */
-const DIR_RE = /^(\/|~|[A-Za-z]:[\\/]|\\\\)/
-
-export const hasControlChar = (s: string) => CONTROL_RE.test(s)
+const hasControlChar = (s: string) => CONTROL_RE.test(s)
 
 export interface DraftContext {
   limits: LauncherLimits
@@ -279,7 +334,7 @@ function validateRun(r: RunDraft, limits: LauncherLimits, err: DraftErrors) {
 
   if (t.bin) {
     if (charCount(t.bin) > limits.runBin) err.bin = `可执行文件最长 ${limits.runBin} 个字`
-    else if (!BIN_RE.test(t.bin) || PREFIX_CMDS.has(t.bin)) err.bin = '可执行文件只能是命令名或路径（字母、数字和 _ . / ~ + -），不能是 cd、env、sudo、bash 这类前缀命令或 shell'
+    else if (!validHeadlessBin(t.bin)) err.bin = '可执行文件只能是命令名或路径（Linux / macOS：字母、数字和 _ . / ~ + -；Windows：agent 这样的命令名，或 C:\\…\\agent.cmd 这样的盘符 / UNC 路径，路径里不能有 " % ^ & | < > ! * ?），不能是 cd、env、sudo、bash 这类前缀命令，也不能是 cmd、powershell 这类 shell'
   }
   if (t.model) {
     if (charCount(t.model) > limits.runModel) err.model = `模型名最长 ${limits.runModel} 个字`
@@ -291,11 +346,17 @@ function validateRun(r: RunDraft, limits: LauncherLimits, err: DraftErrors) {
     else if (/\s/.test(t.workflow_id) || hasControlChar(t.workflow_id)) err.workflow = '工作流编号里不能有空格或控制字符'
   }
   if (t.conversation_id && !CONVERSATION_RE.test(t.conversation_id)) err.conversation = '对话编号只能含字母、数字、下划线和连字符（最长 64 位）'
-  if (!t.workflow_id && !t.conversation_id) err.workflow ??= '请填工作流编号（用来找到智能体最近的对话），或者直接固定一个对话编号'
-  // 新开对话（#176）：对话是第一次运行时才新开的，所以不能同时固定一个已有的对话；要靠工作流编号让新对话接进来（规则与服务端 HeadlessRun.validate 一致）
-  if (t.new_conversation) {
-    if (t.conversation_id) err.conversation = '选了「第一次运行时新开对话」就不能再固定对话编号：把对话编号留空，或者取消这个选项'
-    else if (!t.workflow_id) err.workflow ??= '「新开对话」要填工作流编号：新开的智能体靠它接进这个会话'
+  // 对话来源（#191，规则与服务端 HeadlessRun.validate 一致；toRun 只在指定会话时带对话编号，所以另外两种来源不会有「又固定了编号」的冲突）：
+  // 指定会话至少要有工作流编号或对话编号；新会话 / 最近会话都要靠工作流编号——新开的智能体靠它接进会话，最近会话的运行靠它归属与记系统行。
+  switch (draftSource(r)) {
+    case 'new':
+      if (!t.workflow_id) err.workflow ??= '「新会话」要填工作流编号：新开的智能体靠它接进这个会话'
+      break
+    case 'continue':
+      if (!t.workflow_id) err.workflow ??= '「最近会话」要填工作流编号：它用来归属这次运行、在聊天里记系统行、判断有没有向 RelayMesh 汇报'
+      break
+    default:
+      if (!t.workflow_id && !t.conversation_id) err.workflow ??= '请填工作流编号（用来找到智能体最近的对话），或者直接固定一个对话编号'
   }
   if (t.prompt) {
     const n = charCount(t.prompt)
@@ -344,22 +405,13 @@ export function validateDraft(d: LauncherDraft, ctx: DraftContext): DraftErrors 
     const n = charCount(t.dir)
     if (n > ctx.limits.dir) err.dir = `目录最长 ${ctx.limits.dir} 个字，现在是 ${n} 个字`
     else if (hasControlChar(t.dir)) err.dir = '目录里不能有换行或控制字符'
-    else if (d.run && !t.dir.startsWith('/')) err.dir = '非交互续聊的目录必须是主机上的绝对路径（以 / 开头）'
-    else if (!DIR_RE.test(t.dir)) err.dir = '目录请写完整路径（以 / 或 ~ 开头；Windows 写盘符，例如 C:\\work）'
-  } else if (d.run) {
+    else if (!t.dir.startsWith('/') && !isWindowsAbsPath(t.dir)) err.dir = '非交互续聊的目录必须是主机上的绝对路径（Linux / macOS 以 / 开头；Windows 写盘符路径如 C:\\work，或 \\\\服务器\\共享\\… 形式）'
+    else if (isWindowsAbsPath(t.dir) && windowsPathProblem(t.dir)) err.dir = `目录${windowsPathProblem(t.dir)}`
+  } else {
     err.dir = '请填写目录：非交互续聊要在这个目录里运行（--workspace）'
   }
 
-  if (d.run) {
-    validateRun(d.run, ctx.limits, err)
-    return err
-  }
-
-  if (t.command) {
-    const n = charCount(t.command)
-    if (n > ctx.limits.command) err.command = `命令最长 ${ctx.limits.command} 个字，现在是 ${n} 个字`
-    else if (hasControlChar(t.command)) err.command = '命令只能是一行，不能有换行、制表符或其他控制字符'
-  }
+  validateRun(d.run, ctx.limits, err)
   return err
 }
 
@@ -385,188 +437,38 @@ export function hostReadiness(host: HostView | undefined): HostReadiness {
   return { ok: true }
 }
 
-// ---------- 认出已经在运行的会话 ----------
-
-/**
- * 这个预设在它的主机上正在运行的会话（新的在前）。靠「主机 + 会话名」认：启动时新建会话用的就是预设的名字，
- * 所以在 ExecMesh 里把它改了名，就不再被当成这个预设的会话——只是少一个「继续」入口，不会出错。
- */
-export function runningSessionsOf(l: TerminalLauncher, host: HostView | undefined): SessionInfo[] {
-  if (!host) return []
-  const want = normalizeName(l.name)
-  return host.sessions
-    .filter(s => s.state === 'running' && normalizeName(s.name ?? '') === want)
-    .sort((a, b) => (b.created ?? 0) - (a.created ?? 0) || b.sid.localeCompare(a.sid))
-}
-
-// ---------- 自动输入的那一行 ----------
-
-/** 单引号包起来的 shell 字面量。 */
-export function shQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`
-}
-
-/**
- * 给 cd 用的目录写法。~ 开头的路径让 shell 自己展开波浪号（放进引号里它就成了普通字符），其余部分照常加引号。
- * 例：`~/my work` → `~/'my work'`，`/srv/a'b` → `'/srv/a'\''b'`。
- */
-export function quoteDir(dir: string): string {
-  const m = /^(~[A-Za-z0-9._-]*)(\/.*)?$/.exec(dir)
-  if (!m) return shQuote(dir)
-  const rest = m[2] ?? ''
-  if (rest.length <= 1) return m[1] + rest
-  return `${m[1]}/${shQuote(rest.slice(1))}`
-}
+// ---------- 主机平台与目录写法 ----------
 
 export const isWindowsHost = (os: string | undefined) => /^win/i.test(os ?? '')
 export const isMacHost = (os: string | undefined) => /^(mac|darwin)/i.test(os ?? '')
 
-// ---------- 主机平台 ----------
-
-/**
- * 一台主机的平台信息：os 是 Agent 握手时自报的系统名（Linux 是发行版名，macOS 是「macOS 14.5」，Windows 是 windows）；
- * shell / home / sep 是会话守护进程上报的执行环境（旧版守护进程没有这三项，对应字段为空）。都是主机自报的，只当提示用。
- */
+/** 一台主机的平台信息：os 是 Agent 握手时自报的系统名（Linux 是发行版名，macOS 是「macOS 14.5」，Windows 是 windows）；主机自报的，只当提示用。 */
 export interface HostPlatform {
   os?: string
-  /** 默认 shell 的名称：bash / zsh / sh / pwsh / powershell / cmd …（Windows 上依次选 pwsh、powershell、cmd）。 */
-  shell?: string
-  /** 账户家目录；Windows 上用它展开 ~。 */
-  home?: string
-  /** 路径分隔符：/ 或 \。 */
-  sep?: string
 }
 
 /** 平台参数：兼容只传系统名的老写法（字符串就是 os）。 */
-export type PlatformArg = string | HostPlatform | undefined
+type PlatformArg = string | HostPlatform | undefined
 
 export function platformOf(p: PlatformArg): HostPlatform {
   return typeof p === 'string' ? { os: p } : (p ?? {})
 }
 
-export function hostPlatformOf(host: Pick<HostView, 'os' | 'holder'> | undefined): HostPlatform {
-  const ex = host?.holder?.exec
-  return { os: host?.os, shell: ex?.shell, home: ex?.home, sep: ex?.sep }
-}
-
-/**
- * 会话 shell 的「语法族」，决定启动那一行怎么拼：
- * - posix：bash / zsh / sh 等——Linux、macOS，以及没有平台信息的主机（一直以来的写法）；
- * - powershell：Windows，守护进程上报了 pwsh / powershell（Agent 在 Windows 上优先选它们）；
- * - cmd：Windows，上报的是 cmd（机器上既没有 pwsh 也没有 powershell 时才会这样）；
- * - windows：Windows，但没上报 shell（旧版守护进程）——不知道该用哪种语法，什么都不拼。
- */
-export type ShellKind = 'posix' | 'powershell' | 'cmd' | 'windows'
-
-export function shellKindOf(arg: PlatformArg): ShellKind {
-  const p = platformOf(arg)
-  if (!isWindowsHost(p.os)) return 'posix'
-  const sh = (p.shell ?? '').trim().toLowerCase().replace(/\.exe$/, '')
-  if (sh === 'pwsh' || sh === 'powershell') return 'powershell'
-  if (sh === 'cmd') return 'cmd'
-  return 'windows'
-}
-
-/** 「命令退出即结束会话」靠 POSIX shell 的 exec 实现；PowerShell / cmd 里没有 exec，输进去只会报错、命令根本不运行。 */
-export const supportsExitEndsSession = (arg: PlatformArg) => shellKindOf(arg) === 'posix'
-
-/**
- * PowerShell 里的单引号字面量。除了 ASCII 的 '，排版用的弯引号（‘ ’ ‚ ‛）也会被 PowerShell 当成单引号——
- * 目录名里有 John’s 这样的字符时，只翻倍 ' 会让字符串提前结束、命令行停在续行提示符 >> 上；四种都翻倍才对（已在 PowerShell 7 与 Windows PowerShell 5.1 上实测）。
- */
-export function psQuote(s: string): string {
-  return `'${s.replace(/['\u2018\u2019\u201a\u201b]/g, m => m + m)}'`
-}
-
-/**
- * Windows 主机上要进入的目录：盘符 / UNC 路径原样用；~ 开头的（~、~\x、~/x）用主机上报的家目录展开。
- * 其余写法（/ 开头、~用户名）在 Windows 上没有确定的含义，家目录也没上报时同样如此——返回空串，调用方就不拼「进入目录」那一句。
- */
-export function windowsDir(dir: string, p: HostPlatform): string {
-  const d = dir.trim()
-  if (/^[A-Za-z]:[\\/]/.test(d) || d.startsWith('\\\\')) return d
-  const m = /^~(?:[\\/](.*))?$/.exec(d)
-  const home = (p.home ?? '').trim()
-  if (!m || !home) return ''
-  const rest = (m[1] ?? '').replace(/\//g, '\\')
-  return rest ? `${home.replace(/[\\/]+$/, '')}\\${rest}` : home
-}
-
-/** cmd 里放进双引号也会被改写的字符：% 会按环境变量展开，" 会提前结束引号，^ ! 在个别设置下也有特殊含义。 */
-const CMD_UNSAFE_RE = /[%"^!]/
-
-/**
- * 会话就绪后要输入的那一行（不含回车）；预设没有命令时是空串（只打开终端，什么也不输入）。
- *
- * 有目录时命令前面带一句「先进入目录」：新建会话时目录也会传给主机，但主机上找不到这个目录（或者是 ~ 开头的路径）
- * 会静默回落到默认目录——对 Cursor CLI 这类会在当前目录里改文件的程序，悄悄跑到错误的位置比失败更糟。
- * 带上这一句之后，目录不对就是一句看得见的报错，命令不会运行。写法按主机的 shell 来：
- * - POSIX（Linux / macOS）：`cd -- <目录> && <命令>`；
- * - PowerShell：`Set-Location -LiteralPath '<目录>' -ErrorAction Stop; <命令>`——Windows PowerShell 5.1 没有 &&，
- *   用分号加 -ErrorAction Stop：进不去目录是终止性错误，同一行里后面的命令不会运行（PowerShell 7 与 Windows PowerShell 5.1 上实测；
- *   5.1 里写 && 是语法错误，所以不能用它）；
- * - cmd：`cd /d "<目录>" && <命令>`（目录含 % " ^ ! 时不拼，免得被 cmd 改写；其余特殊字符的目录名在 Windows 实机上实测都能进入）；
- * - Windows 但不知道 shell（旧版守护进程）：不拼，和以前一样。
- */
-export function startLine(l: Pick<TerminalLauncher, 'dir' | 'command' | 'guard'>, platform?: PlatformArg): string {
-  const p = platformOf(platform)
-  const kind = shellKindOf(p)
-  let command = (l.command ?? '').trim()
-  if (!command) return ''
-  if (l.guard?.exit_ends_session && kind === 'posix') {
-    const c = classifyLauncherExec(command)
-    if (c.ok && c.exec) command = c.exec
-  }
-  const dir = (l.dir ?? '').trim()
-  if (!dir) return command
-  switch (kind) {
-    case 'posix':
-      return `cd -- ${quoteDir(dir)} && ${command}`
-    case 'powershell': {
-      const target = windowsDir(dir, p)
-      return target ? `Set-Location -LiteralPath ${psQuote(target)} -ErrorAction Stop; ${command}` : command
-    }
-    case 'cmd': {
-      const target = windowsDir(dir, p)
-      return target && !target.startsWith('\\\\') && !CMD_UNSAFE_RE.test(target) ? `cd /d "${target}" && ${command}` : command
-    }
-    default:
-      return command
-  }
-}
-
-/**
- * 传给「新建会话」的启动目录。~ 开头的路径：POSIX 主机不展开，不传（由 startLine 里的 cd 让 shell 展开）；
- * Windows 主机没有这种展开，用它上报的家目录换成绝对路径（没上报就不传）。
- */
-export function sessionCwd(dir: string | undefined, platform?: PlatformArg): string | undefined {
-  const d = (dir ?? '').trim()
-  if (!d) return undefined
-  if (!d.startsWith('~')) return d
-  const p = platformOf(platform)
-  return shellKindOf(p) === 'posix' ? undefined : windowsDir(d, p) || undefined
+export function hostPlatformOf(host: Pick<HostView, 'os'> | undefined): HostPlatform {
+  return { os: host?.os }
 }
 
 /**
  * 目录的写法与所选主机的平台对不上时给的提醒（不拦保存：主机可能刚换了系统，也可能只是我们没认出来）；没问题返回空串。
- * 只在知道主机系统时才提醒（没选主机、或旧数据里没有系统名就不说话）。
+ * 只在知道主机系统时才提醒（没选主机、或旧数据里没有系统名就不说话）。续聊预设的目录必须是绝对路径、不展开 ~。
  */
 export function dirAdvice(dir: string, platform?: PlatformArg): string {
   const d = dir.trim()
   const p = platformOf(platform)
   if (!d || !p.os) return ''
-  const kind = shellKindOf(p)
   const winPath = /^([A-Za-z]:[\\/]|\\\\)/.test(d)
-  if (kind === 'posix') return winPath ? '这台主机不是 Windows：目录请以 / 或 ~ 开头。' : ''
+  if (!isWindowsHost(p.os)) return winPath ? '这台主机不是 Windows：目录请以 / 开头。' : ''
   if (d.startsWith('/')) return '这台主机是 Windows：目录请写盘符路径（例如 C:\\work\\项目）；以 / 开头的路径在 Windows 上不会生效。'
-  if (d.startsWith('~') && !windowsDir(d, p)) {
-    return (p.home ?? '').trim()
-      ? '这台主机是 Windows：~ 后面要直接跟路径（~\\work），不支持 ~用户名；也可以直接写盘符路径。'
-      : '这台主机是 Windows，还没有上报家目录，~ 开头的目录不会生效：请写盘符路径（例如 C:\\Users\\你\\work），或把这台主机的 Agent 升到最新版。'
-  }
-  if (kind === 'windows' && winPath) {
-    return '这台主机的会话守护进程较旧，没有上报 shell 种类：目录只在新建会话时交给主机，不存在时会悄悄回落到默认目录、不会报错。升级 Agent 后会像其他主机一样先进入目录再运行。'
-  }
   return ''
 }
 
@@ -576,26 +478,4 @@ export function dirPlaceholder(platform?: PlatformArg): string {
   if (isWindowsHost(p.os)) return 'C:\\work\\RelayMesh'
   if (isMacHost(p.os)) return '/Users/你/projects/RelayMesh'
   return '/home/user/RelayMesh'
-}
-
-// ---------- 什么时候可以输入 ----------
-
-/** 会话刚连上时 shell 还在读配置、打印提示符；这时输入的字符会被终端驱动先回显一遍，提示符出来后又重画一遍，看起来是重复的。 */
-export const READY_QUIET_MS = 350
-/** shell 迟迟没有输出（极简 shell、提示符为空）时，连上之后最多等这么久就输入。 */
-export const READY_MAX_WAIT_MS = 4000
-
-export interface ReadyClock {
-  /** 连接变为「已连接」的时刻；还没连上是 null。 */
-  liveAt: number | null
-  /** 最近一次收到输出的时刻；还没有输出是 null。 */
-  lastOutputAt: number | null
-  now: number
-}
-
-/** 连上之后，输出安静了一小会儿（提示符已经出来）就可以输入；等太久也直接输入。 */
-export function readyToType(c: ReadyClock): boolean {
-  if (c.liveAt === null) return false
-  if (c.now - c.liveAt >= READY_MAX_WAIT_MS) return true
-  return c.lastOutputAt !== null && c.now - c.lastOutputAt >= READY_QUIET_MS
 }

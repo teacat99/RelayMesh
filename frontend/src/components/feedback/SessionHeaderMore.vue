@@ -3,10 +3,14 @@
 // 把页头的宽度让给标题（400px 宽的页头原来被 5 个按钮挤到只剩 1~2 个字的标题）。PC 不用它：那里宽度够，仍然全部展开。
 // 页头上只留 终端 / 任务 / ⋯ 三个同样大小（36×36、图标 16px）的按钮；提醒被静音时，⋯ 的右上角亮一个小黄点，不用点开也看得出来。
 // 「项目」放在最上面：它是除了终端和任务以外最常去的地方；工作流归属的项目认出来后，⋯ 上带 data-project-id（与 PC 上的「项目」按钮同一个属性）。
-import { FileText, FolderGit2, MoreHorizontal } from 'lucide-vue-next'
+// 「常驻规则」（#232）：输入区工具条上的小标签在手机上排在最右边、要横向滑才看得到，所以在这里再放一个入口，点开的是同一个弹窗，右侧写着状态。
+import { computed, watch } from 'vue'
+import { FileText, FolderGit2, GitBranch, MoreHorizontal, ScrollText } from 'lucide-vue-next'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '../ui/dropdown-menu'
 import { useConversationNotify } from '../../composables/useConversationNotify'
 import ConversationNotifyItems from './ConversationNotifyItems.vue'
+import { residentChipTitle, residentReadState, residentStateLabel } from '../../lib/residentPrompt'
+import { useWorkflowPromptsStore } from '../../stores/workflowPrompts'
 
 const props = defineProps<{
   workflowId: string
@@ -16,10 +20,22 @@ const props = defineProps<{
   projectTitle?: string
   /** 这个工作流里的文档篇数，大于 0 时在「项目」条目右侧显示角标。 */
   docsCount?: number | null
+  /** 这个会话进行中的分支数，大于 0 时在「分支会话」条目右侧显示角标（#236）。 */
+  branchCount?: number
 }>()
-const emit = defineEmits<{ (e: 'open-sheet'): void; (e: 'open-project'): void }>()
+const emit = defineEmits<{ (e: 'open-sheet'): void; (e: 'open-project'): void; (e: 'open-branch'): void }>()
 
 const { muted, note } = useConversationNotify(() => props.workflowId)
+
+const prompts = useWorkflowPromptsStore()
+const residentView = computed(() => prompts.view(props.workflowId))
+watch(
+  () => props.workflowId,
+  id => {
+    if (id) void prompts.load(id)
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -28,7 +44,7 @@ const { muted, note } = useConversationNotify(() => props.workflowId)
       <button
         type="button"
         class="relative inline-flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-sm border border-border/80 bg-muted/40 shadow-xs outline-none transition-colors hover:bg-muted/80 hover:text-primary focus-visible:ring-1 focus-visible:ring-ring"
-        :title="muted ? `更多：项目、提醒策略（已静音：${note}）、会话工作表` : '更多：项目、提醒策略、会话工作表'"
+        :title="muted ? `更多：项目、分支会话、提醒策略（已静音：${note}）、常驻规则、会话工作表` : '更多：项目、分支会话、提醒策略、常驻规则、会话工作表'"
         aria-label="更多"
         :data-muted="muted ? 'true' : 'false'"
         :data-project-id="props.projectId || undefined"
@@ -48,8 +64,28 @@ const { muted, note } = useConversationNotify(() => props.workflowId)
           data-testid="session-project-badge"
         >{{ props.docsCount }}</span>
       </DropdownMenuItem>
+      <DropdownMenuItem class="text-xs" data-testid="session-branch-entry" title="分支会话：把这个会话里的一块工作拆出去，交给另一个智能体单独做" @select="emit('open-branch')">
+        <GitBranch class="!size-3.5 text-primary" />分支会话
+        <span
+          v-if="props.branchCount"
+          class="ml-auto min-w-4 rounded-xs border border-border px-1 text-center text-[10px] leading-4 tabular-nums text-muted-foreground"
+          :title="`${props.branchCount} 个进行中的分支`"
+          data-testid="session-branch-badge"
+        >{{ props.branchCount }}</span>
+      </DropdownMenuItem>
       <DropdownMenuSeparator />
       <ConversationNotifyItems :workflow-id="props.workflowId" />
+      <DropdownMenuSeparator />
+      <DropdownMenuItem
+        class="text-xs"
+        data-testid="session-resident-entry"
+        :data-state="residentReadState(residentView)"
+        :title="residentChipTitle(residentView)"
+        @select="prompts.openDialog(props.workflowId)"
+      >
+        <ScrollText class="!size-3.5 text-primary" />常驻规则
+        <span class="ml-auto pl-3 text-[10px] tabular-nums text-muted-foreground" data-testid="session-resident-state">{{ residentStateLabel(residentView) }}</span>
+      </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem class="text-xs" data-testid="session-sheet-entry" title="打开会话工作表 (Workflow Sheet Drawer)" @select="emit('open-sheet')">
         <FileText class="!size-3.5 text-primary" />打开会话工作表

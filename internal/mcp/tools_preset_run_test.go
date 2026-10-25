@@ -27,6 +27,7 @@ type fakePresetRunner struct {
 	actors  []PresetRunActor
 	runErr  error
 	listErr error
+	branch  bool // Run 的结果标明唤醒的是调用方自己的分支（#236 P4）
 }
 
 func (f *fakePresetRunner) rec(call string, a PresetRunActor) {
@@ -61,7 +62,7 @@ func (f *fakePresetRunner) Run(_ context.Context, a PresetRunActor, preset strin
 		return nil, f.runErr
 	}
 	res := map[string]any{"preset": preset, "run_id": "run-1", "state": "running", "workflow_id": "wf-b", "name": "子会话"}
-	return &PresetRunOutcome{Result: res, Preset: preset, Name: "子会话", WorkflowID: "wf-b", RunID: "run-1", State: "running"}, nil
+	return &PresetRunOutcome{Result: res, Preset: preset, Name: "子会话", WorkflowID: "wf-b", RunID: "run-1", State: "running", Branch: f.branch}, nil
 }
 
 // presetFx 是 policyFixture + 一个带「运行预设」位的凭据 + 假 Runner。wf-a 是项目管理 Agent（持有 tasks 授权）。
@@ -453,6 +454,43 @@ func TestPresetRunRunRecordsProjectAuditAndPassesErrorsThrough(t *testing.T) {
 	}
 	if got := len(fx.launcherAudits()); got != before {
 		t.Fatalf("内部错误不该记成拒绝审计: %d → %d", before, got)
+	}
+}
+
+// 唤醒自己分支的运行（#236 P4）：项目审计的说明里多一个 branch 标记，其余字段不变；普通运行的说明里没有这个字段。
+func TestPresetRunBranchRunIsMarkedInTheProjectAudit(t *testing.T) {
+	fx := newPresetFx(t)
+	fx.runner.branch = true
+	if text, isErr := fx.presetCall("wf-a", map[string]any{"action": "run", "preset": "p-kid"}); isErr {
+		t.Fatalf("应能运行: %s", text)
+	}
+	fx.runner.branch = false
+	if text, isErr := fx.presetCall("wf-a", map[string]any{"action": "run", "preset": "p-kid"}); isErr {
+		t.Fatalf("应能运行: %s", text)
+	}
+	marked, plain := 0, 0
+	for _, a := range fx.launcherAudits() {
+		if a.Result != model.AuditAllow {
+			continue
+		}
+		var detail map[string]any
+		if err := json.Unmarshal([]byte(a.Detail), &detail); err != nil {
+			t.Fatalf("审计说明不是 JSON: %v %s", err, a.Detail)
+		}
+		if detail["run_id"] != "run-1" || detail["workflow_id"] != "wf-b" || detail["preset"] != "p-kid" {
+			t.Fatalf("其余字段应不变: %s", a.Detail)
+		}
+		if v, ok := detail["branch"]; ok {
+			if v != true {
+				t.Fatalf("branch 只会是 true: %s", a.Detail)
+			}
+			marked++
+		} else {
+			plain++
+		}
+	}
+	if marked != 1 || plain != 1 {
+		t.Fatalf("两次运行里应恰好一条带 branch 标记、一条不带: marked=%d plain=%d", marked, plain)
 	}
 }
 

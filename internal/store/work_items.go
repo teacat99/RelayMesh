@@ -30,6 +30,9 @@ type WorkActor struct {
 	WorkflowID string     // 智能体自己的工作流（MCP 的 workflow_id）；用来判定「是不是自己的任务」，也记在时间线上
 	Manager    bool       // 持有该项目任务板的管理授权（由 MCP 层按授权表判定后填入）
 	Policy     WorkPolicy // 任务级权限策略；零值 = 不检查
+	// Branches 是这个操作者作为主会话与各个分支的关系（键 = 分支工作流编号；#236 P5，规则见 work_assign.go 的 branchMayAssign）。
+	// 与 Manager 一样由 MCP 层在进入 store 之前现查后填入（事务里不能回头查库）；空 = 没有分支，判定与升级前逐字一致。
+	Branches map[string]WorkBranchScope
 }
 
 func (a WorkActor) isAgent() bool { return a.Kind == model.WorkActorAgent }
@@ -102,6 +105,9 @@ type WorkItemResult struct {
 	// Violations 只在策略为 audit 时有值：这次写入照常执行了，但若启用强制会被拒绝，每条是一句原因，
 	// 调用层据此写审计（would_deny）。
 	Violations []string
+	// BoardLine 非空表示这次写入产生了一个值得告诉群里的协作事件（派活 / 改派 / 交付 / 拒绝 / 退回 / 验收，
+	// 且派发者与承接者都是工作流）；调用层收集后交给 PostBoardGroupLines 写群里的系统行（#180 B3c）。
+	BoardLine *BoardLineEvent `json:"-"`
 }
 
 // WorkItemFilter 是列表的筛选条件。
@@ -455,6 +461,7 @@ func resolveWorkState(actor WorkActor, current, requested, conclusion string) (s
 
 // CreateWorkItem 新建任务。
 func (s *Store) CreateWorkItem(ctx context.Context, in WorkItemInput, actor WorkActor) (*WorkItemResult, error) {
+	defer s.bumpWorkRev() // 让回执头的 board: 缓存作废（#180 B3a）
 	workflowID := strings.TrimSpace(in.WorkflowID)
 	if workflowID == "" {
 		return nil, NewInvalidInputError("workflow_id 不能为空")
@@ -577,7 +584,9 @@ func (s *Store) CreateWorkItem(ctx context.Context, in WorkItemInput, actor Work
 		var assignEv *workEvent
 		if assignee != "" {
 			probe := &model.WorkItem{WorkflowID: workflowID, BoardKey: boardKey}
-			if err := actor.guard(probe, workOpAssign, res); err != nil {
+			probeAfter := *probe
+			probeAfter.AssigneeWorkflowID = assignee
+			if err := actor.guard(probe, &probeAfter, workOpAssign, res); err != nil {
 				return err
 			}
 			if err := checkAssignee(ctx, tx, boardKey, assignee); err != nil {
@@ -607,6 +616,7 @@ func (s *Store) CreateWorkItem(ctx context.Context, in WorkItemInput, actor Work
 		if err := appendWorkUpdate(tx, first); err != nil {
 			return err
 		}
+		res.BoardLine = boardLineFor(nil, item, assignEv, actor, first.ID)
 		if actor.SessionID != "" {
 			linked, err := linkWorkSession(tx, item.ID, actor.SessionID, now)
 			if err != nil {
@@ -628,6 +638,7 @@ func (s *Store) CreateWorkItem(ctx context.Context, in WorkItemInput, actor Work
 
 // UpdateWorkItem 更新任务。没有任何变化时不写库，Changed 为 false。
 func (s *Store) UpdateWorkItem(ctx context.Context, id uint, patch WorkItemPatch, actor WorkActor) (*WorkItemResult, error) {
+	defer s.bumpWorkRev() // 让回执头的 board: 缓存作废（#180 B3a）
 	note := strings.TrimSpace(patch.Note)
 	if err := validateWorkText("备注", note, model.WorkNoteMax); err != nil {
 		return nil, err
@@ -831,7 +842,7 @@ func (s *Store) UpdateWorkItem(ctx context.Context, id uint, patch WorkItemPatch
 				changed = true
 			}
 		}
-		if err := actor.guardAll(&before, workNeeds(&before, &item, note, ev), res); err != nil {
+		if err := actor.guardAll(&before, &item, workNeeds(&before, &item, note, ev), res); err != nil {
 			return err
 		}
 		if !changed && note == "" {
@@ -898,6 +909,7 @@ func (s *Store) UpdateWorkItem(ctx context.Context, id uint, patch WorkItemPatch
 				if err := appendWorkUpdate(tx, u); err != nil {
 					return err
 				}
+				res.BoardLine = boardLineFor(&before, &item, ev, actor, u.ID)
 			}
 		}
 		if actor.SessionID != "" {
@@ -1506,6 +1518,7 @@ func (s *Store) sharedBoardNames(ctx context.Context, stats []WorkflowStat) (map
 
 // DeleteWorkItem 删除任务及其时间线与会话关联；它的子任务变成顶层任务。
 func (s *Store) DeleteWorkItem(ctx context.Context, id uint) (*model.WorkItem, error) {
+	defer s.bumpWorkRev() // 让回执头的 board: 缓存作废（#180 B3a）
 	var deleted model.WorkItem
 	err := s.WithTx(ctx, func(tx *gorm.DB) error {
 		if err := tx.First(&deleted, id).Error; err != nil {

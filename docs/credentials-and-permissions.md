@@ -31,7 +31,7 @@ Web 里每个权限位有自己的名字，下面的 JSON 键就是凭据上存�
 |---|---|---|---|
 | `feedback` | 沟通反馈 | `interactive_feedback`、`continue_feedback_session`、`get_session_image` | 与用户的主通道 |
 | `sessions` | 会话查询 | `list_sessions`、`get_session_history` | 查最近会话与历史 |
-| `feedback` 或 `sessions` | （任一开启） | `workflow_context`、`task_board`、`project_docs`、`async_ask`、`chat`、`usage_guide` | 治理类的共用工具：检查点与收件箱、任务板、项目文档、确认项、聊天、使用手册 |
+| `feedback` 或 `sessions` | （任一开启） | `workflow_context`、`task_board`、`project_docs`、`async_ask`、`chat`、`branch`、`usage_guide` | 治理类的共用工具：检查点与收件箱、任务板、项目文档、确认项、聊天、分支会话、使用手册 |
 | `system_info` | 系统信息 | `get_system_info` | |
 | `skills` | 规范管理 | `manage_skills` | 外置技能（用户自定义规范） |
 | `configure` | 任务指挥 | `configure_task` | 指挥官侧管理自驾任务 |

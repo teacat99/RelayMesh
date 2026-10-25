@@ -2,8 +2,14 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
+  BOARD_STALE_CHOICES,
+  BOARD_STALE_FALLBACK_MINUTES,
   MUTE_PRESETS,
   PREVIEW_MODES,
+  boardStaleChoices,
+  boardStaleLabel,
+  boardStaleMs,
+  boardStaleSelected,
   defaultPolicy,
   describePolicy,
   emptyPrefs,
@@ -162,5 +168,100 @@ describe('formatMuteUntil / describePolicy', () => {
   it('静音过期后说明消失', () => {
     const prefs = normalizePrefs({ conversations: { 'wf:hour': { policy: 'muted', muted_until: new Date(NOW - 1).toISOString() } } })
     assert.equal(describePolicy(prefs, 'wf:hour', NOW), '')
+  })
+})
+
+// 「指派久无人接」的开关与阈值（#180 B3d）：默认值与生效值以服务端给的为准，缺字段 / 坏值都退回顶替值，绝不出现 NaN 或 0 分钟。
+describe('久无人接：偏好整理', () => {
+  it('没有这些字段（旧服务端、回滚到旧版本、第一次取到之前）：提醒开、2 小时', () => {
+    for (const raw of [null, undefined, {}, { dnd: true }]) {
+      const p = normalizePrefs(raw)
+      assert.equal(p.board_stale_off, false)
+      assert.equal(p.board_stale_minutes, 0)
+      assert.equal(p.board_stale_after_minutes, BOARD_STALE_FALLBACK_MINUTES)
+      assert.equal(p.board_stale_default_minutes, BOARD_STALE_FALLBACK_MINUTES)
+    }
+    assert.equal(BOARD_STALE_FALLBACK_MINUTES, 120)
+    assert.equal(boardStaleMs(emptyPrefs()), 2 * 3600_000)
+  })
+
+  it('服务端给的值原样采纳；开关只认布尔 true', () => {
+    const p = normalizePrefs({ board_stale_off: true, board_stale_minutes: 90, board_stale_after_minutes: 90, board_stale_default_minutes: 120 })
+    assert.equal(p.board_stale_off, true)
+    assert.equal(p.board_stale_minutes, 90)
+    assert.equal(p.board_stale_after_minutes, 90)
+    assert.equal(boardStaleMs(p), 90 * 60_000)
+    assert.equal(normalizePrefs({ board_stale_off: 'true' }).board_stale_off, false)
+    assert.equal(normalizePrefs({ board_stale_off: 1 }).board_stale_off, false)
+  })
+
+  it('出厂默认以服务端为准：默认改成 180 分钟后，没改过阈值的人生效值跟着变', () => {
+    const p = normalizePrefs({ board_stale_after_minutes: 180, board_stale_default_minutes: 180 })
+    assert.equal(p.board_stale_minutes, 0)
+    assert.equal(p.board_stale_after_minutes, 180)
+    assert.equal(p.board_stale_default_minutes, 180)
+  })
+
+  it('坏值（非整数、越界、字符串、NaN）一律退回：存值 → 0，生效值 → 默认', () => {
+    for (const bad of [5, 29, 1441, 99999, -30, 90.5, '90', NaN, null, {}]) {
+      const p = normalizePrefs({ board_stale_minutes: bad, board_stale_after_minutes: bad, board_stale_default_minutes: bad })
+      assert.equal(p.board_stale_minutes, 0, `存值 ${String(bad)}`)
+      assert.equal(p.board_stale_after_minutes, BOARD_STALE_FALLBACK_MINUTES, `生效值 ${String(bad)}`)
+      assert.equal(p.board_stale_default_minutes, BOARD_STALE_FALLBACK_MINUTES, `默认值 ${String(bad)}`)
+    }
+    // 边界合法
+    assert.equal(normalizePrefs({ board_stale_minutes: 30, board_stale_after_minutes: 30 }).board_stale_after_minutes, 30)
+    assert.equal(normalizePrefs({ board_stale_minutes: 1440, board_stale_after_minutes: 1440 }).board_stale_after_minutes, 1440)
+  })
+
+  it('旧服务端只给了存值、没给生效值：生效值取存值', () => {
+    assert.equal(normalizePrefs({ board_stale_minutes: 240 }).board_stale_after_minutes, 240)
+  })
+})
+
+describe('久无人接：阈值的写法与下拉选项', () => {
+  it('boardStaleLabel：整小时写小时，其余写分钟（与服务端提醒、回执头同一种写法）', () => {
+    for (const [m, want] of [[30, '30 分钟'], [45, '45 分钟'], [60, '1 小时'], [90, '90 分钟'], [120, '2 小时'], [180, '3 小时'], [1440, '24 小时']] as const) {
+      assert.equal(boardStaleLabel(m), want)
+    }
+  })
+
+  it('预设项 + 默认那一项标「（默认）」且值为 0；选中项与选项同一种口径', () => {
+    const def = emptyPrefs()
+    const choices = boardStaleChoices(def)
+    assert.deepEqual(choices.map(c => c.label), ['30 分钟', '1 小时', '2 小时（默认）', '3 小时', '4 小时', '6 小时', '8 小时', '12 小时', '24 小时'])
+    assert.equal(choices.filter(c => c.value === 0).length, 1)
+    assert.equal(choices.find(c => c.value === 0)?.label, '2 小时（默认）')
+    assert.equal(boardStaleSelected(def), 0)
+    assert.ok(choices.some(c => c.value === boardStaleSelected(def)), '选中项必须在选项里')
+    assert.deepEqual(BOARD_STALE_CHOICES, [30, 60, 120, 180, 240, 360, 480, 720, 1440])
+  })
+
+  it('选了预设项：选中项就是它的分钟数', () => {
+    const p = normalizePrefs({ board_stale_minutes: 360, board_stale_after_minutes: 360, board_stale_default_minutes: 120 })
+    assert.equal(boardStaleSelected(p), 360)
+    assert.ok(boardStaleChoices(p).some(c => c.value === 360 && c.label === '6 小时'))
+  })
+
+  it('当前值不在预设里（直接调接口设的 90 分钟）：临时补进选项，下拉框不会显示成空白', () => {
+    const p = normalizePrefs({ board_stale_minutes: 90, board_stale_after_minutes: 90, board_stale_default_minutes: 120 })
+    const choices = boardStaleChoices(p)
+    assert.ok(choices.some(c => c.value === 90 && c.label === '90 分钟'))
+    assert.ok(choices.some(c => c.value === boardStaleSelected(p)))
+    // 补进去的位置按大小排：在 1 小时与 2 小时之间
+    const labels = choices.map(c => c.label)
+    assert.ok(labels.indexOf('1 小时') < labels.indexOf('90 分钟') && labels.indexOf('90 分钟') < labels.indexOf('2 小时（默认）'))
+  })
+
+  it('默认值本身不在预设里（以后服务端把默认改成 100 分钟）：默认项照样存在且值为 0', () => {
+    const p = normalizePrefs({ board_stale_after_minutes: 100, board_stale_default_minutes: 100 })
+    const choices = boardStaleChoices(p)
+    assert.equal(choices.find(c => c.value === 0)?.label, '100 分钟（默认）')
+    assert.equal(boardStaleSelected(p), 0)
+  })
+
+  it('用户选的值恰好等于默认值：也归到「默认」那一项（存 0，以后默认调整时跟着走）', () => {
+    const p = normalizePrefs({ board_stale_minutes: 120, board_stale_after_minutes: 120, board_stale_default_minutes: 120 })
+    assert.equal(boardStaleSelected(p), 0)
   })
 })

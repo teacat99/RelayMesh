@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,135 +18,93 @@ func TestGuardStateEmptyWhenNeverSaved(t *testing.T) {
 	}
 }
 
-func TestGuardStateRoundTripAndAccessors(t *testing.T) {
+func TestGuardStateRoundTrip(t *testing.T) {
 	st := newMemStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
 
 	out, err := st.UpdateTerminalGuardState(ctx, now, func(d *GuardStateDoc) {
 		p := d.Preset("p1")
-		p.NotifiedEpisode = "stalled:100"
-		p.NotifiedAt = now
-		p.Reminders = 1
-		p.Wakes = append(p.Wakes,
-			GuardWakeRecord{At: now.Add(-3 * time.Hour), Mode: "type", Reason: "长时间无活动", Episode: "stalled:100"},
-			GuardWakeRecord{At: now.Add(-30 * time.Minute), Mode: "relaunch", Reason: "会话意外结束"},
-		)
+		p.AutoResumes = append(p.AutoResumes, arStarted("run-1", "run-2", 3*time.Hour, now, false), arStarted("run-2", "run-3", 30*time.Minute, now, true))
 	})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if out.Presets["p1"] == nil || len(out.Presets["p1"].Wakes) != 2 {
-		t.Fatalf("写入结果应包含两条唤醒记录: %+v", out)
+	if out.Presets["p1"] == nil || len(out.Presets["p1"].AutoResumes) != 2 {
+		t.Fatalf("写入结果应包含两条登记: %+v", out)
 	}
-
 	got, err := st.GetTerminalGuardState(ctx)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	p := got.Presets["p1"]
-	if p == nil || p.NotifiedEpisode != "stalled:100" || p.Reminders != 1 || !p.NotifiedAt.Equal(now) {
+	if p == nil || len(p.AutoResumes) != 2 || p.AutoResumes[1].RunID != "run-3" || !p.AutoResumes[1].Quick {
 		t.Fatalf("重读应一致: %+v", p)
 	}
-	if n := p.WakesSince(now.Add(-24 * time.Hour)); n != 2 {
-		t.Fatalf("24 小时内应有 2 次唤醒，得到 %d", n)
-	}
-	if n := p.WakesSince(now.Add(-time.Hour)); n != 1 {
-		t.Fatalf("1 小时内应有 1 次唤醒，得到 %d", n)
-	}
-	last, ok := p.LastWake()
-	if !ok || last.Mode != "relaunch" {
-		t.Fatalf("最近一次应是重新拉起: %+v ok=%v", last, ok)
-	}
-	var nilState *GuardPresetState
-	if _, ok := nilState.LastWake(); ok || nilState.WakesSince(now) != 0 {
-		t.Fatalf("nil 状态应安全地返回零值")
-	}
 }
 
-func TestGuardStateTrailingNoProgress(t *testing.T) {
-	mk := func(progress ...string) *GuardPresetState {
-		p := &GuardPresetState{}
-		for _, pr := range progress {
-			p.Wakes = append(p.Wakes, GuardWakeRecord{Mode: "type", Progress: pr})
-		}
-		return p
-	}
-	cases := []struct {
-		name string
-		p    *GuardPresetState
-		want int
-	}{
-		{"nil", nil, 0},
-		{"没有唤醒", mk(), 0},
-		{"最近一次有动静", mk(GuardProgressNone, GuardProgressYes), 0},
-		{"最近一次还没结论", mk(GuardProgressNone, ""), 0},
-		{"最近一次没动静", mk(GuardProgressYes, GuardProgressNone), 1},
-		{"连续两次没动静", mk(GuardProgressYes, GuardProgressNone, GuardProgressNone), 2},
-		{"全部没动静", mk(GuardProgressNone, GuardProgressNone, GuardProgressNone), 3},
-	}
-	for _, tc := range cases {
-		if got := tc.p.TrailingNoProgress(); got != tc.want {
-			t.Errorf("%s: 期望 %d，得到 %d", tc.name, tc.want, got)
-		}
-	}
-}
-
-func TestGuardStateTrimsOldAndExcessWakesAndDropsEmpty(t *testing.T) {
+func TestGuardStateDropsExpiredAndEmptyEntries(t *testing.T) {
 	st := newMemStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
 
 	out, err := st.UpdateTerminalGuardState(ctx, now, func(d *GuardStateDoc) {
-		p := d.Preset("busy")
-		for i := 0; i < GuardWakeKeepMax+7; i++ {
-			p.Wakes = append(p.Wakes, GuardWakeRecord{At: now.Add(-time.Duration(GuardWakeKeepMax+7-i) * time.Minute), Mode: "type", Reason: fmt.Sprintf("r%d", i)})
-		}
-		old := d.Preset("stale")
-		old.Wakes = []GuardWakeRecord{{At: now.Add(-GuardWakeKeep - time.Hour), Mode: "type"}}
+		d.Preset("busy").AutoResumes = []AutoResumeRecord{arStarted("run-1", "run-2", time.Hour, now, false)}
+		d.Preset("stale").AutoResumes = []AutoResumeRecord{arStarted("run-8", "run-9", AutoResumeKeep+time.Hour, now, false)}
 		d.Preset("blank") // 空条目不应被保存
 		d.Presets["nil"] = nil
 	})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	busy := out.Presets["busy"]
-	if busy == nil || len(busy.Wakes) != GuardWakeKeepMax {
-		t.Fatalf("超量应只留最近 %d 条: %+v", GuardWakeKeepMax, busy)
-	}
-	if busy.Wakes[len(busy.Wakes)-1].Reason != fmt.Sprintf("r%d", GuardWakeKeepMax+6) {
-		t.Fatalf("应保留最新的，丢掉最旧的: 最后一条是 %q", busy.Wakes[len(busy.Wakes)-1].Reason)
+	if out.Presets["busy"] == nil {
+		t.Fatalf("有登记的预设应保留: %+v", out.Presets)
 	}
 	for _, id := range []string{"stale", "blank", "nil"} {
 		if _, ok := out.Presets[id]; ok {
 			t.Fatalf("预设 %q 应被清掉（过期 / 空 / nil）", id)
 		}
 	}
-
 	reread, _ := st.GetTerminalGuardState(ctx)
 	if len(reread.Presets) != 1 || reread.Presets["busy"] == nil {
 		t.Fatalf("落盘的也应只剩 busy: %+v", reread.Presets)
 	}
 }
 
-func TestGuardStateKeepsNotifiedEpisodeWithoutWakes(t *testing.T) {
+// 会话守护下线（#245 第二期）之前存下的文档里还有 notified_episode / wakes / permit 这些字段：读得出（只认自动续跑），
+// 下一次写入就丢掉它们；整份文档里只剩这些旧字段的预设按空条目清掉。回滚到旧版本也读得出新写的文档（旧字段本来就是可选的）。
+func TestGuardStateIgnoresAndDropsLegacyGuardFields(t *testing.T) {
 	st := newMemStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
-	if _, err := st.UpdateTerminalGuardState(ctx, now, func(d *GuardStateDoc) {
-		d.Preset("p").NotifiedEpisode = "crashed:s1:1"
-	}); err != nil {
+	legacy := `{"presets":{` +
+		`"p1":{"notified_episode":"stalled:100","notified_at":"2026-10-12T08:00:00Z","reminders":1,` +
+		`"wakes":[{"at":"2026-10-12T07:00:00Z","mode":"type","reason":"长时间无活动"}],` +
+		`"permit":{"permit":0,"set_by":"agent"},` +
+		`"auto_resumes":[{"from_run":"run-1","attempt":1,"planned_at":"2026-10-12T08:30:00Z","state":"started","run_id":"run-2","started_at":"2026-10-12T08:31:00Z"}]},` +
+		`"p2":{"notified_episode":"crashed:s1:1","wakes":[{"at":"2026-10-12T07:00:00Z","mode":"relaunch"}]}}}`
+	if err := st.db.Save(&model.SystemSetting{Key: TerminalGuardStateKey, Value: legacy, UpdatedAt: now}).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	doc, err := st.GetTerminalGuardState(ctx)
+	if err != nil || doc.Presets["p1"] == nil || len(doc.Presets["p1"].AutoResumes) != 1 || doc.Presets["p1"].AutoResumes[0].RunID != "run-2" {
+		t.Fatalf("旧文档里的自动续跑登记应读得出: %+v err=%v", doc, err)
+	}
+	// 任何一次写入都会把旧字段丢掉。
+	if _, err := st.UpdateTerminalGuardState(ctx, now, func(d *GuardStateDoc) {}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	// 之后别的预设的写入不能把它清掉。
-	if _, err := st.UpdateTerminalGuardState(ctx, now.Add(time.Minute), func(d *GuardStateDoc) {
-		d.Preset("q").Reminders = 1
-	}); err != nil {
-		t.Fatalf("update: %v", err)
+	var rec model.SystemSetting
+	if err := st.db.Where("key = ?", TerminalGuardStateKey).First(&rec).Error; err != nil {
+		t.Fatal(err)
 	}
-	got, _ := st.GetTerminalGuardState(ctx)
-	if got.Presets["p"] == nil || got.Presets["p"].NotifiedEpisode != "crashed:s1:1" {
-		t.Fatalf("已推送的事件标识应被保留: %+v", got.Presets["p"])
+	for _, gone := range []string{"notified_episode", "wakes", "permit", "reminders", "p2"} {
+		if strings.Contains(rec.Value, gone) {
+			t.Fatalf("写入之后不该再留着 %q: %s", gone, rec.Value)
+		}
+	}
+	if !strings.Contains(rec.Value, "run-2") {
+		t.Fatalf("自动续跑登记必须保留: %s", rec.Value)
 	}
 }
 
@@ -161,11 +120,13 @@ func TestGuardStateBrokenDocumentIsTreatedAsEmpty(t *testing.T) {
 		t.Fatalf("损坏的存档应按空处理: %+v err=%v", doc, err)
 	}
 	// 损坏之后还能正常写。
-	if _, err := st.UpdateTerminalGuardState(ctx, now, func(d *GuardStateDoc) { d.Preset("p").Reminders = 2 }); err != nil {
+	if _, err := st.UpdateTerminalGuardState(ctx, now, func(d *GuardStateDoc) {
+		d.Preset("p").AutoResumes = []AutoResumeRecord{arStarted("run-1", "run-2", time.Hour, now, false)}
+	}); err != nil {
 		t.Fatalf("损坏后写入应成功: %v", err)
 	}
 	doc, _ = st.GetTerminalGuardState(ctx)
-	if doc.Presets["p"] == nil || doc.Presets["p"].Reminders != 2 {
+	if doc.Presets["p"] == nil || len(doc.Presets["p"].AutoResumes) != 1 {
 		t.Fatalf("写入后应能读回: %+v", doc)
 	}
 }

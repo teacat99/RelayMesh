@@ -9,22 +9,17 @@ import { useAuthStore } from '../stores/auth'
 import AppSidebar, { type UnifiedItem } from '../components/AppSidebar.vue'
 import ArchiveDialog from '../components/ArchiveDialog.vue'
 import SessionHeader from '../components/feedback/SessionHeader.vue'
-import FeedbackMessageList from '../components/feedback/FeedbackMessageList.vue'
 import PreviewMessageList from '../components/feedback/preview-view/PreviewMessageList.vue'
 import FeedbackInputDock from '../components/feedback/FeedbackInputDock.vue'
-import ViewTrialLinks from '../components/feedback/ViewTrialLinks.vue'
-import GroupPage from '../components/group/GroupPage.vue'
-import { usePreviewView } from '../composables/usePreviewView'
+import MessageSearchLink from '../components/feedback/MessageSearchLink.vue'
 import { sessionJumpRequest } from '../composables/useSessionJump'
 import TaskWorkspace from '../components/feedback/TaskWorkspace.vue'
-import WorkPage from '../components/work/WorkPage.vue'
-import DocsPage from '../components/docs/DocsPage.vue'
-import ProjectsPage from '../components/projects/ProjectsPage.vue'
 import PendingTopBar from '../components/shell/PendingTopBar.vue'
 import ArtifactPreviewPane from '../components/artifact/ArtifactPreviewPane.vue'
 import { useProjectDocStore } from '../stores/projectDocs'
-import WorkItemDetail from '../components/work/WorkItemDetail.vue'
 import WorkflowTaskStrip from '../components/feedback/WorkflowTaskStrip.vue'
+import { lazyDialog, lazyPage } from '../utils/lazyComponent'
+import { chunkLoaders } from '../utils/lazyChunks'
 import { useWorkItemStore } from '../stores/workItems'
 import { useConfirmStore } from '../stores/confirms'
 import { sessionsApi } from '../api/client'
@@ -52,6 +47,14 @@ const workStore = useWorkItemStore()
 const confirmStore = useConfirmStore()
 const router = useRouter()
 const route = useRoute()
+
+// 任务清单 / 群聊 / 项目 / 文档整页与任务详情弹窗是「点开时才取」的块（#186）：入口脚本里只留会话页本身。
+// 取回之前整页显示页头骨架 + 加载中（汉堡与展开侧栏照常能点）；首屏安静后会在空闲时预取，悬停入口时也会提前取（utils/lazyChunks）。
+const WorkPage = lazyPage(chunkLoaders.work)
+const GroupPage = lazyPage(chunkLoaders.group)
+const ProjectsPage = lazyPage(chunkLoaders.projects)
+const DocsPage = lazyPage(chunkLoaders.docs)
+const WorkItemDetail = lazyDialog(chunkLoaders.workDetail)
 
 // 任务清单（/work/:workflowId）与会话共用同一个壳：左侧栏不变，右侧工作区整页换成任务清单。
 const isWorkView = computed(() => route.name === 'work')
@@ -85,11 +88,7 @@ onUnmounted(() => workStore.watchFeed(''))
 // 时间线里的确认卡与工具栏的「待答复」徽标：同样只在看会话时关注当前工作流
 watch(feedWorkflowId, id => confirmStore.watchWorkflow(id), { immediate: true })
 onUnmounted(() => confirmStore.watchWorkflow(''))
-// 预览视图（#120，#165 起是默认视图）：只换中间的会话列表，输入区仍是经典的那一个（同一个 handleSubmit）；
-// 明确选了经典的设备（本机开关 '0'）仍看经典列表。
-const previewView = usePreviewView()
-const showPreviewView = computed(() => previewView.enabled.value)
-// 手机宽度：「回到经典视图 / 试用预览视图」入口不再单占页头下面的一行，改放进输入区上方的芯片条末尾（#155）
+// 手机宽度：「搜索消息」入口不再单占页头下面的一行，改放进输入区上方的芯片条末尾（#155）
 const isPhone = useMediaQuery('(max-width: 767.98px)')
 const isArchiveOpen = ref(false)
 const isMobileSidebarOpen = ref(false)
@@ -98,8 +97,8 @@ const hasDraftImages = computed(() => {
   return (inputDockRef.value?.images?.length || 0) > 0
 })
 
-// 经典列表与预览视图的列表暴露同一组方法（scrollToSession / scrollToBottom / scrollByDelta），同一时刻只挂载其中一个。
-const messageListRef = ref<InstanceType<typeof FeedbackMessageList> | InstanceType<typeof PreviewMessageList> | null>(null)
+// 会话列表暴露 scrollToSession / scrollToBottom / scrollByDelta 三个方法，页头、输入区、会话号跳转都靠它定位。
+const messageListRef = ref<InstanceType<typeof PreviewMessageList> | null>(null)
 
 // 正文里点「会话号」（sess-xxxxxxxx）：在当前会话页里滚到那一轮。请求由 composables/useLinkRefs 经 useSessionJump 单例转交，
 // 只响应正在看的这个工作流（别的页面 / 别的工作流的请求走深链，不会落到这里）
@@ -138,10 +137,24 @@ const workflowTimeline = computed(() => {
   }
   return list.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
 })
+// 整表还没到、本地也没有缓存（#186 Q117 a）：会话列表在这段时间只画骨架，不画简略列表里的几个壳。
+// 先画壳、整表到达后版面一下长高数万像素再贴底，用户先看到一屏无关内容然后整页跳走（CLS 的主要来源）；
+// 现在整表到达时列表才第一次有内容，走「首次载入」那条路径，在同一次刷新里贴好底。
+// 取数失败 / 整表为空时冷加载计数归零，列表回到原来的回退（简略列表里的行或空状态）。
+// 同一类「画了个误导性的中间状态」还有两处，也一并盖住：
+//   · 深链（/?wf=…）还没处理完：此刻选中的只是占位工作流，马上会被目标取代——不画占位工作流的壳（否则先出别的工作流、再整页换掉）；
+//   · 简略列表第一次取数还没结果：还不知道有没有会话，不画「暂无交互对话」（生产录像里它先占了约 0.7～1 秒）；取数失败也算有结果，回到空状态。
+const timelineWaiting = computed(() => {
+  if (sessionStore.currentWorkflowSessions.length > 0) return false
+  if (isDeepLinkPending(route.name, route.query)) return true
+  const sel = sessionStore.selectedSession
+  if (!sel) return !sessionStore.sessionsListSettled
+  return sessionStore.isWorkflowColdLoading(sel.workflow_id || sel.session_id || '')
+})
 // 真实的轮次：轮次编号、微缩轴、「第 N 轮」都只认它
-const conversationRounds = computed(() => onlyRounds(workflowTimeline.value))
+const conversationRounds = computed(() => (timelineWaiting.value ? [] : onlyRounds(workflowTimeline.value)))
 // 进度通知（异步模式下 wait:false 发出的话）：穿插在轮次之间，不算轮次
-const conversationNotices = computed(() => workflowTimeline.value.filter(isNotice))
+const conversationNotices = computed(() => (timelineWaiting.value ? [] : workflowTimeline.value.filter(isNotice)))
 
 async function handleSelectItem(item: UnifiedItem) {
   // 在任务清单 / 群聊里点了侧栏的会话：先回到会话页，等右侧的会话视图挂载好再选中、滚动
@@ -232,14 +245,36 @@ const taskPreviewOpen = computed({
   },
 })
 const taskPreviewNow = ref(Date.now())
+// 弹窗是懒加载块：第一次要打开时才挂载（块此时才取）；挂上之后保持挂载，关闭动画与内部状态照旧。
+const taskPreviewMounted = ref(taskPreviewOpen.value)
 watch(taskPreviewOpen, open => {
-  if (open) taskPreviewNow.value = Date.now()
+  if (open) {
+    taskPreviewNow.value = Date.now()
+    taskPreviewMounted.value = true
+  }
 })
 watch(isWorkView, () => workStore.closeDetail())
 
 async function openSessionFromPreview(sessionId: string) {
   workStore.closeDetail()
   await openSessionFromWork(sessionId)
+}
+
+// 分支会话（#236）：页头的分支标签 / 分支面板要跳到另一个工作流（主会话或某个分支）。
+// 取它在会话列表里最新的一条会话，走与「任务里点关联会话」同一条路径（回到会话页、选中、滚到那一轮）；
+// 列表里还没有它（刚建立、列表没刷新）就如实告诉用户，不猜。
+async function openWorkflow(workflowId: string) {
+  isMobileSidebarOpen.value = false
+  let latest: FeedbackSession | null = null
+  for (const s of sessionStore.sessions) {
+    if (s.workflow_id !== workflowId) continue
+    if (!latest || Date.parse(s.created_at) > Date.parse(latest.created_at)) latest = s
+  }
+  if (!latest) {
+    toast.info('这个会话还没出现在列表里，请稍后在侧栏里打开它')
+    return
+  }
+  await openSessionFromWork(latest.session_id)
 }
 
 function handleOpenSettings() {
@@ -563,33 +598,29 @@ onUnmounted(() => {
           @open-mobile-sidebar="isMobileSidebarOpen = true"
           @expand-sidebar="toggleSidebarCollapse"
           @jump-session="messageListRef?.scrollToSession($event)"
+          @open-workflow="openWorkflow"
+          @open-session="openSessionFromWork"
         />
 
         <!-- 项目任务总览：一行，点一下进入任务清单；这个项目没有任务时不出现 -->
         <WorkflowTaskStrip />
 
-        <!-- 视图入口（搜索消息 / 回到经典视图 / 试用预览视图）：一行小字，不占地方（手机宽度改放进输入区上方的芯片条，见 FeedbackInputDock） -->
-        <div v-if="feedWorkflowId && !isPhone" class="flex justify-end gap-3 px-3 pt-1">
-          <ViewTrialLinks />
+        <!--
+          搜索消息入口：一行小字，不占地方（手机宽度改放进输入区上方的芯片条，见 FeedbackInputDock）。
+          行本身从第一帧起就占着位置（#186 C1）：以前整行等选中了会话才出现，把下面的会话列表整体往下推 21 px（生产实测 CLS 0.1～0.2）；
+          入口按钮仍然等有了工作流才出现。
+        -->
+        <div v-if="!isPhone" class="flex min-h-[21px] justify-end gap-3 px-3 pt-1">
+          <MessageSearchLink v-if="feedWorkflowId" />
         </div>
 
-        <!-- Middle Scrollable Conversation Feed：预览视图开着时换成预览列表（经典一个字不动） -->
+        <!-- Middle Scrollable Conversation Feed -->
         <PreviewMessageList
-          v-if="showPreviewView"
           ref="messageListRef"
           data-testid="preview-view"
           :conversation-rounds="conversationRounds"
           :notices="conversationNotices"
-          :has-draft-images="hasDraftImages"
-          @scroll-state-change="(scrolled) => isChatScrolledUp = scrolled"
-          @revoke-session="handleRevokeSession"
-          @revoke-queued="handleRevokeQueued"
-        />
-        <FeedbackMessageList
-          v-else
-          ref="messageListRef"
-          :conversation-rounds="conversationRounds"
-          :notices="conversationNotices"
+          :loading="timelineWaiting"
           :has-draft-images="hasDraftImages"
           @scroll-state-change="(scrolled) => isChatScrolledUp = scrolled"
           @revoke-session="handleRevokeSession"
@@ -609,6 +640,7 @@ onUnmounted(() => {
 
         <!-- 任务详情弹窗：会话里点任务行 / 正文里的 #N 就地打开（桌面是弹窗，手机是抽屉） -->
         <WorkItemDetail
+          v-if="taskPreviewMounted"
           v-model:open="taskPreviewOpen"
           :sessions="sessionStore.sessions"
           :now="taskPreviewNow"

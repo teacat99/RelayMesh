@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,11 +23,15 @@ func projTestStore(t *testing.T) (*Store, context.Context) {
 	return st, context.Background()
 }
 
+// seedSessionSeq 给 seedWorkflowDir 的会话编号加一个递增后缀：同一个工作流在同一毫秒里被造两次会话
+// （boardFixture 已经造过 wf-solo，用例里再造一次）时，只靠毫秒时间戳会撞主键，整个包的回归就间歇性红一次。
+var seedSessionSeq atomic.Uint64
+
 // seedWorkflowDir 造一条汇报会话：让工作流「落在」某个（主机，目录）。
 func seedWorkflowDir(t *testing.T, st *Store, wf, host, dir string, at time.Time) {
 	t.Helper()
 	row := model.FeedbackSession{
-		ID: "sess-" + wf + "-" + at.Format("150405.000"), WorkflowID: wf, HostName: host, ProjectDirectory: dir,
+		ID: fmt.Sprintf("sess-%s-%s-%d", wf, at.Format("150405.000"), seedSessionSeq.Add(1)), WorkflowID: wf, HostName: host, ProjectDirectory: dir,
 		Title: "t", Summary: "s", Status: "completed", CreatedAt: at, UpdatedAt: at,
 	}
 	if err := st.db.Create(&row).Error; err != nil {
@@ -662,5 +668,17 @@ func TestProjectSearchModulePageAndBlueprint(t *testing.T) {
 	}
 	if missing == 0 {
 		t.Fatal("应有缺口")
+	}
+}
+
+// 同一个工作流在同一毫秒里造两次会话不能撞主键（TestClaimStaleOffersDueAndOnce 曾因此间歇性失败：boardFixture 已造过 wf-solo）。
+func TestSeedWorkflowDirSameMillisecond(t *testing.T) {
+	st, _ := projTestStore(t)
+	at := time.Now()
+	seedWorkflowDir(t, st, "wf-x", "devhost", "/a", at)
+	seedWorkflowDir(t, st, "wf-x", "devhost", "/b", at)
+	var n int64
+	if err := st.db.Model(&model.FeedbackSession{}).Where("workflow_id = ?", "wf-x").Count(&n).Error; err != nil || n != 2 {
+		t.Fatalf("应有两条会话: n=%d err=%v", n, err)
 	}
 }

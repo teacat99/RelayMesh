@@ -109,6 +109,15 @@ describe('member status', () => {
     assert.equal(memberTone({ state: 'error' }), 'danger')
     assert.equal(memberTone({ state: 'offline' }), 'muted')
   })
+  test('服务端判出的硬卡住（stalled）写「疑似卡住」、红色；等你回答仍优先；没有这个标志时一切照旧', () => {
+    assert.equal(memberStatusText({ ...member({ state: 'working', sub: 'thinking' }), stalled: true }), '疑似卡住')
+    assert.equal(memberStatusText({ ...member({ state: 'working', sub: 'thinking' }), stalled: false }), '工作中 · 思考')
+    assert.equal(memberStatusText({ ...member({ state: 'working', waiting_you: true }), stalled: true }), '在等你回答')
+    assert.equal(memberStatusText({ ...member({ kind: 'human', state: 'working' }), stalled: true }), '')
+    assert.equal(memberTone({ state: 'working', stalled: true }), 'danger')
+    assert.equal(memberTone({ state: 'working', stalled: false }), 'active')
+    assert.equal(memberTone({ state: 'working', waiting_you: true, stalled: true }), 'attention')
+  })
 })
 
 describe('summaries', () => {

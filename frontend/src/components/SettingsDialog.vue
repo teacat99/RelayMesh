@@ -6,11 +6,16 @@ import { useSettingsUiStore } from '../stores/settingsUi'
 import { useModeStore } from '../stores/mode'
 import { modeOfPath, type AppMode } from '../lib/mode'
 import { settingsTitle } from '../lib/settingsRegistry'
-import SettingsForm from './SettingsForm.vue'
 import Dialog from './ui/dialog/Dialog.vue'
 import DialogContent from './ui/dialog/DialogContent.vue'
 import DialogTitle from './ui/dialog/DialogTitle.vue'
 import { Settings, CheckCircle2, Loader2 } from 'lucide-vue-next'
+import { lazyPart } from '../utils/lazyComponent'
+import { chunkLoaders } from '../utils/lazyChunks'
+
+// 设置内容（所有分类）是个大块（约占入口脚本的 1/5，#186）：对话框外壳与标题栏先出来，内容区懒加载；
+// 整页设置（/settings，手机用）静态引用同一个模块，两处共用同一个块。首屏安静后会在空闲时预取，悬停设置按钮时也会提前取。
+const SettingsForm = lazyPart(chunkLoaders.settings)
 
 // 设置是「当前模块的设置」：打开时按背景页面所在的模块决定内容；
 // 窗口里的模块分段切换会把背景页面切到另一个模块，同时窗口保持打开并切到那个模块的设置。
@@ -36,13 +41,26 @@ function jump(next: AppMode) {
 
 // 对话框默认把焦点给窗口里第一个能聚焦的元素（这里会是模块切换按钮），键盘用户得再按好几次 Tab 才到分类。
 // 改成落在当前分类上：上下键直接换分类；窄屏没有常驻的分类标签，就落在「当前分类」选择条上。
+// 只认分类标签（data-testid=settings-tab-*）：窗口里的内容区也可能有自己的 role=tab（例如 OAuth 的接入向导），不能被它抢走焦点。
+// 内容区是懒加载块：窗口一打开就触发本函数，但分类标签可能还没取回来，所以等它出现再落焦点（逐帧找，最多 8 秒；窗口关了、又打开了新一次都会放弃旧的）。
+const CATEGORY_FOCUS_SELECTOR =
+  '[data-testid=settings-shell] [role=tab][data-testid^=settings-tab-][aria-selected=true], [data-testid=settings-picker-toggle]'
+const CATEGORY_FOCUS_MAX_WAIT_MS = 8000
+let focusAttempt = 0
 function focusCurrentCategory(e: Event) {
   e.preventDefault()
-  void nextTick(() => {
-    document
-      .querySelector<HTMLElement>('[data-testid=settings-shell] [role=tab][aria-selected=true], [data-testid=settings-picker-toggle]')
-      ?.focus({ preventScroll: true })
-  })
+  const mine = ++focusAttempt
+  const started = performance.now()
+  const tryFocus = () => {
+    if (mine !== focusAttempt || !settingsStore.isSettingsOpen) return
+    const el = document.querySelector<HTMLElement>(CATEGORY_FOCUS_SELECTOR)
+    if (el) {
+      el.focus({ preventScroll: true })
+      return
+    }
+    if (performance.now() - started < CATEGORY_FOCUS_MAX_WAIT_MS) requestAnimationFrame(tryFocus)
+  }
+  void nextTick(tryFocus)
 }
 </script>
 

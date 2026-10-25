@@ -33,6 +33,9 @@ RelayMesh 是一个单二进制的人机协同中枢：同一个服务同时提�
 | 不阻塞地提问、计划确认、文档决策 | `async_ask` | `feedback` 或 `sessions` | `confirm-items` |
 | 异步对话里与用户对话 | `chat`（工作流开启异步对话时） | `feedback` 或 `sessions` | `async-mode` |
 | 读用户在你干活时追加的话 | `workflow_context`（`inbox` / `inbox_ack`） | `feedback` 或 `sessions` | `inbox` |
+| 把岔出去的一块工作拆成分支会话、与主会话 / 分支互发消息、读分支的汇报 | `branch`（`list` / `create` / `say` / `read` / `close`） | `feedback` 或 `sessions` | `branch-sessions` |
+| 读 / 改分支的会话参数（主会话在用户开放的范围内改分支的常驻规则、阶段、标题、唤醒词、异步开关） | `session_params`（`get` / `set`） | `feedback` 或 `sessions` | `branch-sessions` |
+| 压缩上下文后重读用户给本会话写的常驻规则 | `workflow_context`（`resident_get`，只读） | `feedback` 或 `sessions` | `session-prompts` |
 | 保存检查点、会话文档、AI 笔记 | `workflow_context`（`checkpoint_save`、`session_doc_save` 等） | `feedback` 或 `sessions` | `faq` |
 | 维护任务清单、模块规划 | `task_board`，以及 `workflow_context` 的 `task_*` | `feedback` 或 `sessions` | `shared-task-board` |
 | 存取项目文档、授权文档访问 | `project_docs` | `feedback` 或 `sessions` | `project-docs`、`projects-and-access` |
@@ -57,7 +60,7 @@ RelayMesh 是一个单二进制的人机协同中枢：同一个服务同时提�
 
 | 地址 | 干什么 | 详见手册主题 |
 |---|---|---|
-| `/` | 会话首页：侧栏按工作流聚合会话，右侧是对话、输入框、待确认条、追加指令 | `async-mode`、`inbox`、`confirm-items` |
+| `/` | 会话首页：侧栏按工作流聚合会话，右侧是对话、输入框、待确认条、追加指令、常驻规则 | `async-mode`、`inbox`、`confirm-items`、`session-prompts` |
 | `/work/<项目>` | 任务页：左侧模块规划树，右侧按规划顺序分组的任务列表与详情 | `shared-task-board` |
 | `/group`、`/group/<群>` | 群聊：群列表与单个群（手册里暂时没有专门的主题） | — |
 | `/projects`、`/projects/<项目>` | 项目列表与项目页，页签有 `kb`（知识库）、`modules`、`module`、`settings`、`migration`、`grants`、`audit` | `projects-and-access`、`project-docs`、`project-migration` |
@@ -86,6 +89,8 @@ RelayMesh 是一个单二进制的人机协同中枢：同一个服务同时提�
 | `confirm-items` | `async_ask`：不阻塞的提问、计划确认、文档决策卡、风险等级 |
 | `async-mode` | 异步对话：`wait:false` 发进度、授权档位、回复窗口 |
 | `inbox` | 追加指令收件箱：用户在你干活时补充的话如何送达、已读与确认 |
+| `branch-sessions` | 分支会话：把岔出去的一块工作做成独立会话，`branch` 工具、开放范围、回执里的 `branch:` 行、分支消息与抄送、`branch-link` 运维命令 |
+| `session-prompts` | 会话提示词：常驻规则（回执头里的 `resident:`、改过只提醒一次、压缩后怎么重读、不能放宽授权）与唤醒词（四类、四层优先级、`%变量` 清单、预览） |
 | `project-docs` | 项目文档库：保存、搜索、修订、导入导出、决策卡 |
 | `notifications` | 手机或桌面推送（ntfy）的配置与行为 |
 | `terminal-operations` | 远程终端与模型执行的运维手册（很长，用 `search` 找小节） |

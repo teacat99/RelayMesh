@@ -21,7 +21,7 @@ func (f *execFixture) saveLauncherAt(t *testing.T, id, name, host, dir string, r
 	if run != nil {
 		body["kind"], body["run"] = "headless", run
 	}
-	if res := f.env.call("PUT", "/api/v1/terminal/launchers/"+id, body, f.adm...); res.Status != 200 {
+	if res := f.env.putLauncher("/api/v1/terminal/launchers/"+id, body, f.adm...); res.Status != 200 {
 		t.Fatalf("保存预设 %s 失败: %d %s", id, res.Status, res.Raw)
 	}
 }

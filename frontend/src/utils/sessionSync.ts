@@ -64,6 +64,26 @@ export function isStaleIncoming(
 }
 
 /**
+ * 工作流的整张会话表有没有落后于一批刚取回的会话行（#243）：行里有整表没有的，或某一行比整表里的新（updated_at 更晚）。
+ * rows 由调用方按工作流筛好（一般是刚取回的侧栏会话列表里属于这个工作流的行）；整表还没有任何行时不算落后——
+ * 那是「还没取到」，之后第一次取到的就是最新的。时间解析不了时不算落后（与 isStaleIncoming 一样保守）。
+ * 反过来不成立：整表里有、行里没有的（更早的轮次）正常，列表只带最新一批行。
+ */
+export function isWorkflowTableBehind(
+  table: readonly Pick<FeedbackSession, 'session_id' | 'updated_at'>[],
+  rows: readonly Pick<FeedbackSession, 'session_id' | 'updated_at'>[]
+): boolean {
+  if (!table.length) return false
+  const byId = new Map(table.map(s => [s.session_id, s]))
+  for (const row of rows) {
+    const cached = byId.get(row.session_id)
+    if (!cached) return true
+    if (isStaleIncoming(row, cached)) return true
+  }
+  return false
+}
+
+/**
  * 服务端对空值指针字段使用 omitempty：字段缺席即表示已被清除（例如撤回清空 consumed_at，
  * 保活记录被删除后不再返回 last_keepalive_at）。直接展开合并会把旧值一直留着，所以这些字段缺席时要显式删除。
  * 仅用于「完整会话」载荷；简略列表行不走这里。

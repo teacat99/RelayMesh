@@ -7,6 +7,9 @@ import {
   MODULE_ALL,
   MODULE_LIMITS,
   MODULE_NONE,
+  OFFER_STALE_MS,
+  WORK_QUICK_KEYS,
+  WORK_QUICK_META,
   UNASSIGNED_LABEL,
   WORK_CLAIM_META,
   WORK_EVENT_META,
@@ -39,6 +42,7 @@ import {
   describeTransition,
   eventLabel,
   eventTone,
+  formatWaited,
   inBoard,
   displayModulePath,
   filterBySelection,
@@ -47,16 +51,23 @@ import {
   groupSessionTasks,
   isClosedState,
   isCompacted,
+  isWorkQuick,
   isWorkStage,
   kindLabel,
   isAssigned,
   matchesAssignee,
+  parseSeqQuery,
   matchesQuery,
+  matchesQuick,
   moduleOptions,
+  offerWaitMs,
+  offerWaitView,
+  offeredBadgeTitle,
   parseLabelInput,
   parseRefInput,
   progressView,
   quickActions,
+  quickCounts,
   relativeTime,
   runeLength,
   selectionModuleIds,
@@ -914,5 +925,163 @@ describe('共享板的协作（#175 B2：承接者 / 接取状态 / 时间线事
     assert.equal(showCreator({ workflow_id: 'wf-b' }, 'wf-a', false), false, '单工作流的板永远不标')
     assert.equal(showCreator({ workflow_id: 'wf-b' }, '', true), false, '没选工作流时不标')
     assert.equal(showCreator({ workflow_id: '' }, 'wf-a', true), false)
+  })
+})
+
+describe('待接取与协作快捷筛选（#180 B3b）', () => {
+  const NOW = Date.parse('2026-10-22T12:00:00Z')
+  const minutesAgo = (m: number) => new Date(NOW - m * 60_000).toISOString()
+  const offered = (over: Partial<WorkItem> = {}) =>
+    item({ assignee_workflow_id: 'wf-b', assigned_by_workflow_id: 'wf-a', claim_state: 'offered', assigned_at: minutesAgo(30), ...over })
+
+  test('等待时长的人话：不到 1 分钟 / 分钟 / 小时加分 / 天加小时', () => {
+    assert.equal(formatWaited(0), '不到 1 分钟')
+    assert.equal(formatWaited(59_999), '不到 1 分钟')
+    assert.equal(formatWaited(-5_000), '不到 1 分钟', '时钟偏差导致的负数按 0 处理')
+    assert.equal(formatWaited(60_000), '1 分钟')
+    assert.equal(formatWaited(47 * 60_000), '47 分钟')
+    assert.equal(formatWaited(60 * 60_000), '1 小时')
+    assert.equal(formatWaited(200 * 60_000), '3 小时 20 分')
+    assert.equal(formatWaited(47 * 3600_000 + 59 * 60_000), '47 小时 59 分', '48 小时以内仍按小时 + 分钟')
+    assert.equal(formatWaited(48 * 3600_000), '2 天')
+    assert.equal(formatWaited(51 * 3600_000 + 30 * 60_000), '2 天 3 小时')
+  })
+
+  test('只有「协作、待接取、没结束」的任务才有等待时长，其余一律 null', () => {
+    assert.equal(offerWaitMs(offered(), NOW), 30 * 60_000)
+    assert.equal(offerWaitMs(offered({ claim_state: 'accepted' }), NOW), null, '已接取不算在等')
+    assert.equal(offerWaitMs(offered({ claim_state: 'declined' }), NOW), null)
+    assert.equal(offerWaitMs(offered({ claim_state: undefined }), NOW), null)
+    assert.equal(offerWaitMs(offered({ state: 'done' }), NOW), null, '已完成的不算')
+    assert.equal(offerWaitMs(offered({ state: 'shelved' }), NOW), null, '已搁置的不算')
+    assert.equal(offerWaitMs(offered({ assigned_by_workflow_id: 'wf-b' }), NOW), null, '自己派给自己的不是协作')
+    assert.equal(offerWaitMs(offered({ assignee_workflow_id: undefined }), NOW), null)
+    assert.equal(offerWaitMs(offered({ assigned_at: undefined }), NOW), null, '没有派出时间无从算起')
+    assert.equal(offerWaitMs(offered({ assigned_at: 'not-a-date' }), NOW), null)
+    assert.equal(offerWaitMs(offered({ assigned_by_workflow_id: '' }), NOW), 30 * 60_000, '用户在网页上派的（派发者为空）也算')
+    assert.equal(offerWaitMs(offered({ assigned_at: new Date(NOW + 60_000).toISOString() }), NOW), 0, '派出时间在「现在」之后（时钟偏差）按 0')
+  })
+
+  test('「已等 X」与超时标红：恰好 2 小时算超时，差一毫秒不算', () => {
+    assert.deepEqual(offerWaitView(offered({ assigned_at: minutesAgo(47) }), NOW), { label: '已等 47 分钟', stale: false })
+    assert.deepEqual(offerWaitView(offered({ assigned_at: new Date(NOW - 20_000).toISOString() }), NOW), { label: '刚派出', stale: false }, '不到 1 分钟写「刚派出」')
+    assert.deepEqual(offerWaitView(offered({ assigned_at: minutesAgo(1) }), NOW), { label: '已等 1 分钟', stale: false })
+    assert.deepEqual(offerWaitView(offered({ assigned_at: minutesAgo(200) }), NOW), { label: '已等 3 小时 20 分', stale: true })
+    assert.equal(offerWaitView(offered({ assigned_at: new Date(NOW - OFFER_STALE_MS).toISOString() }), NOW)!.stale, true)
+    assert.equal(offerWaitView(offered({ assigned_at: new Date(NOW - OFFER_STALE_MS + 1).toISOString() }), NOW)!.stale, false)
+    assert.equal(offerWaitView(offered({ claim_state: 'accepted' }), NOW), null)
+    assert.equal(OFFER_STALE_MS, 2 * 3600_000, '与回执头 board: 行的默认阈值同为 2 小时')
+  })
+
+  test('阈值可以在设置里改（#180 B3d）：标红跟着传入的阈值走，标签不变；等于即算', () => {
+    const min = (m: number) => m * 60_000
+    // 阈值调到 30 分钟：等了 45 分钟就标红；调到 4 小时：等了 200 分钟还不标红
+    assert.deepEqual(offerWaitView(offered({ assigned_at: minutesAgo(45) }), NOW, min(30)), { label: '已等 45 分钟', stale: true })
+    assert.deepEqual(offerWaitView(offered({ assigned_at: minutesAgo(200) }), NOW, min(240)), { label: '已等 3 小时 20 分', stale: false })
+    // 边界：恰好等于阈值算超时，差一毫秒不算（与服务端「等于即算」同口径）
+    assert.equal(offerWaitView(offered({ assigned_at: new Date(NOW - min(90)).toISOString() }), NOW, min(90))!.stale, true)
+    assert.equal(offerWaitView(offered({ assigned_at: new Date(NOW - min(90) + 1).toISOString() }), NOW, min(90))!.stale, false)
+    // 不传阈值就是出厂默认 2 小时；不是待接取的协作任务仍是 null
+    assert.equal(offerWaitView(offered({ assigned_at: minutesAgo(119) }), NOW)!.stale, false)
+    assert.equal(offerWaitView(offered({ assigned_at: minutesAgo(121) }), NOW)!.stale, true)
+    assert.equal(offerWaitView(offered({ claim_state: 'accepted' }), NOW, min(30)), null)
+  })
+
+  test('侧栏徽标的悬停说明：带个数与最久已等；没有派出时间就只说个数', () => {
+    assert.equal(
+      offeredBadgeTitle({ workflow_id: 'wf-b', count: 3, oldest_at: minutesAgo(47) }, NOW),
+      '3 项指派在等这个工作流接取，最久已等 47 分钟'
+    )
+    assert.equal(
+      offeredBadgeTitle({ workflow_id: 'wf-b', count: 2, oldest_at: new Date(NOW - 10_000).toISOString() }, NOW),
+      '2 项指派在等这个工作流接取，刚派出'
+    )
+    assert.equal(offeredBadgeTitle({ workflow_id: 'wf-b', count: 1 }, NOW), '1 项指派在等这个工作流接取')
+    assert.equal(offeredBadgeTitle({ workflow_id: 'wf-b', count: 1, oldest_at: 'bad' }, NOW), '1 项指派在等这个工作流接取')
+  })
+
+  test('快捷项的取值与说明齐全，isWorkQuick 只认这三个', () => {
+    assert.deepEqual([...WORK_QUICK_KEYS], ['to_me', 'by_me', 'offered'])
+    assert.deepEqual(WORK_QUICK_KEYS.map(k => WORK_QUICK_META[k].label), ['指派给我', '我派出的', '待接取'])
+    for (const k of WORK_QUICK_KEYS) assert.ok(WORK_QUICK_META[k].hint.length > 0)
+    assert.equal(isWorkQuick('to_me'), true)
+    assert.equal(isWorkQuick(''), false)
+    assert.equal(isWorkQuick('mine'), false)
+    assert.equal(isWorkQuick(undefined), false)
+  })
+
+  test('任务页地址 ?seq=（板内序号 #N，#242）：只认正整数的十进制写法，多值取第一个，其余一律当没带', () => {
+    assert.equal(parseSeqQuery('36'), 36)
+    assert.equal(parseSeqQuery(' 7 '), 7, '两端空白忽略')
+    assert.equal(parseSeqQuery(['12', '99']), 12, '同名参数出现多次取第一个（vue-router 给数组）')
+    assert.equal(parseSeqQuery('999999999'), 999999999)
+    for (const bad of ['', ' ', 'abc', '0', '-1', '1.5', '1e3', '0x10', '007', '+3', '1 2', '1000000000', null, undefined, 12, [], [''], [null], {}]) {
+      assert.equal(parseSeqQuery(bad), null, `应判为不合法：${JSON.stringify(bad)}`)
+    }
+  })
+
+  test('指派给我 / 我派出的：以正在看的工作流为准，自己派给自己的都不算', () => {
+    const toMe = offered({ assignee_workflow_id: 'wf-a', assigned_by_workflow_id: 'wf-b' })
+    const byMe = offered({ assignee_workflow_id: 'wf-b', assigned_by_workflow_id: 'wf-a' })
+    const human = offered({ assignee_workflow_id: 'wf-a', assigned_by_workflow_id: '' })
+    const self = offered({ assignee_workflow_id: 'wf-a', assigned_by_workflow_id: 'wf-a' })
+    const plain = item()
+    assert.equal(matchesQuick(toMe, 'to_me', 'wf-a'), true)
+    assert.equal(matchesQuick(human, 'to_me', 'wf-a'), true, '用户在网页上派给我的也算')
+    assert.equal(matchesQuick(self, 'to_me', 'wf-a'), false)
+    assert.equal(matchesQuick(byMe, 'to_me', 'wf-a'), false)
+    assert.equal(matchesQuick(byMe, 'by_me', 'wf-a'), true)
+    assert.equal(matchesQuick(self, 'by_me', 'wf-a'), false)
+    assert.equal(matchesQuick(toMe, 'by_me', 'wf-a'), false)
+    assert.equal(matchesQuick(plain, 'by_me', 'wf-a'), false)
+    assert.equal(matchesQuick(toMe, 'to_me', ''), false, '没有 viewer 时「我」不存在，什么都不匹配')
+    assert.equal(matchesQuick(byMe, 'by_me', ''), false)
+  })
+
+  test('待接取：不分承接者，已结束的不算；空串与不认识的值不过滤', () => {
+    assert.equal(matchesQuick(offered(), 'offered', 'wf-a'), true)
+    assert.equal(matchesQuick(offered({ assignee_workflow_id: 'wf-z' }), 'offered', ''), true, '不依赖 viewer')
+    assert.equal(matchesQuick(offered({ claim_state: 'accepted' }), 'offered', 'wf-a'), false)
+    assert.equal(matchesQuick(offered({ state: 'done' }), 'offered', 'wf-a'), false)
+    assert.equal(matchesQuick(item(), '', 'wf-a'), true)
+    assert.equal(matchesQuick(item(), 'whatever', 'wf-a'), true)
+  })
+
+  test('filterItems 带 quick：与类型、承接者叠加；不带 viewer 的 to_me 得到空', () => {
+    const a = offered({ id: 201, kind: 'bug' })
+    const b = offered({ id: 202, kind: 'feature', assignee_workflow_id: 'wf-a', assigned_by_workflow_id: 'wf-b', claim_state: 'accepted' })
+    const c = item({ id: 203, kind: 'bug' })
+    const all = [a, b, c]
+    assert.deepEqual(filterItems(all, { quick: 'offered', viewer: 'wf-a' }).map(i => i.id), [201])
+    assert.deepEqual(filterItems(all, { quick: 'to_me', viewer: 'wf-a' }).map(i => i.id), [202])
+    assert.deepEqual(filterItems(all, { quick: 'by_me', viewer: 'wf-a' }).map(i => i.id), [201])
+    assert.deepEqual(filterItems(all, { quick: 'by_me', viewer: 'wf-a', kind: 'feature' }).map(i => i.id), [])
+    assert.deepEqual(filterItems(all, { quick: 'by_me', viewer: 'wf-a', assignee: 'wf-b' }).map(i => i.id), [201])
+    assert.deepEqual(filterItems(all, { quick: 'to_me' }).map(i => i.id), [])
+    assert.deepEqual(filterItems(all, { quick: '' }).map(i => i.id), [201, 202, 203])
+  })
+
+  test('快捷项上的数字：只数还没结束的任务', () => {
+    const items = [
+      offered({ id: 301 }),
+      offered({ id: 302, assignee_workflow_id: 'wf-c' }),
+      offered({ id: 303, assignee_workflow_id: 'wf-a', assigned_by_workflow_id: 'wf-b' }),
+      offered({ id: 304, assignee_workflow_id: 'wf-a', assigned_by_workflow_id: 'wf-b', claim_state: 'accepted', state: 'doing' }),
+      offered({ id: 305, assignee_workflow_id: 'wf-a', assigned_by_workflow_id: 'wf-b', claim_state: 'accepted', state: 'done' }),
+      offered({ id: 306, state: 'shelved' }),
+      item({ id: 307 }),
+    ]
+    assert.deepEqual(quickCounts(items, 'wf-a'), { to_me: 2, by_me: 2, offered: 3 })
+    // wf-b：301 是派给它的；303 / 304 是它派给 wf-a 的
+    assert.deepEqual(quickCounts(items, 'wf-b'), { to_me: 1, by_me: 2, offered: 3 }, '换成别的工作流，「我」跟着变，待接取不变')
+    assert.deepEqual(quickCounts(items, ''), { to_me: 0, by_me: 0, offered: 3 })
+    assert.deepEqual(quickCounts([], 'wf-a'), { to_me: 0, by_me: 0, offered: 0 })
+  })
+
+  test('快捷筛选也计入手机「筛选」角标', () => {
+    const base = { kind: '', sort: 'plan' as const, closedDays: 30, showClosedWindow: false }
+    assert.equal(countActiveWorkFilters({ ...base, quick: '' }, 30), 0)
+    assert.equal(countActiveWorkFilters({ ...base, quick: 'offered' }, 30), 1)
+    assert.equal(countActiveWorkFilters({ ...base, quick: 'to_me', assignee: 'wf-b', kind: 'bug' }, 30), 3)
   })
 })

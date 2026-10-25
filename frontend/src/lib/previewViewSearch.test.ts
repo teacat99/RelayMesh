@@ -29,16 +29,19 @@ function walk(dir: string, out: string[] = []): string[] {
 const PV = 'components/feedback/preview-view/'
 const LIST = `${PV}PreviewMessageList.vue`
 const PANEL = `${PV}PreviewSearchPanel.vue`
-const TRIAL = 'components/feedback/ViewTrialLinks.vue'
+const ENTRY = 'components/feedback/MessageSearchLink.vue'
 
-describe('预览视图阶段 E-c1：搜索只活在预览视图里', () => {
-  it('引用搜索面板 / 开关 / 纯逻辑的文件只有预览视图那几个（经典列表、聊天视图、共享叶子都不碰）', () => {
+describe('预览视图阶段 E-c1：搜索只活在预览列表与群聊页里', () => {
+  it('引用搜索面板 / 开关 / 纯逻辑的文件只有预览列表与群聊页那几个（共享叶子都不碰）', () => {
     const allowed = new Set([
       'lib/previewSearch.ts',
       'lib/previewSearch.test.ts',
       'lib/previewViewSearch.test.ts',
+      // #241：群聊页用同一个面板（只管开关与落点）；群页的源码级防线里断言了它挂的是这个面板
+      'components/group/GroupChatPane.vue',
+      'lib/previewViewGroup.test.ts',
       'composables/usePreviewSearch.ts',
-      TRIAL,
+      ENTRY,
       PANEL,
       LIST,
     ])
@@ -50,21 +53,30 @@ describe('预览视图阶段 E-c1：搜索只活在预览视图里', () => {
     assert.deepEqual(extra, [], `这些文件不该引用预览视图的搜索：${extra.join(', ')}`)
   })
 
-  it('入口按钮「搜索消息」：只在预览视图开着时渲染，点一下切换面板', () => {
-    const src = read(TRIAL)
+  it('入口按钮「搜索消息」：点一下切换面板；入口里不再有视图切换的按钮（#166 删掉经典视图）', () => {
+    const src = read(ENTRY)
     assert.match(src, /import \{ usePreviewSearch \} from '\.\.\/\.\.\/composables\/usePreviewSearch'/)
-    assert.match(src, /v-if="previewView\.enabled\.value"[\s\S]{0,200}data-testid="preview-search-toggle"/)
+    assert.match(src, /data-testid="preview-search-toggle"/)
     assert.match(src, /@click="previewSearch\.toggle\(\)"/)
     assert.match(src, /:aria-expanded="previewSearch\.open\.value"/)
+    assert.ok(!/preview-view-on|preview-view-off|usePreviewView|回到经典视图|试用预览视图/.test(src), '入口里不该再有「回到经典视图 / 试用预览视图」')
   })
 })
 
 describe('预览视图阶段 E-c1：搜索面板', () => {
   const panel = read(PANEL)
 
-  it('直接走会话接口：只搜文字类消息（SEARCH_KINDS）、取最新一批（SEARCH_LIMIT），不依赖聊天视图的 store', () => {
-    assert.match(panel, /conversationsApi\.list\(conversationIdOf\(props\.workflowId\), \{ limit: SEARCH_LIMIT, q, kinds: \[\.\.\.SEARCH_KINDS\] \}\)/)
+  it('直接走会话接口：默认只搜文字类消息（SEARCH_KINDS；宿主传空数组 = 不过滤，群聊就是这样）、取最新一批（SEARCH_LIMIT），不依赖聊天视图的 store', () => {
+    assert.match(panel, /conversationsApi\.list\(conversationIdOf\(props\.workflowId\), \{ limit: SEARCH_LIMIT, q, kinds: \[\.\.\.props\.kinds\] \}\)/)
+    assert.match(panel, /kinds\?: readonly string\[\]/)
+    assert.match(panel, /kinds: \(\) => SEARCH_KINDS/)
     assert.ok(!/stores\/chat['"]/.test(panel), '聊天视图的 store 要先打开聊天会话才能搜，预览视图不能依赖它')
+  })
+
+  it('输入框占位文字可由宿主给（群聊写「这个群」），默认仍是工作流会话的说法', () => {
+    assert.match(panel, /placeholder\?: string/)
+    assert.match(panel, /placeholder: '搜索这个工作流的全部消息（汇报 \/ 回复 \/ 追加 \/ 提问 \/ 任务进展）'/)
+    assert.match(panel, /:placeholder="props\.workflowId \? props\.placeholder : '这个会话没有工作流编号，无法搜索'"/)
   })
 
   it('输入防抖 300 毫秒；晚到的旧响应丢弃；面板关闭后在路上的响应不再落地', () => {

@@ -38,6 +38,8 @@ type APIHandler struct {
 	ntfy      *ntfy.Notifier // ntfy 推送器（见 ntfy.go）；NewServer 里接线
 	ntfyGuard ntfyGuard      // 测试推送的节流
 
+	askNotifier askNotifier // 请示转交 / 升级给用户时的「新请示」通知出口（通知闸）；NewServer 里接线，可为 nil
+
 	chat *chat.Service // 统一消息流（conversations.go）；懒创建
 }
 
@@ -453,6 +455,8 @@ func (h *APIHandler) SubmitFeedback(c *gin.Context) {
 		return
 	}
 	h.releaseConsumedDraftImages(c.Request.Context(), draftWorkflowID, consumed)
+	// 这个会话是分支且开了抄送：把用户的话抄送给主会话（#236；不是分支就什么都不做）。
+	h.ccBranchNote(c.Request.Context(), session.WorkflowID, req.ResponseText, req.UserMessages, len(images))
 
 	// 先取快照再唤醒 MCP 等待者：等待者协程会把同一个 session 对象标记为已消费，
 	// 先复制既避免数据竞争，也保证「已完成」事件先于「已消费」事件发出（后者 updated_at 更新，前端据此去重）。
@@ -560,6 +564,7 @@ func (h *APIHandler) deliverWorkflowFeedback(ctx context.Context, workflowID str
 		payload := h.sessionPayload(sess)
 		h.mcpServer.NotifySessionCompleted(sess)
 		h.broker.Broadcast("session_completed", payload)
+		h.ccBranchNote(ctx, workflowID, in.ResponseText, in.UserMessages, len(in.Images))
 		return &workflowDelivery{Session: payload}, nil
 	}
 
@@ -576,6 +581,7 @@ func (h *APIHandler) deliverWorkflowFeedback(ctx context.Context, workflowID str
 	}
 	// 事件里只带标识与状态，不带图片：收到事件的页面会自己重新拉取收件箱
 	h.broker.Broadcast("queued_feedback_updated", gin.H{"workflow_id": workflowID, "id": q.ID, "state": q.State})
+	h.ccBranchNote(ctx, workflowID, in.ResponseText, in.UserMessages, len(in.Images))
 	return &workflowDelivery{Queued: q}, nil
 }
 
@@ -1259,6 +1265,23 @@ func (h *APIHandler) UpdateSettings(c *gin.Context) {
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
+	}
+
+	// 唤醒词模板的全局覆盖（#232 D3）：保存前过同一套校验（字数上限、新开对话 / 网页启动提示词必须带 %workflow），
+	// 并把规整后的值写回去；格式不对直接拒绝，不让坏数据混进设置里。
+	if raw, ok := payload["wakeTemplates"]; ok && raw != nil {
+		b, err := json.Marshal(raw)
+		var in store.WakeTemplates
+		if _, isObj := raw.(map[string]any); err != nil || !isObj || json.Unmarshal(b, &in) != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "wakeTemplates 格式不对：应为 {resume, new, webStart} 对象"})
+			return
+		}
+		clean, err := store.ValidateWakeTemplates(in)
+		if err != nil {
+			respondDocError(c, err)
+			return
+		}
+		payload["wakeTemplates"] = clean
 	}
 
 	if err := h.store.SaveSettings(c.Request.Context(), payload); err != nil {

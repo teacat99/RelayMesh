@@ -161,8 +161,15 @@ func TestLocaleProbeIsCachedPerName(t *testing.T) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.calls["zh_CN.UTF-8"] != 1 || f.calls["C.UTF-8"] != 1 {
-		t.Errorf("同一个名字只应探测一次: %v", f.calls)
+	// 备选名字的顺序因系统而异（macOS 先试 en_US.UTF-8，Linux 先试 C.UTF-8；见 pickUTF8Locale），所以不写死「另一个」名字：
+	// 要求 LANG 里给的 zh_CN.UTF-8 探测过，并且至少还探测了一个备选，且每个名字都只探测了一次。
+	if f.calls["zh_CN.UTF-8"] != 1 || len(f.calls) < 2 {
+		t.Errorf("同一个名字只应探测一次，并且 LANG 里的名字与至少一个备选都要探测过: %v", f.calls)
+	}
+	for name, n := range f.calls {
+		if n != 1 {
+			t.Errorf("同一个名字只应探测一次：%s 探测了 %d 次（%v）", name, n, f.calls)
+		}
 	}
 }
 

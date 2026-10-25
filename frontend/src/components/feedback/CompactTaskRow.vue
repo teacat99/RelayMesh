@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 任务进展卡的事件行（预览视图，#120 · D-273 阶段 C2；经典用 AsyncTimelineEntry 里的整块卡）：
+// 任务进展卡的事件行（预览视图，#120 · D-273 阶段 C2）：
 //   [任务] #12 标题 …… 进展的第一句 · 时间 · [动词标签] ›
 // 固定 32px 单行；整行就是一个按钮，点一下进任务详情（完整进展在详情里）。
 import { CARD_CHIP_BASE, CARD_TONE_CLASS, CARD_TYPES } from '../../lib/messageCard'
@@ -12,7 +12,7 @@ import EventRowHead from './EventRowHead.vue'
 defineProps<{
   entry: Extract<TimelineEntry, { kind: 'task' }>
   timeText: string
-  /** 状态标签的颜色类（由 AsyncTimelineEntry 按任务状态算好，两种版式共用同一份）。 */
+  /** 状态标签的颜色类（由 AsyncTimelineEntry 按任务状态算好）。 */
   verbClass: string
 }>()
 

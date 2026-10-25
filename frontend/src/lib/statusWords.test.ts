@@ -15,9 +15,10 @@ function srcDir(): string {
 const read = (rel: string) => readFileSync(join(srcDir(), rel), 'utf8')
 
 describe('预览状态词汇表', () => {
-  it('六个词：待您处理 / 已处理 / 待读取 / 已读 / 已取消 / 已超时', () => {
+  it('七个词：待您处理 / 待主会话 / 已处理 / 待读取 / 已读 / 已取消 / 已超时', () => {
     assert.deepEqual({ ...STATUS_WORD }, {
       pending: '待您处理',
+      routed: '待主会话',
       done: '已处理',
       unread: '待读取',
       read: '已读',
@@ -40,24 +41,15 @@ describe('预览状态词汇表', () => {
   })
 })
 
-describe('预览卡片只从词汇表取词，经典一个字没动', () => {
+describe('预览卡片只从词汇表取词', () => {
   it('预览的卡片 / 事件行 / 右侧轨都引用 STATUS_WORD（或它的小函数）', () => {
     assert.match(read('components/feedback/preview-view/PreviewReplyCard.vue'), /STATUS_WORD\.unread[\s\S]*STATUS_WORD\.read/)
     assert.match(read('components/feedback/preview-view/PreviewInboxCard.vue'), /inboxBadgeWord\(status\)/)
     assert.match(read('components/feedback/preview-view/PreviewConfirmCard.vue'), /STATUS_WORD\.pending/)
+    assert.match(read('components/feedback/preview-view/PreviewConfirmCard.vue'), /STATUS_WORD\.routed/)
     assert.match(read('components/confirms/DecisionGroupCard.vue'), /done \? STATUS_WORD\.done : STATUS_WORD\.pending/)
     assert.match(read('components/confirms/ConfirmTimelineCard.vue'), /status === 'answered' \? STATUS_WORD\.done/)
     assert.match(read('lib/timelineRail.ts'), /pending: STATUS_WORD\.pending, done: STATUS_WORD\.done/)
     assert.match(read('lib/messageCard.ts'), /label: STATUS_WORD\.pending/)
-  })
-
-  it('经典列表与经典叶子的说法不变：待 AI 提取 / AI 已接收 / 等待确认 / 待决策', () => {
-    const classicList = read('components/feedback/FeedbackMessageList.vue')
-    assert.ok(classicList.includes('<span>待 AI 提取</span>') && classicList.includes('<span>AI 已接收</span>'))
-    assert.ok(classicList.includes("label: '等待确认'"))
-    assert.ok(!/STATUS_WORD/.test(classicList), '经典列表不引用预览的词汇表')
-    const decision = read('components/confirms/DecisionGroupCard.vue')
-    // 经典分支（v-else）里仍是「N 项待决策」
-    assert.match(decision, /<template v-else>有 <b[^>]*>\{\{ group\.pending \}\}<\/b> 项待决策/)
   })
 })

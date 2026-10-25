@@ -36,6 +36,10 @@ type AuthHandler struct {
 	// 参数里只有操作者、来源、结果和令牌的编号名称，绝不会有令牌或密码本身。
 	onCredentialReveal func(actor, ip, result, detail string)
 
+	// onLoginLocked 在登录连续失败触发 IP 锁定的那一次调用（安全告警推送用，#235）。不带任何参数：
+	// 来源 IP 与账号名都不需要出现在推送里（它们只属于本机日志与审计）。
+	onLoginLocked func()
+
 	// lastCredUnavailableLog 是上次记录「凭据不可用」日志的时间（Unix 纳秒），用来限频：数据库故障期间每个请求都会走到这里。
 	lastCredUnavailableLog atomic.Int64
 }
@@ -70,6 +74,11 @@ func (a *AuthHandler) notifyCredentialsChanged(subject, ip string) {
 // result 取 ok / fail / deny，含义与终端审计一致。
 func (a *AuthHandler) SetCredentialRevealHook(fn func(actor, ip, result, detail string)) {
 	a.onCredentialReveal = fn
+}
+
+// SetLoginLockedHook 注册「登录失败过多、来源被锁定」的回调；必须在对外提供服务之前调用。
+func (a *AuthHandler) SetLoginLockedHook(fn func()) {
+	a.onLoginLocked = fn
 }
 
 // securitySettings 读取反爆破配置，读取失败或字段缺省时回落到默认值（开启、5 次、锁 15 分钟）。
@@ -217,6 +226,9 @@ func (a *AuthHandler) Login(c *gin.Context) {
 				time.Duration(security.LockoutMinutes)*time.Minute,
 			)
 			if isLocked {
+				if a.onLoginLocked != nil {
+					a.onLoginLocked()
+				}
 				c.JSON(http.StatusTooManyRequests, gin.H{
 					"error":             fmt.Sprintf("连续尝试失败达到 %d 次上限，该 IP 已被锁定 %d 分钟", security.MaxFailedAttempts, security.LockoutMinutes),
 					"locked":            true,

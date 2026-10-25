@@ -23,7 +23,6 @@ function srcDir(): string {
 const read = (rel: string) => readFileSync(join(srcDir(), rel), 'utf8')
 
 const MARKDOWN = 'components/MarkdownRenderer.vue'
-const CLASSIC = 'components/feedback/FeedbackMessageList.vue'
 const PREVIEW = 'components/feedback/preview-view/PreviewMessageList.vue'
 
 /** 取出 <style> 里的全部 CSS（MarkdownRenderer 只有一个全局 style 块）。 */
@@ -106,20 +105,17 @@ describe('Markdown 全局样式：长串折行与手机上的表格（#167）', 
   })
 })
 
-describe('两个消息列表的滚动容器：手机上不许横向滚动（兜底）', () => {
-  for (const [name, file] of [['经典', CLASSIC], ['预览', PREVIEW]] as const) {
-    it(`${name}列表：h-full overflow-y-auto 的滚动容器带 max-md:overflow-x-hidden`, () => {
-      const src = read(file)
-      const m = src.match(/class="(h-full overflow-y-auto[^"]*)"/)
-      assert.ok(m, '找不到消息列表滚动容器')
-      assert.match(m[1], /(^|\s)max-md:overflow-x-hidden(\s|$)/)
-    })
-  }
+describe('消息列表的滚动容器：手机上不许横向滚动（兜底）', () => {
+  it('列表：h-full overflow-y-auto 的滚动容器带 max-md:overflow-x-hidden', () => {
+    const src = read(PREVIEW)
+    const m = src.match(/class="(h-full overflow-y-auto[^"]*)"/)
+    assert.ok(m, '找不到消息列表滚动容器')
+    assert.match(m[1], /(^|\s)max-md:overflow-x-hidden(\s|$)/)
+  })
 })
 
 describe('用户消息的纯文本块：很长的不可断字符串（链接等）要能折行', () => {
   const cases: Array<[string, string, number]> = [
-    ['经典列表（确认卡 + 单独回复）', CLASSIC, 2],
     ['预览：回复卡', 'components/feedback/preview-view/PreviewReplyCard.vue', 1],
     ['预览：追加指令卡', 'components/feedback/preview-view/PreviewInboxCard.vue', 1],
   ]
@@ -142,10 +138,10 @@ describe('预览视图折叠的摞头：手机上不画跨天的时间范围', (
     assert.match(tag[0], /\$slots\.trail\s*\|\|\s*phoneHideTime\s*\?\s*'max-sm:hidden'/)
   })
 
-  it('CardStack 的 compact 事件行传 phone-hide-time', () => {
+  it('CardStack 折叠的事件行传 phone-hide-time', () => {
     const src = read('components/feedback/CardStack.vue')
     const tag = src.match(/<EventRowHead\b[^>]*>/)
-    assert.ok(tag, '找不到 compact 分支的 <EventRowHead>')
+    assert.ok(tag, '找不到折叠态的 <EventRowHead>')
     assert.match(tag[0], /(^|\s)phone-hide-time(\s|$)/)
     assert.match(tag[0], /:time="range"/)
   })

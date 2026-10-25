@@ -23,6 +23,9 @@ import (
 //
 // 与「工作流范围闸」（acl_gate.go）互补：那个闸管「按工作流编号访问别人的数据」，这里管「共享板上谁能改哪条任务」。
 // 项目在 off 档、独立板、没有归入项目的工作流：策略为 off，与以前一样什么都不校验。
+//
+// 主会话把自己建的任务派给自己的分支是普通 Agent 不能指派这条规则的一个带范围例外（#236 P5）：
+// 它与各分支的关系（活动与否、开放范围里「任务」是不是派单）在这里现查，放进 WorkActor.Branches；规则本身在 store 层的 branchAssignCheck。
 
 // workPolicy 是一次 MCP 任务调用里任务级权限的依据。
 type workPolicy struct {
@@ -66,6 +69,13 @@ func (s *Server) newWorkPolicy(ctx context.Context, workflowID, sessionID string
 	grants, _ := s.store.ActiveGrantsForCaller(ctx, proj.ID, caller.IdentityID, wf)
 	p.actor.Manager = acl.CanManageTasks(caller.IdentityID, proj.ID, grants).Allow
 	p.proj, p.caller = proj, caller
+	// 主会话把自己建的任务派给自己的分支（#236 P5）：管理 Agent 本来就能指派，不必再查；
+	// 读不出来就留空——失败即关闭，回到「普通 Agent 不能指派」。没有分支的工作流这里查到的是空集合，判定与升级前一致。
+	if !p.actor.Manager {
+		if sc, err := s.store.BranchScopeOf(ctx, wf); err == nil {
+			p.actor.Branches = sc
+		}
+	}
 	return p
 }
 

@@ -31,10 +31,13 @@ import {
   type WorkItem,
   type WorkModule,
   type WorkModuleStats,
+  type WorkOffered,
+  type WorkQuickKey,
   type WorkSessionLink,
   type WorkState,
   type WorkflowStat,
 } from '../lib/workItems'
+import { registerConnectHook } from '../lib/connectHooks'
 import { whenSecondaryOpen } from '../lib/secondaryGate'
 
 const FILTER_KEY = 'relaymesh_work_filter'
@@ -109,6 +112,11 @@ export const useWorkItemStore = defineStore('workItems', () => {
   /** 全部项目下各状态的任务数，侧栏徽标用。 */
   const globalCounts = ref<WorkCounts>({})
   const workflows = ref<WorkflowStat[]>([])
+  /**
+   * 各工作流手上待接取的协作任务（全局口径，服务端 GET /work-items 的 offered）：侧栏会话卡的「N 项待接取」徽标读它（#180 B3b）。
+   * 每次拿到列表（任务页加载 / 侧栏拉计数 / SSE 触发的后台刷新）都对一次，所以指派、接取、拒绝后徽标跟着变，不需要额外的订阅。
+   */
+  const offered = ref<WorkOffered[]>([])
   /** 当前项目的规划树（树序的扁平列表）与未归类任务的汇总。 */
   const modules = ref<WorkModule[]>([])
   const unassigned = ref<WorkModuleStats | null>(null)
@@ -130,6 +138,8 @@ export const useWorkItemStore = defineStore('workItems', () => {
     sort: (saved.sort === 'recent' ? 'recent' : 'plan') as TaskSort,
     /** 承接者过滤（共享任务板）：只在本次打开页面期间有效，不记在本机——换了项目 / 工作流，旧编号就没意义了。 */
     assignee: ASSIGNEE_ALL as string,
+    /** 协作快捷筛选（指派给我 / 我派出的 / 待接取）：同样只在本次打开页面期间有效；「我」= filter.workflowId。 */
+    quick: '' as '' | WorkQuickKey,
     states: (Array.isArray(saved.states) && saved.states.filter(isWorkState).length
       ? saved.states.filter(isWorkState)
       : [...DEFAULT_VISIBLE_STATES]) as WorkState[],
@@ -201,11 +211,22 @@ export const useWorkItemStore = defineStore('workItems', () => {
   /** 左侧树选中项 + 类型 + 关键字筛选之后的任务（还没按状态筛）。 */
   const scoped = computed(() =>
     filterBySelection(
-      filterItems(items.value, { kind: filter.kind, query: filter.query, assignee: filter.assignee }),
+      filterItems(items.value, {
+        kind: filter.kind,
+        query: filter.query,
+        assignee: filter.assignee,
+        quick: filter.quick,
+        viewer: filter.workflowId,
+      }),
       filter.selection,
       modules.value
     )
   )
+  const offeredByWorkflow = computed(() => new Map(offered.value.map(o => [o.workflow_id, o] as const)))
+  /** 某个工作流手上待接取的协作任务（没有则 undefined）。 */
+  function offeredOf(workflowId: string | undefined | null): WorkOffered | undefined {
+    return workflowId ? offeredByWorkflow.value.get(workflowId) : undefined
+  }
   /** 状态筛选条上的数字：在其它筛选条件下各状态有几个。 */
   const stateCounts = computed(() => countByState(scoped.value))
   const visible = computed(() => scoped.value.filter(i => filter.states.includes(i.state)))
@@ -253,6 +274,14 @@ export const useWorkItemStore = defineStore('workItems', () => {
     }
   }
 
+  /** 采纳服务端的 offered：内容没变就不换数组，免得每次刷新都把侧栏所有会话卡的依赖唤醒一遍。 */
+  function applyOffered(next: WorkOffered[] | undefined) {
+    const list = next ?? []
+    const cur = offered.value
+    const same = list.length === cur.length && list.every((o, i) => o.workflow_id === cur[i].workflow_id && o.count === cur[i].count && o.oldest_at === cur[i].oldest_at)
+    if (!same) offered.value = list
+  }
+
   /** 刷新任务页数据。silent=true 时不触发加载态（SSE 事件触发的后台刷新不应让界面闪动）。 */
   async function load(silent = false) {
     const seq = ++loadSeq
@@ -266,6 +295,7 @@ export const useWorkItemStore = defineStore('workItems', () => {
       items.value = res.items
       counts.value = res.counts
       workflows.value = res.workflows
+      applyOffered(res.offered)
       applyPlan({ modules: res.modules, unassigned: res.unassigned })
       boardKey.value = filter.workflowId ? res.board_key : ''
       truncated.value = res.truncated
@@ -288,6 +318,7 @@ export const useWorkItemStore = defineStore('workItems', () => {
       const res = await workItemsApi.list({ limit: 1 })
       globalCounts.value = res.counts
       workflows.value = res.workflows
+      applyOffered(res.offered)
       countsLoaded.value = true
     } catch {
       // 计数拿不到不影响主流程
@@ -338,6 +369,24 @@ export const useWorkItemStore = defineStore('workItems', () => {
     const hit = feed.workflowId === workflowId ? feed.items.find(i => i.seq === seq) : undefined
     if (!hit) return false
     await openDetail(hit.id)
+    return true
+  }
+
+  /**
+   * 按「板内序号 #N」打开任务详情（任务页地址里的 ?seq= 深链，#242）：由服务端按工作流所在的任务板解析，
+   * 不依赖页面已加载的清单——已结束 / 已暂缓 / 很早以前的任务、被筛选藏起来的任务一样能开（新标签页打开时清单还没加载）。
+   * 这张板上没有这个序号返回 false，由调用方提示；其它错误（网络等）像 openDetail 一样记进 error 并返回 true（已处理，不再提示「找不到」）。
+   */
+  async function openByBoardSeq(workflowId: string, seq: number): Promise<boolean> {
+    let item: WorkItem | null
+    try {
+      item = await workItemsApi.getBySeq(workflowId, seq)
+    } catch (err) {
+      error.value = workErrorMessage(err)
+      return true
+    }
+    if (!item) return false
+    await openDetail(item.id)
     return true
   }
 
@@ -401,6 +450,7 @@ export const useWorkItemStore = defineStore('workItems', () => {
     filter.selection = MODULE_ALL
     filter.query = ''
     filter.assignee = ASSIGNEE_ALL
+    filter.quick = ''
     items.value = []
     modules.value = []
     unassigned.value = null
@@ -422,6 +472,11 @@ export const useWorkItemStore = defineStore('workItems', () => {
   /** 按承接者筛选：ASSIGNEE_ALL = 全部，ASSIGNEE_NONE = 未指派，其余 = 工作流编号（不记在本机）。 */
   function setAssignee(assignee: string) {
     filter.assignee = assignee || ASSIGNEE_ALL
+  }
+
+  /** 协作快捷筛选：传空串 = 取消；传已选中的那一项也等于取消（点两次回到全部）。 */
+  function setQuick(quick: '' | WorkQuickKey) {
+    filter.quick = filter.quick === quick ? '' : quick
   }
 
   function setClosedDays(days: number) {
@@ -585,11 +640,17 @@ export const useWorkItemStore = defineStore('workItems', () => {
     }, 150)
   }
 
+  // 实时流连上之后补取一遍（#243）：连上之前发生的变化没人听见。登记写在这里而不是由会话仓库直接调用，
+  // 是为了「只有用到过这个仓库的页面才补取」——设置页这类从不显示任务清单的页面不会实例化它，也就不会为它多发请求。
+  registerConnectHook('workItems', () => onServerEvent())
+
   return {
     items,
     counts,
     globalCounts,
     workflows,
+    offered,
+    offeredOf,
     modules,
     unassigned,
     boardKey,
@@ -623,12 +684,14 @@ export const useWorkItemStore = defineStore('workItems', () => {
     refreshCounts,
     openDetail,
     openBySeq,
+    openByBoardSeq,
     closeDetail,
     loadFeed,
     watchFeed,
     setWorkflow,
     setKind,
     setAssignee,
+    setQuick,
     setClosedDays,
     setSort,
     toggleState,

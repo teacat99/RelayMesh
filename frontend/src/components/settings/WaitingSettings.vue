@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useSettingsStore } from '@/stores/settings'
 import InboxSettings from './InboxSettings.vue'
+import BranchRoutingSettings from './BranchRoutingSettings.vue'
 import {
   Laptop,
   Clock,
@@ -201,5 +202,8 @@ const promptWaitOptions = [
 
     <!-- 追加指令收件箱：智能体工作期间（没在等反馈时）你追加的指令如何被它发现 -->
     <InboxSettings />
+
+    <!-- 分支会话里智能体的请示：先交给主会话定夺，多久没人答复转给您，L2 要不要禁止代答（#236 P2） -->
+    <BranchRoutingSettings />
   </div>
 </template>

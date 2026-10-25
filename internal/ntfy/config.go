@@ -57,8 +57,11 @@ type Config struct {
 	Password string `json:"password,omitempty"`
 	// ClickURL 是点击通知后打开的地址，一般填 RelayMesh 控制台的外部访问地址；留空则点击没有动作。
 	ClickURL string `json:"click_url,omitempty"`
-	// Priority 是 ntfy 优先级 1~5。
+	// Priority 是「默认优先级」1~5：等你回复、守护告警、命令出状况、测试推送、以及表里没单独设的类型都用它。
 	Priority int `json:"priority"`
+	// PriorityByKind 是「各类消息的优先级」覆盖表（见 priority.go）：消息类型 → 1~5，或 0 表示这一类不推送；
+	// 没有出现的类型走内置默认（逐项复刻升级前的行为，异常类默认不推送）。nil 与空表等价。
+	PriorityByKind map[string]int `json:"priority_by_kind,omitempty"`
 	// IncludeSummary 为真时，通知里附上智能体摘要的开头一小段；默认只发标题，避免内容经过第三方服务。
 	IncludeSummary bool `json:"include_summary"`
 	// DelaySeconds 大于 0 时延迟推送：这段时间里你在网页上处理掉了请求就不再推送（0 = 立即）。
@@ -89,6 +92,8 @@ func (c Config) Normalize() Config {
 	if c.RunMinSeconds == 0 {
 		c.RunMinSeconds = DefaultRunMinSeconds
 	}
+	// 覆盖表里不认识的类型（手写进库的错键、以后版本删掉的类型）直接丢掉；值是否合法留给 Validate 报给用户。
+	c.PriorityByKind = normalizePriorityByKind(c.PriorityByKind)
 	return c
 }
 
@@ -125,6 +130,12 @@ func (c Config) Validate(requireTopic bool) error {
 	}
 	if c.Priority < 1 || c.Priority > 5 {
 		return invalid("优先级应在 1~5 之间")
+	}
+	// 按表的顺序检查，报错的先后因此是确定的（不依赖 map 的遍历顺序）。
+	for _, k := range kindTable {
+		if v, set := c.PriorityByKind[k.ID]; set && (v < 0 || v > 5) {
+			return invalid(fmt.Sprintf("「%s」的优先级应在 1~5 之间，或者设成 0（不推送）", k.Label))
+		}
 	}
 	if c.DelaySeconds < 0 || c.DelaySeconds > MaxDelaySeconds {
 		return invalid(fmt.Sprintf("延迟推送应在 0~%d 秒之间", MaxDelaySeconds))
@@ -178,8 +189,10 @@ type PublicConfig struct {
 	DelaySeconds   int    `json:"delay_seconds"`
 	RunNotify      bool   `json:"run_notify"`
 	RunMinSeconds  int    `json:"run_min_seconds"`
-	TokenSet       bool   `json:"token_set"`
-	PasswordSet    bool   `json:"password_set"`
+	// PriorityByKind 永远是对象（没有覆盖时是 {}）：界面据此判断哪些行用了默认。
+	PriorityByKind map[string]int `json:"priority_by_kind"`
+	TokenSet       bool           `json:"token_set"`
+	PasswordSet    bool           `json:"password_set"`
 	// TokenFromEnv 为真时令牌来自环境变量 RELAYMESH_NTFY_TOKEN，界面里改不了也清不掉。
 	TokenFromEnv bool `json:"token_from_env"`
 }
@@ -199,6 +212,7 @@ func (c Config) Public(envToken string) PublicConfig {
 		DelaySeconds:   c.DelaySeconds,
 		RunNotify:      c.RunNotify,
 		RunMinSeconds:  c.RunMinSeconds,
+		PriorityByKind: copyPriorityByKind(c.PriorityByKind),
 		TokenSet:       c.Token != "" || fromEnv,
 		PasswordSet:    c.Password != "",
 		TokenFromEnv:   fromEnv,
@@ -218,6 +232,9 @@ type Update struct {
 	DelaySeconds   int    `json:"delay_seconds"`
 	RunNotify      bool   `json:"run_notify"`
 	RunMinSeconds  int    `json:"run_min_seconds"`
+	// PriorityByKind 整张替换「各类消息的优先级」覆盖表；没带这个字段（nil）表示保持原样——
+	// 页面是旧版本缓存、或者别的客户端只改了其他项时，不会把已设好的表悄悄清掉。要清空就发 {}。
+	PriorityByKind map[string]int `json:"priority_by_kind"`
 
 	Token         string `json:"token"`
 	ClearToken    bool   `json:"clear_token"`
@@ -238,8 +255,12 @@ func (u Update) ApplyTo(cur Config) Config {
 		DelaySeconds:   u.DelaySeconds,
 		RunNotify:      u.RunNotify,
 		RunMinSeconds:  u.RunMinSeconds,
+		PriorityByKind: cur.PriorityByKind,
 		Token:          cur.Token,
 		Password:       cur.Password,
+	}
+	if u.PriorityByKind != nil {
+		next.PriorityByKind = u.PriorityByKind
 	}
 	switch {
 	case u.ClearToken:

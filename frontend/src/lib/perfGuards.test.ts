@@ -14,7 +14,7 @@ const src = (rel: string) => readFileSync(resolve(process.cwd(), 'src', rel), 'u
 
 describe('消息卡片里不放持续动画的占位（#198）', () => {
   it('「排队加载」占位是静态的：一页里可能有几十个，持续动画会让每一帧都重算样式', () => {
-    for (const file of ['components/feedback/preview-view/PreviewAttachments.vue', 'components/feedback/FeedbackMessageList.vue']) {
+    for (const file of ['components/feedback/preview-view/PreviewAttachments.vue']) {
       const lines = src(file).split('\n')
       let found = 0
       lines.forEach((line, i) => {

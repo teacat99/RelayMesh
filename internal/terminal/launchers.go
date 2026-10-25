@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -28,10 +29,27 @@ type launcherRequest struct {
 	Run  *store.HeadlessRun `json:"run"`
 }
 
+// launcherInteractiveRetiredMsg 是拒绝保存交互式预设时给界面的说明。
+const launcherInteractiveRetiredMsg = "交互式「开终端」预设已停用：现在只能新建「非交互续聊」预设；已有的旧预设只能删除。要在主机上开终端，请直接用 ExecMesh 的网页终端。"
+
+// isInteractiveLauncherKind 判断预设类型是不是交互式「开终端」：不带类型（旧存档都是这种）或写成 terminal。
+func isInteractiveLauncherKind(kind string) bool {
+	k := strings.ToLower(strings.TrimSpace(kind))
+	return k == "" || k == store.LauncherKindTerminal
+}
+
 // handleLauncherSave 新增或覆盖一条预设（编号在路径里，由界面生成）。
+//
+// 交互式「开终端」预设已停用（#245 第一期）：新建与修改都拒绝，旧预设只能删除。
+// 这条规则只放在这个写入口，不放进 store 的 Validate：Validate 同时用于读取（不合法的条目读取时会被丢掉），
+// 放进去会让旧存档里的交互式预设在读取时凭空消失——那是第三期的事，要先导出备份、另发确认。
 func (h *Hub) handleLauncherSave(c *gin.Context) {
 	var req launcherRequest
 	if !bindJSON(c, &req) {
+		return
+	}
+	if isInteractiveLauncherKind(req.Kind) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": launcherInteractiveRetiredMsg, "code": "launcher_interactive_retired"})
 		return
 	}
 	// 主机码按规范形式保存（大小写、连字符不敏感）；格式不对的原样交给校验去报错。

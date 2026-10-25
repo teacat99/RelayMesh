@@ -3,8 +3,7 @@
 //   1. 列表用三张新卡渲染这三种话，旧版式（阶段 1 的合并头部、回复气泡、追加气泡、两份附件缩略图模板）都没了；
 //   2. 汇报卡 / 回复卡 / 追加卡各自的结构：类型、testid、状态槽、「⋯」菜单、脚注，信息与经典一一对应；
 //   3. 您的话靠右、窄一档、5% 绿底；智能体的话通栏靠左、卡片底色（骨架的两种变体）；
-//   4. 附件缩略图只在 PreviewAttachments 里定义一份，行为与阶段 1 一致；
-//   5. 经典列表仍保留自己的图片函数（共享的是新增的 lib/sessionImages，只有预览用）。
+//   4. 附件缩略图只在 PreviewAttachments 里定义一份，行为与阶段 1 一致。
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -294,16 +293,5 @@ describe('预览视图阶段 C1：附件缩略图（PreviewAttachments）', () =
     assert.match(src, /@click\.stop="imageLoader\.retry\(getImageUrl\(img\)\)"/)
     assert.match(src, /排队加载/)
     assert.match(src, /@load="markImageLoaded\(getImageKey\(img, imgIdx, keyPrefix\)\)"/)
-  })
-})
-
-describe('预览视图阶段 C1：经典列表保留自己的一份图片函数', () => {
-  const classic = read('components/feedback/FeedbackMessageList.vue')
-
-  it('经典里还有自己的 getImageKey / getImageStyle / getImageUrl，没有改去用 lib/sessionImages', () => {
-    for (const fn of ['getImageKey', 'getImageStyle', 'getImageUrl']) {
-      assert.ok(classic.includes(`function ${fn}(`), `经典列表应保留自己的 ${fn}`)
-    }
-    assert.ok(!classic.includes('sessionImages'))
   })
 })

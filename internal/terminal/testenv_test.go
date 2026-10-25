@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -394,6 +395,48 @@ func (e *testEnv) call(method, path string, body any, headers ...string) apiResu
 	raw, _ := io.ReadAll(resp.Body)
 	res := apiResult{Status: resp.StatusCode, Raw: string(raw)}
 	_ = json.Unmarshal(raw, &res.Body)
+	return res
+}
+
+// putLauncher 与 call("PUT", 预设路径, …) 相同，只多一条规则：交互式「开终端」预设 REST 已经拒绝保存
+// （#245 第一期，现在只可能出现在旧存档里），而守护、屏幕信号这一类测试要的起点正是「库里已经有一条交互式预设」。
+// 遇到交互式就绕过处理器、直接放进 store（不要求解锁、不写审计；校验失败时按处理器的口径返回 400 / 409）；
+// 非交互预设照常走 REST，处理器本身的行为仍然被覆盖。第二期删掉交互式代码时，连同用到它的测试一起删。
+func (e *testEnv) putLauncher(path string, body any, headers ...string) apiResult {
+	e.t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	var req launcherRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		e.t.Fatal(err)
+	}
+	if !isInteractiveLauncherKind(req.Kind) {
+		return e.call("PUT", path, body, headers...)
+	}
+	if n, err := termproto.NormalizeMachineCode(req.Host); err == nil {
+		req.Host = n
+	}
+	id := path[strings.LastIndex(path, "/")+1:]
+	l := store.TerminalLauncher{ID: id, Name: req.Name, Host: req.Host, Dir: req.Dir, Command: req.Command, Guard: req.Guard, Kind: req.Kind, Run: req.Run}
+	if _, _, err := e.store.UpsertTerminalLauncher(context.Background(), l); err != nil {
+		status, code := http.StatusInternalServerError, "internal"
+		switch {
+		case errors.Is(err, store.ErrInvalidLauncher):
+			status, code = http.StatusBadRequest, "bad_launcher"
+		case errors.Is(err, store.ErrLauncherLimit):
+			status, code = http.StatusConflict, "launcher_limit"
+		}
+		res := apiResult{Status: status, Body: map[string]any{"error": err.Error(), "code": code}}
+		b, _ := json.Marshal(res.Body)
+		res.Raw = string(b)
+		return res
+	}
+	res := apiResult{Status: http.StatusOK}
+	b, _ := json.Marshal(map[string]any{"prefs": e.hub.prefsView(context.Background())})
+	res.Raw = string(b)
+	_ = json.Unmarshal(b, &res.Body)
 	return res
 }
 

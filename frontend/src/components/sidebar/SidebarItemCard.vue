@@ -11,6 +11,9 @@ import {
   CheckCircle2,
   AlertCircle,
   FolderGit2,
+  GitBranch,
+  ChevronDown,
+  ChevronRight,
   X,
   Laptop
 } from 'lucide-vue-next'
@@ -19,9 +22,10 @@ import dayjs from 'dayjs'
 import { useSharedNow, type SessionTimerRaw } from '../../composables/useSessionTimer'
 import { stableComputed } from '../../lib/stable'
 import SidebarItemTimer from './SidebarItemTimer.vue'
+import SidebarOfferedBadge from './SidebarOfferedBadge.vue'
 import { shortHash } from '../../lib/anchor'
 import { useChatStore } from '../../stores/chat'
-import { usePreviewView } from '../../composables/usePreviewView'
+import { useWorkItemStore } from '../../stores/workItems'
 import { useSidebarSessionStatus } from '../../composables/useSidebarSessionStatus'
 import { sidebarWorkingLook } from '../../lib/sidebarStatus'
 import { AWAITING_AGENT_ROUND, workflowRoundStatus } from '../../lib/newSession'
@@ -32,13 +36,20 @@ import { TONE_CLASSES } from '../work/tone'
 import { cn } from '@/lib/utils'
 
 const chatStore = useChatStore()
-const previewView = usePreviewView()
+const workStore = useWorkItemStore()
 const sidebarStatus = useSidebarSessionStatus()
 
 const props = defineProps<{
   item: UnifiedItem
   isActive: boolean
   isPinned: boolean
+  /** 分支会话（#236）：缩进挂在主会话下面的分支条目。 */
+  nested?: boolean
+  /** 分支会话（#236）：这个会话是分支（不论有没有缩进——主会话被过滤掉时它按自己的位置显示，仍带分支标记）。 */
+  isBranch?: boolean
+  /** 分支会话（#236）：这个主会话在当前列表里的活动分支数；没有分支时不传，卡片与以前一样。 */
+  branchCount?: number
+  branchCollapsed?: boolean
 }>()
 
 // 「现在几点」自己读，不再由侧栏当 prop 灌下来（#215）：prop 每秒变一次，会让每张卡不管用没用到都整张重画。
@@ -50,6 +61,8 @@ const now = useSharedNow()
 // 不再是「最近一轮汇报」的状态词。没带工作流编号的老会话没有会话级数据可用，仍沿用下面 getStatusBadge 的本轮状态。
 // 数据还没到齐时 sessionStatus 为 null：不显示徽标，免得刷新页面时先闪一个错的状态。
 const usesSessionLevel = computed(() => props.item.type === 'feedback' && !!props.item.workflow_id)
+// 共享任务板：这个工作流手上有几项指派等它接取（#180 B3b）；没有协作、没有待接取时为 undefined，卡片与以前一样
+const offered = computed(() => (usesSessionLevel.value ? workStore.offeredOf(props.item.workflow_id) : undefined))
 // 网页新建、智能体还没接入的工作流（最近一行是占位会话，#174）：轮次状态翻成「待接入」再交给推导
 const roundStatus = computed(() => workflowRoundStatus(props.item.raw as { session_id?: string }, props.item.status))
 const awaitingAgent = computed(() => props.item.type === 'feedback' && roundStatus.value === AWAITING_AGENT_ROUND)
@@ -87,6 +100,8 @@ const emit = defineEmits<{
   (e: 'select', item: UnifiedItem): void
   (e: 'contextmenu', event: MouseEvent, item: UnifiedItem): void
   (e: 'cancel', id: string): void
+  /** 展开 / 折叠这个主会话的分支（#236）。 */
+  (e: 'toggle-branches', workflowId: string): void
 }>()
 
 function getStatusBadge(item: UnifiedItem) {
@@ -157,12 +172,17 @@ function formatItemProjectDirectory(item: UnifiedItem): string {
   <div
     data-testid="sidebar-card"
     :data-workflow-id="item.type === 'feedback' ? item.workflow_id : undefined"
+    :data-branch="nested ? 'nested' : isBranch ? 'branch' : branchCount ? 'main' : undefined"
     class="p-2.5 rounded-xs border transition-all cursor-pointer relative group"
-    :class="isActive
-      ? 'border-border/90 bg-muted/85 dark:bg-muted/65 shadow-inner ring-1 ring-primary/30 border-l-[3.5px] border-l-primary'
-      : (item.type === 'feedback' && item.status === 'pending'
-          ? 'border-border/70 bg-muted/20 hover:border-border hover:bg-muted/35'
-          : 'border-transparent hover:border-border/60 hover:bg-muted/30')"
+    :class="[
+      isActive
+        ? 'border-border/90 bg-muted/85 dark:bg-muted/65 shadow-inner ring-1 ring-primary/30 border-l-[3.5px] border-l-primary'
+        : (item.type === 'feedback' && item.status === 'pending'
+            ? 'border-border/70 bg-muted/20 hover:border-border hover:bg-muted/35'
+            : 'border-transparent hover:border-border/60 hover:bg-muted/30'),
+      // 分支缩进挂在主会话下面（只有一层）：左边让出一格，不另画连接线，免得与「当前会话」的左侧高亮条打架
+      nested ? 'ml-3' : '',
+    ]"
     @click="emit('select', item)"
     @contextmenu="emit('contextmenu', $event, item)"
   >
@@ -192,6 +212,12 @@ function formatItemProjectDirectory(item: UnifiedItem): string {
     <div class="flex items-center justify-between gap-1.5 mb-1">
       <div class="flex items-center gap-1.5 min-w-0">
         <Pin v-if="isPinned" class="w-3 h-3 text-primary shrink-0 -rotate-45 fill-primary/30" />
+        <GitBranch
+          v-else-if="isBranch"
+          class="w-3.5 h-3.5 shrink-0 text-primary"
+          aria-label="分支会话"
+          data-testid="sidebar-branch-mark"
+        />
         <Workflow v-else-if="item.type === 'feedback'" class="w-3.5 h-3.5 shrink-0" :class="isActive ? 'text-primary' : 'text-foreground'" />
         <Sparkles v-else class="w-3.5 h-3.5 text-primary shrink-0" />
         <span data-testid="sidebar-title" class="text-xs truncate font-mono" :class="isActive ? 'font-bold text-foreground' : 'font-medium text-foreground/85 group-hover:text-foreground'">
@@ -212,11 +238,25 @@ function formatItemProjectDirectory(item: UnifiedItem): string {
         >
           {{ item.rounds_count }}轮
         </span>
+        <!-- 主会话：这份列表里有几个活动分支，点一下折叠 / 展开它们（#236）；没有分支的会话不画 -->
+        <button
+          v-if="item.type === 'feedback' && branchCount && item.workflow_id"
+          type="button"
+          class="inline-flex items-center gap-0.5 rounded-2xs border border-primary/40 bg-primary/5 px-1 text-[9px] font-mono leading-4 text-primary cursor-pointer outline-none hover:bg-primary/10 focus-visible:ring-1 focus-visible:ring-ring"
+          :title="branchCollapsed ? `展开 ${branchCount} 个分支` : `折叠 ${branchCount} 个分支`"
+          :aria-expanded="!branchCollapsed"
+          data-testid="sidebar-branch-toggle"
+          @click.stop="emit('toggle-branches', item.workflow_id)"
+        >
+          <GitBranch class="w-2.5 h-2.5" />{{ branchCount }}
+          <ChevronRight v-if="branchCollapsed" class="w-2.5 h-2.5" />
+          <ChevronDown v-else class="w-2.5 h-2.5" />
+        </button>
         <!-- Agent 状态小圆点（#113）：这个工作流的 Agent 正在干活 / 在等你 / 出了问题；没收到过 hook 汇报时不显示 -->
         <AgentStateDot v-if="item.type === 'feedback' && item.workflow_id" :workflow-id="item.workflow_id" />
-        <!-- 预览视图开启时：这个会话里 Agent 发的、你还没读的消息数 -->
+        <!-- 这个会话里 Agent 发的、你还没读的消息数 -->
         <span
-          v-if="previewView.enabled.value && item.type === 'feedback' && chatStore.unreadOf(item.workflow_id) > 0"
+          v-if="item.type === 'feedback' && chatStore.unreadOf(item.workflow_id) > 0"
           class="min-w-4 rounded-full bg-primary px-1 text-center text-[9px] font-mono leading-4 text-primary-foreground"
           data-testid="sidebar-unread"
           :title="`${chatStore.unreadOf(item.workflow_id)} 条未读消息`"
@@ -285,6 +325,7 @@ function formatItemProjectDirectory(item: UnifiedItem): string {
         <span class="truncate">{{ formatItemProjectDirectory(item) ? formatItemProjectDirectory(item).split('/').pop() : '工作区' }}</span>
       </span>
       <span class="flex items-center gap-1.5 shrink-0">
+        <SidebarOfferedBadge v-if="offered" :offered="offered" />
         <span
           v-if="itemAnchor(item)"
           class="px-1 rounded-2xs bg-muted/60 text-foreground/70"

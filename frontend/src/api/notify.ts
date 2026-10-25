@@ -1,4 +1,4 @@
-// 通知偏好的 REST 封装（对应 internal/api/notify_prefs.go）：免打扰、ntfy 预览模式、各会话的提醒策略。
+// 通知偏好的 REST 封装（对应 internal/api/notify_prefs.go）：免打扰、ntfy 预览模式、「指派久无人接」的提醒开关与阈值、各会话的提醒策略。
 // 偏好存在服务端，跨设备共享；这里只做请求与形状整理，决策规则见 lib/notifyPrefs.ts。
 
 import { api } from './client'
@@ -33,8 +33,16 @@ export const notifyApi = {
     return toResult(res.data, sentAt)
   },
 
-  /** 修改全局偏好；只带要改的字段（dnd / ntfy_preview）。 */
-  async updatePrefs(body: { dnd?: boolean; ntfy_preview?: PreviewMode }): Promise<PrefsResult> {
+  /**
+   * 修改全局偏好；只带要改的字段。board_stale_off 关掉「指派久无人接」的提醒；
+   * board_stale_minutes 是它的阈值（30~1440 分钟，0 = 恢复出厂默认），越界时服务端返回 400 而不是悄悄收到边界上。
+   */
+  async updatePrefs(body: {
+    dnd?: boolean
+    ntfy_preview?: PreviewMode
+    board_stale_off?: boolean
+    board_stale_minutes?: number
+  }): Promise<PrefsResult> {
     const sentAt = Date.now()
     const res = await api.put<PrefsEnvelope>('/notify/prefs', body)
     return toResult(res.data, sentAt)

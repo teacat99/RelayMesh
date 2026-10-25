@@ -52,7 +52,7 @@ watch(agentKey, () => {
 })
 /** 预设里与「对应」有关的字段的指纹：存了 / 删了 / 改了预设，视图要马上跟上。 */
 const presetSignature = computed(() =>
-  terminal.launchers.map(l => [l.id, l.name, l.host, l.dir ?? '', l.kind ?? '', l.run?.workflow_id ?? '', l.run?.conversation_id ?? ''].join('\u0001')).join('\u0002'),
+  terminal.launchers.map(l => [l.id, l.name, l.host, l.dir ?? '', l.kind ?? '', l.run?.workflow_id ?? '', l.run?.conversation_id ?? '', l.run?.source ?? '', l.run?.after_new ?? ''].join('\u0001')).join('\u0002'),
 )
 watch(presetSignature, () => {
   if (enabled.value) void launchers.refresh(props.workflowId)

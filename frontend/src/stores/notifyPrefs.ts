@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { notifyApi, notifyErrorMessage, type PrefsResult } from '../api/notify'
 import {
+  boardStaleMs as boardStaleMsOf,
   describePolicy,
   emptyPrefs,
   isMuted,
@@ -14,7 +15,7 @@ import {
 } from '../lib/notifyPrefs'
 
 /**
- * 通知偏好（服务端保存，跨设备共享）：免打扰、ntfy 预览模式、各会话的提醒策略。
+ * 通知偏好（服务端保存，跨设备共享）：免打扰、ntfy 预览模式、「指派久无人接」的提醒开关与阈值、各会话的提醒策略。
  * 「这条消息该不该打扰你」由服务端裁决；这里只负责让界面读写这份偏好，并在别处（别的标签页、别的设备）
  * 改动时通过 SSE notify_prefs_updated 同步过来。
  */
@@ -29,6 +30,11 @@ export const useNotifyPrefsStore = defineStore('notifyPrefs', () => {
 
   const dnd = computed(() => prefs.value.dnd)
   const ntfyPreview = computed(() => prefs.value.ntfy_preview)
+  const boardStaleOff = computed(() => prefs.value.board_stale_off)
+  /** 生效的「久无人接」阈值（毫秒）：任务行的「已等」标红读它；由服务端算好，与回执头和提醒同一个数。 */
+  const boardStaleMs = computed(() => boardStaleMsOf(prefs.value))
+  /** 同一个阈值，以分钟计（任务行标红时的悬停说明用它写「超过 N 小时」）。 */
+  const boardStaleAfterMinutes = computed(() => prefs.value.board_stale_after_minutes)
 
   function serverNow(): number {
     return Date.now() + skewMs
@@ -85,6 +91,29 @@ export const useNotifyPrefsStore = defineStore('notifyPrefs', () => {
       () => (prefs.value = { ...prefs.value, ntfy_preview: mode }),
       () => notifyApi.updatePrefs({ ntfy_preview: mode }),
       '设置推送预览失败',
+    )
+  }
+
+  /** 打开 / 关掉「指派久无人接」的提醒；只管提醒，不影响阈值与任务行上的标红。 */
+  function setBoardStaleOff(off: boolean) {
+    return mutate(
+      () => (prefs.value = { ...prefs.value, board_stale_off: off }),
+      () => notifyApi.updatePrefs({ board_stale_off: off }),
+      '设置久无人接提醒失败',
+    )
+  }
+
+  /** 设置「久无人接」的阈值（分钟，30~1440）；0 = 恢复出厂默认。先在界面上生效（任务行立刻按新阈值标红），失败则回滚。 */
+  function setBoardStaleMinutes(minutes: number) {
+    return mutate(
+      () =>
+        (prefs.value = {
+          ...prefs.value,
+          board_stale_minutes: minutes,
+          board_stale_after_minutes: minutes === 0 ? prefs.value.board_stale_default_minutes : minutes,
+        }),
+      () => notifyApi.updatePrefs({ board_stale_minutes: minutes }),
+      '设置久无人接的时长失败',
     )
   }
 
@@ -147,9 +176,14 @@ export const useNotifyPrefsStore = defineStore('notifyPrefs', () => {
     saving,
     dnd,
     ntfyPreview,
+    boardStaleOff,
+    boardStaleMs,
+    boardStaleAfterMinutes,
     setDnd,
     toggleDnd,
     setNtfyPreview,
+    setBoardStaleOff,
+    setBoardStaleMinutes,
     setConversationPolicy,
     resetConversation,
     policy,

@@ -21,10 +21,10 @@ import (
 //
 // 预设里打开了「异常退出时自动续跑」，这个预设发起的运行如果以「可重试」的错误退出（分辨规则见 run_exit.go），
 // Hub 在退避之后用同一个预设再续聊一次。边界：
-//   - 默认关闭，只有预设里明确打开才会发生；只认预设发起的运行，会话页的运行、守护的非交互唤醒都不在内；
+//   - 默认关闭，只有预设里明确打开才会发生；只认预设发起的运行，会话页的运行都不在内；
 //   - 只重试 Cursor CLI 自己标成「可重试」的错误与崩溃类信号。你取消的、到了运行时长上限的、需要你处理的、
 //     不可重试的、认不出原因的……一律不重试（只在聊天里写明为什么没有续跑）；
-//   - 24 小时内最多自动续跑 3 次（硬上限，与守护的唤醒预算同一套做法：先占名额再提交，提交失败还回去）；
+//   - 24 小时内最多自动续跑 3 次（硬上限：先占名额再提交，提交失败还回去）；
 //     连续 2 次续跑都在 10 分钟内又失败（没有进展）就熔断，停下来通知你；
 //   - 「成功」清零（#172，追加 #304）：续跑出来的运行连续跑满 10 分钟（预设里可调，AutoResumeOKMinutes），就算这次续跑成功，
 //     24 小时内累计的续跑次数与退避从它之后重新算——否则长期无人看管的任务里，隔几小时断一次、每次续跑都成功，
@@ -33,12 +33,14 @@ import (
 //   - 到点时重新检查一切：预设还在、开关还开着、出事的那次运行仍是最近一次、对话没有被别人接手、主机在线；
 //     条件不满足就作废，不会硬跑；
 //   - 提交走预设运行的同一条路径（runLauncherWith），总闸、暂停、主机「模型访问」与执行模式、令牌限额全部照常生效，没有旁路；
-//   - 登记（排期 / 开跑 / 作废 / 放弃）写在守护状态里，只含运行编号、次数、时间与一句原因，不含任何输出内容；
+//   - 登记（排期 / 开跑 / 作废 / 放弃）写在预设的自动续跑登记里（system_settings 的 terminal_guard_state，名字是历史遗留），只含运行编号、次数、时间与一句原因，不含任何输出内容；
 //     Hub 重启不丢排期，错过时机太久的排期会作废。
 
 const (
-	// autoResumeMax 是 24 小时内最多自动续跑几次（窗口见 guardWakeWindow）。
+	// autoResumeMax 是 24 小时内最多自动续跑几次（窗口见 autoResumeWindow）。
 	autoResumeMax = 3
+	// autoResumeWindow 是自动续跑预算的滚动窗口：这段时间内已经开跑的次数才占当前的「最多几次」（原先与会话守护的唤醒预算共用一个 24 小时窗口）。
+	autoResumeWindow = 24 * time.Hour
 	// autoResumeOKDefault 是「续跑成功」的默认判定时长：自动续跑出来的运行连续跑满这么久，就算这次续跑成功（24 小时内的次数清零）；
 	// 活得比这短就算「没有进展」。预设里可以改（store.HeadlessRun.AutoResumeOKMinutes），默认值与 store.DefaultAutoResumeOKMinutes 一致。
 	autoResumeOKDefault = store.DefaultAutoResumeOKMinutes * time.Minute
@@ -92,6 +94,9 @@ type autoRunInfo struct {
 	Attempt int    // 这是 24 小时内第几次自动续跑
 	Max     int    // 24 小时内最多几次
 	Reason  string // 为什么续跑（上一次运行出事的原因，一句中文）
+	// Prefer 是上一次运行（出事的那次）实际接上的对话编号，没有就空（#191）：「新会话」每次都新开的预设重试时接着它，
+	// 而不是再新开一个对话；其它来源不用它（见 launcherPick）。
+	Prefer string
 }
 
 // launcherRunOpts 是 runLauncherWith 的可选项；零值就是「你手动点了运行」。
@@ -164,7 +169,7 @@ func (g *guardService) fireAutoResume(ev AutoResumeEvent) {
 
 // ---------- 排期 ----------
 
-// planAutoResume 在 ps（事务里的预设守护状态）上登记「这次运行出事了，要不要续跑」的决定，返回登记的那条；
+// planAutoResume 在 ps（事务里的预设自动续跑登记）上登记「这次运行出事了，要不要续跑」的决定，返回登记的那条；
 // 同一次运行已经登记过就什么都不做（created 为 false）。
 //
 // 决定顺序：先给「出事的运行如果本身是自动续跑出来的」标上有没有进展；连续没有进展就熔断；24 小时预算用完就放弃；
@@ -191,7 +196,7 @@ func planAutoResume(ps *store.GuardPresetState, rec model.TerminalRun, exit RunE
 		}
 		break
 	}
-	used := ps.AutoResumeStartedSince(now.Add(-guardWakeWindow))
+	used := ps.AutoResumeStartedSince(now.Add(-autoResumeWindow))
 	r := store.AutoResumeRecord{
 		FromRun: rec.RunID, Attempt: used + 1, Class: string(exit.Class), Code: exit.Code, Reason: exit.Text, PlannedAt: now,
 	}
@@ -249,7 +254,7 @@ func runLasted(rec model.TerminalRun, now time.Time) time.Duration {
 
 // settleAutoResume 在「开跑出了 runID 的那次续跑」连续跑满判定时长时，认定这次续跑成功：24 小时内累计的续跑次数与退避从它之后重新算，
 // 并在聊天里写一行说明（只写一次）。ran 是这次运行已经跑了多久。runID 不是自动续跑出来的、没跑满、早就认定过，都什么也不做。
-// 先读后写：绝大多数运行（手动运行、跑得再久的非续跑）根本不是续跑出来的，不该为它们每次都写守护状态。
+// 先读后写：绝大多数运行（手动运行、跑得再久的非续跑）根本不是续跑出来的，不该为它们每次都写登记。
 func (g *guardService) settleAutoResume(ctx context.Context, p store.TerminalLauncher, runID string, ran time.Duration, now time.Time) bool {
 	ok := g.autoResumeOK(p)
 	if runID == "" || ran < ok {
@@ -282,7 +287,7 @@ func (g *guardService) settleAutoResume(ctx context.Context, p store.TerminalLau
 // 写运行编号（autoResumeOne）——运行真的很快就结束、或这几步被负载拖慢时，结束的处理（autoResumeOnEnded）会先到，按编号找不到登记：
 // 跑满了判定时长的续跑认定不了成功，没有进展的续跑记不上「没有进展」，排期还把它当成占了名额。运行说明末尾带「自动续跑 n/m」，
 // 据此把那条已开跑、还没有编号的登记认领过来；提交方随后写入的是同一个编号，所以与先后顺序无关。
-// 不是续跑出来的运行（绝大多数）与编号早已写上的（常见情形）在这里就返回，不写守护状态。
+// 不是续跑出来的运行（绝大多数）与编号早已写上的（常见情形）在这里就返回，不写登记。
 func (g *guardService) claimAutoResumeRun(ctx context.Context, presetID string, rec model.TerminalRun, now time.Time) {
 	attempt, _ := parseAutoResumeSuffix(rec.Description)
 	if attempt <= 0 || rec.RunID == "" {
@@ -428,7 +433,7 @@ func (g *guardService) setAutoResume(ctx context.Context, presetID, fromRun stri
 
 // ---------- 到点开跑 ----------
 
-// autoResumeTick 检查所有待开跑的自动续跑：到点的重新核对条件，通过就提交。守护的周期循环每一轮调用一次。
+// autoResumeTick 检查所有待开跑的自动续跑：到点的重新核对条件，通过就提交。运行服务的周期循环每一轮调用一次。
 func (g *guardService) autoResumeTick(ctx context.Context, now time.Time) {
 	if !g.h.Enabled(ctx) {
 		return // 总闸关着：主机都连不上，更不该排着自动续跑
@@ -475,7 +480,7 @@ func (g *guardService) autoResumeTick(ctx context.Context, now time.Time) {
 func (g *guardService) autoResumeSettleTick(ctx context.Context, state store.GuardStateDoc, now time.Time) {
 	type cand struct{ presetID, runID string }
 	var cands []cand
-	since := now.Add(-guardWakeWindow)
+	since := now.Add(-autoResumeWindow)
 	for id, ps := range state.Presets {
 		for _, r := range ps.AutoResumes {
 			if r.State == store.AutoResumeStarted && !r.Settled && r.RunID != "" && r.StartedAt.After(since) {
@@ -548,8 +553,11 @@ func (g *guardService) autoResumeOne(ctx context.Context, p *store.TerminalLaunc
 		return
 	}
 
+	// 「新会话」每次都新开的预设：重试要接着出事的那次运行学到的对话，不能再新开一个（#191，见 launcherPick）。
+	prefer := convOfRun(*latest)
+
 	// 能不能运行：与手动运行同一套检查，只是这里按原因分流——主机离线就继续等，对话被占用 / 被接手就作废，别的算放弃。
-	in := g.inspectLauncher(ctx, *p, now)
+	in := g.inspectLauncherPrefer(ctx, *p, now, prefer)
 	if len(in.errs) > 0 {
 		e := in.errs[0]
 		switch e.Code {
@@ -575,7 +583,7 @@ func (g *guardService) autoResumeOne(ctx context.Context, p *store.TerminalLaunc
 	)
 	if _, err := g.h.store.UpdateTerminalGuardState(ctx, now, func(d *store.GuardStateDoc) {
 		ps := d.Preset(presetID)
-		used := ps.AutoResumeStartedSince(now.Add(-guardWakeWindow))
+		used := ps.AutoResumeStartedSince(now.Add(-autoResumeWindow))
 		for i := len(ps.AutoResumes) - 1; i >= 0; i-- {
 			x := &ps.AutoResumes[i]
 			if x.FromRun != r.FromRun {
@@ -610,7 +618,7 @@ func (g *guardService) autoResumeOne(ctx context.Context, p *store.TerminalLaunc
 		return
 	}
 
-	plan, _, err := g.runLauncherWith(ctx, p.ID, now, launcherRunOpts{Auto: &autoRunInfo{Attempt: attempt, Max: autoResumeMax, Reason: r.Reason}})
+	plan, _, err := g.runLauncherWith(ctx, p.ID, now, launcherRunOpts{Auto: &autoRunInfo{Attempt: attempt, Max: autoResumeMax, Reason: r.Reason, Prefer: prefer}})
 	if err != nil {
 		g.autoResumeRelease(ctx, *p, presetID, r, err, now)
 		return

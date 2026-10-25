@@ -11,10 +11,12 @@ import {
   blankRunDraft,
   charCount,
   collapseSpaces,
+  isWindowsAbsPath,
   isWindowsHost,
   launcherLimits,
   parseMaxRun,
   validateRunOptions,
+  windowsPathProblem,
   type DraftErrors,
   type LauncherLimits,
   type RunLimitUnit,
@@ -107,7 +109,8 @@ export type EnableErrors = DraftErrors
 
 /**
  * 校验草稿：目录（主机上的绝对路径）、模型、可执行文件、提示词与最长运行时间，规则与续聊预设表单、服务端完全一致
- * （借用预设表单的校验，工作流编号填弹窗所在的这个工作流）。主机要选一台；Windows 主机选了也给出原因（服务端同样会拒绝）。
+ * （借用预设表单的校验，工作流编号填弹窗所在的这个工作流）。主机要选一台；目录的写法跟着所选主机的系统走：
+ * Windows 主机要盘符 / UNC 路径（#178），其余主机要 / 开头；还没选主机时两种都放行。
  */
 export function validateEnableDraft(
   workflowId: string,
@@ -116,21 +119,22 @@ export function validateEnableDraft(
   hosts: readonly SessionEnableHost[] = [],
 ): EnableErrors {
   const err: EnableErrors = validateRunOptions(
-    { ...blankRunDraft(), bin: d.bin, model: d.model, posture: d.posture, workflow: workflowId, prompt: d.prompt, maxRun: d.maxRun, maxRunUnit: d.maxRunUnit, autoResume: d.autoResume, newConversation: true },
+    { ...blankRunDraft(), bin: d.bin, model: d.model, posture: d.posture, workflow: workflowId, prompt: d.prompt, maxRun: d.maxRun, maxRunUnit: d.maxRunUnit, autoResume: d.autoResume, source: 'new' },
     limits,
   )
+  const host = d.host.trim()
+  const chosen = host ? hosts.find(h => h.machine_code === host) : undefined
+  const win = !!chosen && isWindowsHost(chosen.os ?? '')
   const dir = d.dir.trim()
   if (!dir) err.dir = '请填写目录：要在这台主机的哪个目录里运行（--workspace，主机上的绝对路径）'
   else if (/[\u0000-\u001f\u007f-\u009f]/.test(dir)) err.dir = '目录里不能有换行或控制字符'
-  else if (!dir.startsWith('/')) err.dir = '目录必须是主机上的绝对路径（以 / 开头）'
+  else if (!dir.startsWith('/') && !isWindowsAbsPath(dir)) err.dir = '目录必须是主机上的绝对路径（Linux / macOS 以 / 开头；Windows 写盘符路径，如 C:\\work）'
+  else if (chosen && win && !isWindowsAbsPath(dir)) err.dir = '这台主机是 Windows：目录要写盘符路径（如 C:\\work，或 \\\\服务器\\共享\\… 形式），不能以 / 开头'
+  else if (chosen && !win && !dir.startsWith('/')) err.dir = '这台主机不是 Windows：目录必须以 / 开头'
+  else if (isWindowsAbsPath(dir) && windowsPathProblem(dir)) err.dir = `目录${windowsPathProblem(dir)}`
   else if (charCount(dir) > limits.dir) err.dir = `目录最长 ${limits.dir} 个字，现在是 ${charCount(dir)} 个字`
 
-  const host = d.host.trim()
   if (!host) err.host = '请选择要在哪台主机上运行'
-  else {
-    const chosen = hosts.find(h => h.machine_code === host)
-    if (chosen && isWindowsHost(chosen.os ?? '')) err.host = '「启用 Agent」暂不支持 Windows 主机，请换一台 Linux / macOS 主机'
-  }
   return err
 }
 
@@ -164,22 +168,19 @@ export interface EnableHostChoice {
   code: string
   /** 下拉框里的文字：名字 + 系统 + 状态。 */
   label: string
-  /** 不能选的原因（Windows、离线）；能选为空。离线的主机仍可选——预览会把「主机离线」写成原因——所以只有 Windows 是 disabled。 */
-  disabled: boolean
+  /** 状态说明（离线）；在线为空。离线的主机仍可选——预览会把「主机离线」写成原因。Windows 主机从 #178 起与其他主机一样可选。 */
   note: string
 }
 
-/** 主机候选：在线的在前，Windows 主机列出来但不能选（说明原因），离线的标出来。 */
+/** 主机候选：在线的在前，离线的标出来。 */
 export function enableHostChoices(hosts: readonly SessionEnableHost[] | null | undefined): EnableHostChoice[] {
-  const list = [...(hosts ?? [])].sort((a, b) => Number(isWindowsHost(a.os ?? '')) - Number(isWindowsHost(b.os ?? '')) || Number(b.online) - Number(a.online))
+  const list = [...(hosts ?? [])].sort((a, b) => Number(b.online) - Number(a.online))
   return list.map(h => {
-    const win = isWindowsHost(h.os ?? '')
-    const note = win ? 'Windows 暂不支持' : h.online ? '' : '离线'
+    const note = h.online ? '' : '离线'
     const os = (h.os ?? '').trim()
     return {
       code: h.machine_code,
       label: `${hostTitle(h)}${os ? ` · ${os}` : ''}${note ? `（${note}）` : ''}`,
-      disabled: win,
       note,
     }
   })
@@ -190,7 +191,7 @@ export function enableHostChoices(hosts: readonly SessionEnableHost[] | null | u
  * 否则留空让用户自己选，不替他猜。
  */
 export function pickEnableHost(current: string, remembered: string | undefined, serverPick: string | undefined, hosts: readonly SessionEnableHost[] | null | undefined): string {
-  const usable = new Set(enableHostChoices(hosts).filter(c => !c.disabled).map(c => c.code))
+  const usable = new Set(enableHostChoices(hosts).map(c => c.code))
   for (const c of [current, remembered ?? '', serverPick ?? '']) {
     const code = c.trim()
     if (code && usable.has(code)) return code

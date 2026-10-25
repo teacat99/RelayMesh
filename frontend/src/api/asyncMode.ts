@@ -22,9 +22,18 @@ export const asyncModeApi = {
     return data.async_mode
   },
 
-  /** 开关 / 选档位：开启需要这个工作流收到过 hook 事件，否则后端返回 409 并说明怎么办。 */
-  async update(workflowId: string, patch: { enabled?: boolean; profile_id?: number }): Promise<AsyncModeView> {
+  /** 开关 / 选档位 / 收尾门开关：开启需要这个工作流收到过 hook 事件，否则后端返回 409 并说明怎么办。 */
+  async update(
+    workflowId: string,
+    patch: { enabled?: boolean; profile_id?: number; strict_wrapup?: boolean },
+  ): Promise<AsyncModeView> {
     const { data } = await api.put<{ async_mode: AsyncModeView }>(modeBase(workflowId), patch)
+    return data.async_mode
+  },
+
+  /** 「本次放行」（#232 D2）：这一轮窗口不再被未完成任务挡住、立刻接着走；任务一概不动。没有窗口 / 门已关时 409。 */
+  async releaseGate(workflowId: string): Promise<AsyncModeView> {
+    const { data } = await api.post<{ async_mode: AsyncModeView }>(`${modeBase(workflowId)}/release-gate`)
     return data.async_mode
   },
 

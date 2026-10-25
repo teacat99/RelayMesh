@@ -139,8 +139,9 @@ func (s *Store) StreamEndings(ctx context.Context, workflowID string, r StreamRa
 	return rows, nil
 }
 
-// systemInboxKinds 是由系统投递的收件箱行：确认项答复与群聊 @ 提醒。它们不是「你追加的话」，不进追加列表，也不并入秒回。
-var systemInboxKinds = []string{model.InboxKindAnswer, model.InboxKindChatMention}
+// systemInboxKinds 是由系统投递的收件箱行：确认项答复、群聊 @ 提醒与分支会话之间的消息（#236）。
+// 它们不是「你追加的话」，不进追加列表，也不并入秒回。
+var systemInboxKinds = []string{model.InboxKindAnswer, model.InboxKindChatMention, model.InboxKindBranch}
 
 // inboxVisibleSQL 与 ListInboxItems 的筛选一致：你追加的话里，排队中、被 Agent 经 hook / 回执 / 工具读走的、已过期的。
 // 被「秒回」并进某一轮的不在其中（它们的内容已经在那一轮的回复里）；确认项答复不在其中（它是卡的投递通道）；已撤回的另有系统行。

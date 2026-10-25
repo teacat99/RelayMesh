@@ -10,16 +10,22 @@
 //   - 最近工具、本轮用时、会话运行时长。
 // 这个工作流从来没收到过 hook 汇报或 MCP 调用时整块不出现（收件箱芯片已经在提示「hook 未装」）。
 // 数据与刷新节奏在 stores/agentState.ts；文字与颜色的翻译在 lib/agentState.ts。
+//
+// 占位（#246）：芯片要等实时流连上、取到 Agent 状态概览之后才有，生产上比第一屏晚到 0.2 ～ 1.5 秒，晚到的那一刻状态条里其余芯片
+// 整体被推右一个芯片的宽度（实测 142 ～ 158px）。上次这个工作流有芯片时，概览还在路上就先占一个同样宽的位置
+// （lib/shellHints.ts 记着上次量到的宽度），到了原地换成真芯片；概览取到而这个工作流没有会话，占位收起并忘掉旧宽度。
+// 芯片宽度跟着状态文字走、不为子活动文字预留空白（Q74 选 b），所以占位只是个估计：状态没变时一动不动，变了只挪两者的差。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from 'vue'
-import { Check, CircleDot, CircleOff, Hourglass, LoaderCircle, Moon, Pencil, Power, ShieldQuestion, TriangleAlert, X } from 'lucide-vue-next'
+import { useMediaQuery, useResizeObserver } from '@vueuse/core'
+import { Check, CircleDot, CircleOff, Hourglass, LoaderCircle, Moon, Pencil, ShieldQuestion, TriangleAlert, X } from 'lucide-vue-next'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import BrailleSpinner from '@/components/ui/spinner/BrailleSpinner.vue'
 import { toast } from '@/components/ui/sonner'
 import { useSessionStore } from '@/stores/session'
 import { useAgentStateStore } from '@/stores/agentState'
-import { useTerminalStore } from '@/stores/terminal'
 import { isImeKey } from '@/lib/ime'
 import { IDENTITY_NAME_MAX } from '@/lib/identity'
+import { chipReservation, patchShellHint, readShellHint } from '@/lib/shellHints'
 import {
   basicFacts,
   chipSpanText,
@@ -35,19 +41,12 @@ import {
   textToneClass,
   tokensText,
   turnSpanText,
-  wakeOffer,
 } from '@/lib/agentState'
 
-/** 唤醒请求事件名：SessionHeader 监听并打开终端启动器。 */
-const WAKE_EVENT = 'relaymesh:open-launcher'
-
 const props = defineProps<{ workflowId: string }>()
-/** 点「唤醒」：交给页头去打开终端启动器，并定位到这个预设（真正的唤醒要在那里点、要先验证密码）。 */
-const emit = defineEmits<{ (e: 'wake', presetId: string): void }>()
 
 const store = useAgentStateStore()
 const sessionStore = useSessionStore()
-const terminalStore = useTerminalStore()
 
 const open = ref(false)
 const now = ref(Date.now())
@@ -114,26 +113,40 @@ const stateIcon = computed<{ icon: Component; cls: string }>(() => {
 const chipSpan = computed(() => chipSpanText(session.value, now.value))
 const chipTokens = computed(() => (typeof session.value?.tokens_live === 'number' ? tokensText(session.value.tokens_live) : ''))
 
-// ---- 操作：唤醒（M3.3）----
-// 复制续聊命令 / 复制唤醒词与卡片底部的说明已去掉（#150）；没有会话守护预设（没有「唤醒」按钮可点）时这一块整个不出现，也不再单独写一句原因。
-const guardItem = computed(() => terminalStore.guardItems.find(i => i.enabled && i.workflow_id === props.workflowId))
-const offer = computed(() => wakeOffer(view.value.key, session.value?.end_reason, facts.value.queued))
-const wakeNote = computed(() => {
-  const g = guardItem.value
-  if (!offer.value.show || !g) return ''
-  if (g.wake_mode === 'none') return g.wake_note || '现在没法唤醒'
-  return offer.value.note
-})
-const wakeDisabled = computed(() => offer.value.disabled || guardItem.value?.wake_mode === 'none')
-
-function onWake() {
-  const g = guardItem.value
-  if (!g || wakeDisabled.value) return
-  open.value = false
-  emit('wake', g.preset_id)
-  // 芯片放在输入区、启动器在页头：用窗口事件把「要唤醒哪个预设」递给页头（SessionHeader 监听）。
-  window.dispatchEvent(new CustomEvent(WAKE_EVENT, { detail: { presetId: g.preset_id } }))
+// ---- 占位与宽度记忆（#246）----
+const wide = useMediaQuery('(min-width: 640px)')
+const chipEl = ref<HTMLElement | null>(null)
+// 只在芯片还没出现、概览还没取到时才需要读记忆
+const hint = computed(() => (session.value || store.loaded ? null : readShellHint(props.workflowId)))
+const reservedWidth = computed(() =>
+  chipReservation({
+    hint: hint.value,
+    wide: wide.value,
+    hasSession: !!session.value,
+    overviewLoaded: store.loaded,
+    overviewFailed: !!store.error,
+    supported: store.supported,
+  }),
+)
+let rememberTimer: ReturnType<typeof setTimeout> | undefined
+/** 量一次芯片现在的宽度并记下；状态文字变化会让宽度跟着变，等 600ms 稳定下来再写，免得每次变化都落盘。 */
+function scheduleRemember() {
+  clearTimeout(rememberTimer)
+  rememberTimer = setTimeout(() => {
+    const w = chipEl.value?.getBoundingClientRect().width ?? 0
+    if (w > 0 && props.workflowId) patchShellHint(props.workflowId, { chip: { w, wide: wide.value } })
+  }, 600)
 }
+useResizeObserver(chipEl, scheduleRemember)
+watch(
+  () => [props.workflowId, store.loaded, !!session.value] as const,
+  ([workflowId, loaded, has]) => {
+    if (!workflowId) return
+    if (has) scheduleRemember()
+    else if (loaded) patchShellHint(workflowId, { chip: null })
+  },
+  { immediate: true },
+)
 
 // ---- 改名 ----
 const editing = ref(false)
@@ -210,6 +223,7 @@ onMounted(() => {
   }, 5000)
 })
 onBeforeUnmount(() => {
+  clearTimeout(rememberTimer)
   if (clock !== undefined) {
     window.clearInterval(clock)
     clock = undefined
@@ -221,6 +235,7 @@ onBeforeUnmount(() => {
   <Popover v-if="session" v-model:open="open">
     <PopoverTrigger as-child>
       <button
+        ref="chipEl"
         type="button"
         data-testid="agent-status-chip"
         :data-key="view.key"
@@ -418,27 +433,15 @@ onBeforeUnmount(() => {
         <p v-else-if="screen.tui === 'unrecognized'" class="pt-2 border-t border-border/60 text-[10px] text-muted-foreground" data-testid="agent-card-tui-note">
           {{ screen.note }}
         </p>
-
-        <!-- 操作（M3.3）：只剩「唤醒」；会话不需要唤醒、或没有会话守护预设时整块不出现（复制续聊命令 / 复制唤醒词与底部那段说明已去掉，#150） -->
-        <div v-if="offer.show && guardItem" class="pt-2 border-t border-border/60 space-y-1.5" data-testid="agent-card-actions">
-          <div class="flex flex-wrap items-center gap-1.5">
-            <button
-              type="button"
-              data-testid="agent-card-wake"
-              class="inline-flex items-center gap-1 px-2 py-1 rounded-xs border border-border text-[11px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              :class="wakeDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-muted cursor-pointer'"
-              :disabled="wakeDisabled"
-              :title="wakeNote"
-              @click="onWake"
-            >
-              <Power class="w-3 h-3" />唤醒
-            </button>
-          </div>
-          <p v-if="wakeNote" class="text-[10px]" :class="wakeDisabled ? 'text-muted-foreground' : 'text-amber-600 dark:text-amber-400'" data-testid="agent-card-wake-note">
-            {{ wakeNote }}
-          </p>
-        </div>
       </div>
     </PopoverContent>
   </Popover>
+  <!-- 占位（#246）：概览还在路上，位置先占住；盒子的边、内边距、字号与真芯片一致（高度由里面不可见的一个字撑出来），不可点、对读屏隐藏 -->
+  <span
+    v-else-if="reservedWidth > 0"
+    data-testid="agent-status-chip-reserved"
+    aria-hidden="true"
+    class="inline-flex shrink-0 items-center rounded-sm border border-border/50 bg-muted/30 px-2 py-1 font-mono text-[11px] sm:text-xs max-w-[16rem] sm:max-w-[30rem] motion-safe:animate-pulse"
+    :style="{ width: `${reservedWidth}px` }"
+  ><span class="invisible">0</span></span>
 </template>

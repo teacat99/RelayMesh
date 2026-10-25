@@ -43,14 +43,11 @@ describe('预览视图阶段 C3：列表的接线', () => {
     assert.match(list, /^\s+needsAnswer,$/m, 'needsAnswer 来自 lib/timeline')
   })
 
-  it('已处理的确认项仍是事件行：兜底的 TimelineCardEntry 还在，仍传 compact', () => {
+  it('已处理的确认项仍是事件行：兜底的 TimelineCardEntry 还在（它固定渲染事件行，已没有 compact 参数）', () => {
     const entries = tagAttrs(tpl, 'TimelineCardEntry')
     assert.equal(entries.length, 2)
-    for (const a of entries) assert.match(a, /(^|\s)compact(\s|=|$)/)
-  })
-
-  it('经典列表一个字不碰：不渲染新卡', () => {
-    assert.ok(!read('components/feedback/FeedbackMessageList.vue').includes('PreviewConfirmCard'))
+    for (const a of entries) assert.doesNotMatch(a, /(^|\s):?compact(\s|=|$)/)
+    assert.match(read('components/feedback/TimelineCardEntry.vue'), /<ConfirmTimelineCard\b[^>]*\bcompact\b/)
   })
 })
 
@@ -81,9 +78,11 @@ describe('预览视图阶段 C3：PreviewConfirmCard 的结构', () => {
     assert.ok(!/border-primary/.test(tpl))
   })
 
-  it('状态槽：风险标签（共享几何）+「待您处理」脉动小点，色调随提问 / 计划', () => {
-    assert.match(tpl, /<span :class="\[CARD_CHIP_BASE, riskClass\]" :title="RISK_LABEL\[item\.risk\]" :data-testid="`\$\{testid\}-risk`">\{\{ RISK_SHORT\[item\.risk\] \|\| item\.risk \}\}<\/span>/)
-    assert.match(tpl, /<EventStatus :tone="statusTone" pulse>\{\{ STATUS_WORD\.pending \}\}<\/EventStatus>/)
+  it('状态槽：风险标签（共享几何）+「待您处理」脉动小点，色调随提问 / 计划；先送主会话的请示（#236 P2）换成不脉动的「待主会话」', () => {
+    // 悬停说明走 riskHint：L2 多一句「按约定，智能体在您明确批准前不会执行这一步」（#217，原先只有经典卡有，#166 删经典时接过来）
+    assert.match(tpl, /<span :class="\[CARD_CHIP_BASE, riskClass\]" :title="riskHint\(item\.risk\)" :data-testid="`\$\{testid\}-risk`">\{\{ RISK_SHORT\[item\.risk\] \|\| item\.risk \}\}<\/span>/)
+    assert.match(tpl, /<EventStatus v-else :tone="statusTone" pulse>\{\{ STATUS_WORD\.pending \}\}<\/EventStatus>/)
+    assert.match(tpl, /<EventStatus v-if="routed" tone="violet">\{\{ STATUS_WORD\.routed \}\}<\/EventStatus>/)
     assert.match(src, /const statusTone = computed\(\(\) => CARD_TYPES\[props\.item\.kind\]\.tone\)/)
     assert.equal(CARD_TYPES.ask.tone, 'amber')
     assert.equal(CARD_TYPES.plan.tone, 'red')
@@ -183,6 +182,21 @@ describe('预览视图阶段 C3：作答动作与聚焦高亮只有一份（comp
     assert.match(focus, /onMounted\(\(\) => \{\s*\n\s*if \(!scrollOnMount\) return\s*\n\s*scrollOnMount = false\s*\n[^\n]*\n\s*if \(store\.focusRef === toValue\(itemRef\)\) reveal\(\)/)
     // 滚动只有 reveal 一处出口（不能出现第二种滚法，两边的对齐方式要一致：居中）
     assert.equal([...focus.matchAll(/scrollIntoView\(/g)].length, 1)
+  })
+
+  it('点名滚动之后要做落地校准（#253）：平滑滚动起跑 + settle(居中)，不能只剩一个裸 scrollIntoView', () => {
+    // 回归：裸 scrollIntoView 的终点在起跑时算死，途中离屏占位变成真实高度、总高变了，点跳转滚到半路就停（实验室实测落在离卡数千 px 处）
+    assert.match(focus, /import \{ scrollParentOf, useScrollSettle \} from '\.\/useScrollSettle'/)
+    assert.match(focus, /const \{ settle \} = useScrollSettle\(\)/)
+    assert.match(
+      focus,
+      /el\.scrollIntoView\(\{ behavior: 'smooth', block: 'center' \}\)\s*\n\s*settle\(scrollParentOf\(el\), el, \{ align: 'center' \}\)/,
+    )
+    // 校准驱动本身在共享 composable 里，居中对齐是它的一个选项；默认仍是顶边对齐（右侧轨 / 搜索 / 滚到某一轮不受影响）
+    const settleSrc = read('composables/useScrollSettle.ts')
+    assert.match(settleSrc, /const align = opts\.align \?\? 'start'/)
+    assert.match(settleSrc, /itemHeight: rect\.height/)
+    assert.match(settleSrc, /export function scrollParentOf\(/)
   })
 
   it('经典与共享叶子（含两个 composable）不引用预览专属组件', () => {

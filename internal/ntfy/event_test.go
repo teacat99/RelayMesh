@@ -20,9 +20,9 @@ func TestBuildEventMessage_TitleBodyPriority(t *testing.T) {
 	if m.Title != "RelayMesh · 后端组" || m.Body != "构建完成，等你确认" {
 		t.Fatalf("标题 / 正文不对：%+v", m)
 	}
-	// 新消息类的优先级是固定的 3 / 4，不跟配置里的「优先级」走。
+	// 新消息类的优先级取「各类消息的优先级」表里这一类的内置默认（agent_text = 3），不跟配置里的「默认优先级」走。
 	if m.Priority != 3 {
-		t.Errorf("非穿透类优先级应是 3：%d", m.Priority)
+		t.Errorf("agent_text 的内置默认应是 3：%d", m.Priority)
 	}
 	if m.Click != "https://rm.example.com/?wf=demo&s=s1" {
 		t.Errorf("点击地址应是对外地址 + 深链：%q", m.Click)
@@ -31,10 +31,20 @@ func TestBuildEventMessage_TitleBodyPriority(t *testing.T) {
 		t.Errorf("图标不对：%v", m.Tags)
 	}
 
+	// 穿透类（@你、等你批准、群聊过密）的内置默认是 4。
 	in := evInfo("e2", "wf:demo", "x")
-	in.Penetrate = true
+	in.Kind, in.Penetrate = "mention", true
 	if p := BuildEventMessage(cfg, in, 1, 0).Priority; p != 4 {
-		t.Errorf("穿透类优先级应是 4：%d", p)
+		t.Errorf("mention 的内置默认应是 4：%d", p)
+	}
+	// 表里没有对应行的种类退回老规则：穿透类 4，其余 3。
+	in.Kind = "some_future_kind"
+	if p := BuildEventMessage(cfg, in, 1, 0).Priority; p != 4 {
+		t.Errorf("未登记的穿透类应退回 4：%d", p)
+	}
+	in.Penetrate = false
+	if p := BuildEventMessage(cfg, in, 1, 0).Priority; p != 3 {
+		t.Errorf("未登记的非穿透类应退回 3：%d", p)
 	}
 }
 

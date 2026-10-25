@@ -13,12 +13,12 @@ import { STATUS_WORD } from './statusWords'
  * 阶段 E-d（预览视图里的群聊）再加两种：member = 群里某位成员（智能体）说的话，self = 您在群里说的话；
  * 它们不显示类型标签（群里的话没有「汇报 / 回复」之分），只借类型决定靠左还是靠右、默认色调。
  */
-export type CardType = 'report' | 'notice' | 'ask' | 'plan' | 'reply' | 'append' | 'decision' | 'task' | 'capsule' | 'guard' | 'member' | 'self'
+export type CardType = 'report' | 'notice' | 'ask' | 'plan' | 'reply' | 'append' | 'decision' | 'task' | 'capsule' | 'member' | 'self'
 
 /** 色调：色条、头像底色、类型标签的描边与字色都取自它。 */
 export type CardTone = 'zinc' | 'sky' | 'amber' | 'red' | 'green' | 'violet' | 'slate'
 
-/** 发送方：智能体 / 您 / 系统（守护、恢复胶囊这类不是任何一方说的话）。 */
+/** 发送方：智能体 / 您 / 系统（恢复胶囊这类不是任何一方说的话）。 */
 export type CardSender = 'agent' | 'user' | 'system'
 
 export interface CardTypeMeta {
@@ -43,7 +43,6 @@ export const CARD_TYPES: Record<CardType, CardTypeMeta> = {
   decision: { label: '决策', tone: 'violet', sender: 'agent' },
   task: { label: '任务', tone: 'slate', sender: 'agent' },
   capsule: { label: '恢复', tone: 'slate', sender: 'system' },
-  guard: { label: '告警', tone: 'amber', sender: 'system' },
   member: { label: '成员', tone: 'zinc', sender: 'agent' },
   self: { label: '您', tone: 'green', sender: 'user' }
 }

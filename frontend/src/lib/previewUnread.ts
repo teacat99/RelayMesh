@@ -1,7 +1,7 @@
 // 预览视图的未读（#120 阶段 E-c2）：纯逻辑，不依赖 Vue 与 DOM。
 //
 // 口径与服务端一致（store.CountUnreadAgentMessages）：「未读」= Agent 在已读游标之后发的消息——
-// 阻塞式汇报、进度通知 / 任务进展、提问 / 计划卡；您自己的话、系统行、决策汇总、守护告警、恢复胶囊都不计。
+// 阻塞式汇报、进度通知 / 任务进展、提问 / 计划卡；您自己的话、系统行、决策汇总、恢复胶囊都不计。
 // 游标是毫秒：消息的发送毫秒 > 游标 就是未读（与服务端「created_at 严格晚于游标那一毫秒」同义）。
 // 已读游标是跨设备共享的（conversation_reads，只增不减），聊天视图、侧栏与这里读写的是同一份。
 
@@ -94,6 +94,54 @@ export function renderedAgentMs(items: ReadonlyArray<UnreadItem>): number {
     }
   }
   return max
+}
+
+/** 「离开底部之后」新到的 Agent 消息，按顶层项汇总（#254）。 */
+export interface NewItem {
+  /** 与 UnreadItem.key 一致：间隙里的块用 block.key，轮次用 session_id。 */
+  key: string
+  /** 这一项里晚于 awayMs 的 Agent 消息条数（≥ 1）。 */
+  count: number
+}
+
+/**
+ * 用户从底部往上滚的那一刻之后到的 Agent 消息，按显示顺序一项一项列出（只列有新消息的项）。
+ * awayMs 是那一刻已渲染的最晚一条 Agent 消息的毫秒（renderedAgentMs）：严格晚于它的才算「新的」，与已读游标同一条规则（> 而不是 ≥）；
+ * 滚上去之后向上载入的更早内容，时间都不晚于它，不会被算成新的。您自己的话、系统行不计（口径同 isAgentEntry）。
+ */
+export function newSinceAway(items: ReadonlyArray<UnreadItem>, awayMs: number): NewItem[] {
+  const out: NewItem[] = []
+  for (const it of items) {
+    const count = it.agentAt.filter(a => toMs(a) > awayMs).length
+    if (count > 0) out.push({ key: it.key, count })
+  }
+  return out
+}
+
+/**
+ * 浮动条上的数字：新到的消息里还没被看到的条数。
+ * - 一项「被看到」= seen(key) 为 true（它的顶边已进入视口：用户看到了它的开头）；已经看到的不计，滚走了再回来也不会重新计（seenKeys 记着）；
+ * - 一项还没渲染出来（找不到元素）按没看到算：消息在，您没看过。
+ * 返回 { count, seen }：count 是还没看到的条数，seen 是这一轮新看到的项的键（调用方并进 seenKeys）。
+ */
+export function unseenNewCount(
+  list: ReadonlyArray<NewItem>,
+  seen: (key: string) => boolean,
+  seenKeys: ReadonlySet<string> = new Set(),
+): { count: number; seen: string[] } {
+  let count = 0
+  const newlySeen: string[] = []
+  for (const it of list) {
+    if (seenKeys.has(it.key)) continue
+    if (seen(it.key)) newlySeen.push(it.key)
+    else count += it.count
+  }
+  return { count, seen: newlySeen }
+}
+
+/** 浮动条的文案：任何条数都带数字（以前只有 1 条时写「收到 AI 最新方案汇报」、不带数字，数字也没跟着滚动变化）。 */
+export function newDynamicsText(n: number): string {
+  return `收到 ${n} 条新动态`
 }
 
 interface WireMessage {

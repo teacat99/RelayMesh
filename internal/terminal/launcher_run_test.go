@@ -8,6 +8,7 @@ import (
 
 	"github.com/teacat99/RelayMesh/v2/internal/agentstate"
 	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/sessionprompt"
 	"github.com/teacat99/RelayMesh/v2/internal/store"
 	"github.com/teacat99/RelayMesh/v2/internal/termproto"
 )
@@ -53,28 +54,53 @@ func TestHeadlessCmdModelPostureAndGuards(t *testing.T) {
 }
 
 func TestRenderLauncherPrompt(t *testing.T) {
-	def := renderLauncherPrompt("", "wf-1")
-	for _, need := range []string{"工作流 wf-1 里", "没有人在终端里看你的输出", "interactive_feedback", "结束前都要向 RelayMesh 发一条消息", "结束本次运行"} {
+	st := newWakeStore(t)
+	ctx := context.Background()
+	render := func(custom, wf string) string {
+		return renderLauncherWake(ctx, st, launcherWake{Kind: sessionprompt.KindResume, Custom: custom, WorkflowID: wf}).Text
+	}
+	def := render("", "wf-1")
+	for _, need := range []string{"wf-1", "没有人在终端里看你的输出", "interactive_feedback", "结束前都要向 RelayMesh 发一条消息", "结束本次运行", "确认卡"} {
 		if !strings.Contains(def, need) {
 			t.Errorf("默认提示词应含 %q：%s", need, def)
 		}
 	}
-	if strings.Contains(def, "%workflow") || strings.ContainsAny(def, "\r\n") {
+	if strings.Contains(def, "%") || strings.ContainsAny(def, "\r\n") {
 		t.Errorf("默认提示词不该留占位符或换行: %q", def)
 	}
-	if n := len([]rune(def)); n > store.MaxHeadlessPromptRunes {
-		t.Errorf("默认提示词（%d 字）不应超过自定义提示词的上限 %d", n, store.MaxHeadlessPromptRunes)
-	}
-	if noWf := renderLauncherPrompt("", ""); !strings.Contains(noWf, "读取工作流里我离线期间") || strings.Contains(noWf, "%workflow") {
+	if noWf := render("", ""); !strings.Contains(noWf, "读取我离线期间的追加指令") || strings.Contains(noWf, "%") || strings.Contains(noWf, "工作流 （") {
 		t.Errorf("没有工作流编号时默认提示词不点名：%s", noWf)
 	}
-	if got := renderLauncherPrompt("  看看 %workflow 的收件箱  ", "wf-2"); got != "看看 wf-2 的收件箱" {
+	if got := render("  看看 %workflow 的收件箱  ", "wf-2"); got != "看看 wf-2 的收件箱" {
 		t.Errorf("自定义提示词应替换 %%workflow 并去掉首尾空白: %q", got)
 	}
 	// 工作流编号里的 shell 特殊字符不会成为问题：提示词最终是单引号包裹的一个参数。
-	cmd, err := headlessCmd{Bin: "agent", ChatID: "c1", Dir: "/w", Prompt: renderLauncherPrompt("读 %workflow", "a$(touch x)'b")}.build()
+	cmd, err := headlessCmd{Bin: "agent", ChatID: "c1", Dir: "/w", Prompt: render("读 %workflow", "a$(touch x)'b")}.build()
 	if err != nil || !strings.Contains(cmd, `'读 a$(touch x)'\''b'`) {
 		t.Errorf("特殊字符应被单引号完整包住: %v %s", err, cmd)
+	}
+}
+
+// 表单里展示的三个默认正文（「以默认为底稿」填进去就要能存）：一行、不超过预设里正文的字数上限、变量原样保留；
+// 字数上限与会话 / 全局模板同一个（TemplateMaxRunes）。
+func TestExposedPromptDefaultsFitPresetLimits(t *testing.T) {
+	if store.MaxHeadlessPromptRunes != sessionprompt.TemplateMaxRunes {
+		t.Fatalf("预设正文上限（%d）应与模板上限 %d 一致", store.MaxHeadlessPromptRunes, sessionprompt.TemplateMaxRunes)
+	}
+	cases := map[string]struct {
+		text string
+		max  int
+	}{
+		"续聊":   {sessionprompt.OneLine(sessionprompt.Builtin(sessionprompt.KindResume, true)), store.MaxHeadlessPromptRunes},
+		"新开对话": {sessionprompt.OneLine(sessionprompt.Builtin(sessionprompt.KindNew, true)), store.MaxHeadlessPromptRunes},
+	}
+	for name, c := range cases {
+		if n := len([]rune(c.text)); n == 0 || n > c.max {
+			t.Errorf("%s 的默认正文 %d 字，应在 1～%d 之间", name, n, c.max)
+		}
+		if strings.ContainsAny(c.text, "\r\n\t") || !strings.Contains(c.text, "%workflow") {
+			t.Errorf("%s 的默认正文应是一行并保留 %%workflow: %q", name, c.text)
+		}
 	}
 }
 
@@ -115,7 +141,7 @@ func launcherFixture(t *testing.T, run map[string]any) (*execFixture, string) {
 
 func (f *execFixture) saveLauncher(t *testing.T, id, name string, run map[string]any) apiResult {
 	t.Helper()
-	res := f.env.call("PUT", "/api/v1/terminal/launchers/"+id, map[string]any{
+	res := f.env.putLauncher("/api/v1/terminal/launchers/"+id, map[string]any{
 		"name": name, "host": f.a.code, "dir": "/work/app", "kind": "headless", "run": run,
 	}, f.adm...)
 	if res.Status != 200 {
@@ -169,7 +195,9 @@ func TestLauncherRunSubmitsExactCommandAndLeavesChatLines(t *testing.T) {
 	eventually(t, 2*time.Second, "假主机收到运行", func() bool { return f.sim.runCount() == 1 })
 	run := f.sim.lastRun()
 	want := "agent -p --resume chat-9 --approve-mcps --trust --model 'claude-sonnet-5-5-max' --force --workspace '/work/app' --output-format stream-json '" +
-		renderLauncherPromptFor("", launcherWF, headlessTimeoutSec) + "'"
+		renderLauncherWake(context.Background(), f.env.store, launcherWake{
+			Kind: sessionprompt.KindResume, WorkflowID: launcherWF, Project: "/work/app", MaxRunSec: headlessTimeoutSec,
+		}).Text + "'"
 	if run.Cmd != want {
 		t.Fatalf("命令不对：\n got %s\nwant %s", run.Cmd, want)
 	}
@@ -409,7 +437,7 @@ func TestLauncherRunRefusals(t *testing.T) {
 	})
 	t.Run("终端预设不能运行", func(t *testing.T) {
 		f, _ := launcherFixture(t, map[string]any{"workflow_id": launcherWF})
-		res := f.env.call("PUT", "/api/v1/terminal/launchers/t1", map[string]any{"name": "终端", "host": f.a.code, "dir": "/work/app", "command": "agent"}, f.adm...)
+		res := f.env.putLauncher("/api/v1/terminal/launchers/t1", map[string]any{"name": "终端", "host": f.a.code, "dir": "/work/app", "command": "agent"}, f.adm...)
 		if res.Status != 200 {
 			t.Fatalf("保存终端预设: %d %s", res.Status, res.Raw)
 		}
@@ -653,7 +681,7 @@ func TestLauncherSaveViaRESTValidatesKindAndRoundTrips(t *testing.T) {
 	f := newExecFixture(t)
 	save := func(body map[string]any) apiResult {
 		body["name"], body["host"] = "续聊", f.a.code
-		return f.env.call("PUT", "/api/v1/terminal/launchers/p1", body, f.adm...)
+		return f.env.putLauncher("/api/v1/terminal/launchers/p1", body, f.adm...)
 	}
 	for name, body := range map[string]map[string]any{
 		"不认识的类型":     {"kind": "cron", "dir": "/w"},
@@ -697,95 +725,6 @@ func TestLauncherSaveViaRESTValidatesKindAndRoundTrips(t *testing.T) {
 		run, _ := l["run"].(map[string]any)
 		if run["max_run_minutes"] != want {
 			t.Fatalf("max_run_minutes=%d 回到界面应是 %v: %s", in, want, res.Raw)
-		}
-	}
-}
-
-// ---------- 守护的非交互唤醒：默认提示词与空转提示（#125） ----------
-
-// 默认提示词后面补上「非交互运行必须把结果发到 RelayMesh」；自定义提示词一个字不加。
-func TestHeadlessWakeDefaultPromptGetsRunSuffixButCustomDoesNot(t *testing.T) {
-	f, id := headlessFixture(t, map[string]any{"enabled": true})
-	f.completeWith("")
-	if _, err := f.wakeHeadless(t, id); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, 2*time.Second, "假主机收到运行", func() bool { return f.sim.runCount() == 1 })
-	if cmd := f.sim.lastRun().Cmd; !strings.HasSuffix(cmd, headlessRunSuffix+"'") {
-		t.Fatalf("默认提示词后面应补上非交互运行的说明: %s", cmd)
-	}
-
-	f2, id2 := headlessFixture(t, map[string]any{"enabled": true})
-	res := f2.env.call("PUT", "/api/v1/terminal/launchers/"+id2, map[string]any{
-		"name": "Cursor CLI", "host": f2.a.code, "dir": "/work/app", "command": "agent",
-		"guard": map[string]any{"enabled": true, "workflow_id": headlessWF, "wake_prompt": "请继续做完 %workflow 的事", "headless": map[string]any{"enabled": true}},
-	}, f2.adm...)
-	if res.Status != 200 {
-		t.Fatalf("保存带自定义提示词的预设失败: %d %s", res.Status, res.Raw)
-	}
-	f2.completeWith("")
-	if _, err := f2.wakeHeadless(t, id2); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, 2*time.Second, "假主机收到运行", func() bool { return f2.sim.runCount() == 1 })
-	cmd := f2.sim.lastRun().Cmd
-	if strings.Contains(cmd, "这是一次非交互运行") || !strings.HasSuffix(cmd, "请继续做完 "+headlessWF+" 的事'") {
-		t.Fatalf("自定义提示词不该被改动: %s", cmd)
-	}
-}
-
-// 运行成功但智能体一句话没说：结束行带「空转退出」提示；运行期间发过消息就不带。
-func TestHeadlessWakeEndLineFlagsSilentExitOnlyWhenAgentSaidNothing(t *testing.T) {
-	f, id := headlessFixture(t, map[string]any{"enabled": true})
-	f.completeWith("")
-	plan, err := f.wakeHeadless(t, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.waitRunFinal(t, plan.RunID)
-	eventually(t, 3*time.Second, "聊天里出现结束行", func() bool { return len(f.chatTexts(headlessWF)) == 2 })
-	if end := f.chatTexts(headlessWF)[1]; !strings.Contains(end, "非交互唤醒已结束：成功") || !strings.Contains(end, "空转退出") {
-		t.Fatalf("空转的结束行应带提示: %q", end)
-	}
-
-	f2, id2 := headlessFixture(t, map[string]any{"enabled": true})
-	var noticeAt time.Time
-	f2.sim.onRun = func(s *hostSim, m termproto.Run) {
-		s.started(m.ID)
-		// 真实的智能体启动要好几秒才会开口；这里等 Hub 先记下「已开始」的时刻，再让它发通知。
-		for i := 0; i < 300; i++ {
-			if rec, err := f2.env.store.GetTerminalRun(context.Background(), m.ID); err == nil && rec != nil && rec.StartedAt != nil {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		time.Sleep(20 * time.Millisecond)
-		ns, err := f2.env.store.CreateNoticeSession(context.Background(), store.CreateSessionInput{WorkflowID: headlessWF, ProjectDirectory: "/work/app", Summary: "已恢复现场"})
-		if err != nil {
-			t.Error(err)
-		} else {
-			noticeAt = ns.CreatedAt
-		}
-		s.end(m.ID, termproto.RunExited, intp(0), "", "")
-	}
-	plan2, err := f2.wakeHeadless(t, id2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f2.waitRunFinal(t, plan2.RunID)
-	eventually(t, 3*time.Second, "聊天里出现结束行", func() bool {
-		for _, s := range f2.chatTexts(headlessWF) {
-			if strings.Contains(s, "非交互唤醒已结束：成功") {
-				return true
-			}
-		}
-		return false
-	})
-	for _, s := range f2.chatTexts(headlessWF) {
-		if strings.Contains(s, "空转") {
-			rec := f2.dbRun(t, plan2.RunID)
-			t.Logf("started=%v ended=%v noticeAt=%v", rec.StartedAt, rec.EndedAt, noticeAt)
-			t.Fatalf("运行期间智能体发过通知，结束行不该带空转提示: %q", s)
 		}
 	}
 }

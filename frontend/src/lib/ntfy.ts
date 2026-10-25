@@ -1,7 +1,7 @@
 // ntfy 推送设置的纯逻辑：表单模型、与服务端一致的前置校验、提交体的生成、随机主题、状态文案。
 // 服务端（internal/ntfy）才是权威，这里的校验只是让用户在点保存之前就看到问题。
 
-import type { NtfyConfig, NtfyStatus, NtfyUpdate } from '../api/ntfy'
+import type { NtfyConfig, NtfyKindGroup, NtfyKindInfo, NtfyStatus, NtfyUpdate } from '../api/ntfy'
 
 export const NTFY_DEFAULT_SERVER = 'https://ntfy.sh'
 export const NTFY_MAX_DELAY_SECONDS = 900
@@ -78,6 +78,8 @@ export interface NtfyForm {
   runNotify: boolean
   /** 运行结束推送的门槛（秒）：更短的命令不推送。 */
   runMinSeconds: number
+  /** 按消息类型的覆盖表：0 = 不推送，1~5 = 指定优先级；没出现的类型用内置默认。 */
+  priorityByKind: Record<string, number>
 }
 
 /** 认证方式取决于已保存的状态：有令牌（含环境变量提供的）→ 令牌；有用户名 → 用户名密码；否则无。 */
@@ -103,6 +105,8 @@ export function formFromConfig(c: NtfyConfig): NtfyForm {
     // 服务端没给这两项（旧版本的响应）时按「关闭 + 默认门槛」处理
     runNotify: c.run_notify === true,
     runMinSeconds: c.run_min_seconds || NTFY_DEFAULT_RUN_MIN_SECONDS,
+    // 旧版本的服务端没有这个字段：按空表（全部内置默认）处理；复制一份，表单里的修改不能碰到已保存的配置
+    priorityByKind: { ...(c.priority_by_kind ?? {}) },
   }
 }
 
@@ -123,6 +127,8 @@ export function buildUpdate(form: NtfyForm, saved: NtfyConfig): NtfyUpdate {
     delay_seconds: form.delaySeconds,
     run_notify: form.runNotify,
     run_min_seconds: form.runMinSeconds,
+    // 整张表一起提交（空表 = 清空，全部回到内置默认），与其它非凭据字段一样「整体替换」
+    priority_by_kind: { ...form.priorityByKind },
   }
   switch (form.authMode) {
     case 'none':
@@ -173,6 +179,9 @@ export function validateForm(form: NtfyForm, saved: NtfyConfig, requireTopic: bo
   if (!(Number.isInteger(form.runMinSeconds) && form.runMinSeconds >= 1 && form.runMinSeconds <= NTFY_MAX_RUN_MIN_SECONDS)) {
     return `运行结束推送的最短运行时长应在 1~${NTFY_MAX_RUN_MIN_SECONDS} 秒之间`
   }
+  for (const [kind, v] of Object.entries(form.priorityByKind)) {
+    if (!Number.isInteger(v) || v < 0 || v > 5) return `消息类型「${kind}」的优先级不合法（应是 0~5 的整数，0 表示不推送）`
+  }
   return ''
 }
 
@@ -192,8 +201,14 @@ export function isDirty(form: NtfyForm, saved: NtfyConfig): boolean {
     form.includeSummary !== base.includeSummary ||
     form.delaySeconds !== base.delaySeconds ||
     form.runNotify !== base.runNotify ||
-    form.runMinSeconds !== base.runMinSeconds
+    form.runMinSeconds !== base.runMinSeconds ||
+    !sameKindTable(form.priorityByKind, base.priorityByKind)
   )
+}
+
+function sameKindTable(a: Record<string, number>, b: Record<string, number>): boolean {
+  const ka = Object.keys(a)
+  return ka.length === Object.keys(b).length && ka.every(k => k in b && a[k] === b[k])
 }
 
 // 32 个字符（去掉了容易看错的 0 / O / 1 / l / i），每个字符 5 比特
@@ -278,4 +293,149 @@ export function describeCounters(status: NtfyStatus | null | undefined): string 
   if (status.failed > 0) parts.push(`失败 ${status.failed} 条`)
   if (status.dropped > 0) parts.push(`被限流合并 / 丢弃 ${status.dropped} 条`)
   return parts.join(' · ')
+}
+
+// ───────────────────── 按消息类型设置优先级 ─────────────────────
+// 服务端（internal/ntfy 的消息类型表）是权威：每一类的名字、说明、内置默认都来自它返回的目录，
+// 这里只负责「覆盖表 ↔ 下拉选项」的翻译，规则与服务端的 PriorityFor 保持一致：
+//   覆盖表里有这一类 → 0 = 不推送，1~5 = 这个优先级；没有 → 这一类的内置默认（异常类默认不推送）。
+
+/** ntfy 优先级的中文名（ntfy 自己叫 min / low / default / high / max）。 */
+const PRIORITY_NAMES: Record<number, string> = { 1: '最低', 2: '较低', 3: '默认', 4: '较高', 5: '紧急' }
+
+/** 优先级在 ntfy 手机应用里的大致效果（以应用里的通知设置为准），给用户选的时候参考。 */
+export const NTFY_PRIORITY_EFFECTS =
+  '大致效果：1~2 不响不震，只在通知栏里；3 有提示音；4 提示音加弹出通知；5 持续震动加弹出通知（具体以 ntfy 应用里的设置为准）'
+
+function clampPriority(p: number): number {
+  if (!Number.isFinite(p)) return NTFY_DEFAULT_PRIORITY
+  return Math.min(5, Math.max(1, Math.round(p)))
+}
+
+/** 优先级的写法，如「较高（4）」；note 会放进括号里，如「较高（4，建议）」。 */
+export function priorityLabel(p: number, note = ''): string {
+  const n = clampPriority(p)
+  return `${PRIORITY_NAMES[n]}（${n}${note ? `，${note}` : ''}）`
+}
+
+/** 设置页里消息类型的分组与顺序。 */
+export const NTFY_KIND_GROUPS: ReadonlyArray<{ id: NtfyKindGroup; title: string; hint: string }> = [
+  { id: 'need_you', title: '需要你处理', hint: '智能体、群聊或终端在等你——默认都会推送。' },
+  { id: 'run', title: '模型运行的命令', hint: '模型经 ExecMesh 在主机上跑的命令；要先打开上面的「模型运行的命令结束时也推送」才会推。' },
+  {
+    id: 'exception',
+    title: '异常提醒',
+    hint: '出了问题才推，每一类都有去重，不会刷屏。默认全部不推送；打开之前可以先点「试发」，在手机上看看它会怎么响。',
+  },
+]
+
+/** 一行里下拉框的取值：default = 用内置默认，off = 不推送，1~5 = 指定优先级。 */
+export type KindChoice = 'default' | 'off' | '1' | '2' | '3' | '4' | '5'
+
+export interface KindGroupView {
+  id: string
+  title: string
+  hint: string
+  kinds: NtfyKindInfo[]
+}
+
+/** 把目录按分组排好；服务端新增了界面还不认识的分组时，归到「其他」，不会悄悄丢掉。 */
+export function groupKinds(kinds: readonly NtfyKindInfo[] | undefined): KindGroupView[] {
+  const list = kinds ?? []
+  const out: KindGroupView[] = []
+  for (const g of NTFY_KIND_GROUPS) {
+    const ks = list.filter(k => k.group === g.id)
+    if (ks.length) out.push({ ...g, kinds: ks })
+  }
+  const known = new Set<string>(NTFY_KIND_GROUPS.map(g => g.id))
+  const rest = list.filter(k => !known.has(k.group))
+  if (rest.length) out.push({ id: 'other', title: '其他', hint: '', kinds: rest })
+  return out
+}
+
+/** 这一类的内置默认优先级：写死的用写死值；跟随默认优先级的跟随（顺利完成的命令最多按 3）。 */
+export function builtinPriority(info: NtfyKindInfo, defaultPriority: number): number {
+  if (info.default_priority > 0) return clampPriority(info.default_priority)
+  const p = clampPriority(defaultPriority)
+  return info.cap_normal && p > 3 ? 3 : p
+}
+
+/** 覆盖表里这一类现在对应哪个选项。默认不推送的类型设成 0 与「默认」等价，统一显示成「默认」。 */
+export function kindChoice(info: NtfyKindInfo, table: Record<string, number> | undefined): KindChoice {
+  const v = table?.[info.id]
+  if (v === undefined || v === null || !Number.isFinite(v)) return 'default'
+  if (v < 1) return info.default_on ? 'off' : 'default'
+  return String(clampPriority(v)) as KindChoice
+}
+
+/** 把一次选择写进覆盖表（返回新对象，不改原表）：选「默认」就是把这一项删掉。 */
+export function withKindChoice(table: Record<string, number> | undefined, info: NtfyKindInfo, choice: KindChoice): Record<string, number> {
+  const next = { ...(table ?? {}) }
+  if (choice === 'default') delete next[info.id]
+  else if (choice === 'off') next[info.id] = 0
+  else next[info.id] = clampPriority(Number(choice))
+  return next
+}
+
+/** 这一类此刻实际会怎么推：on = 会不会推，priority = 用几级（不推时为 0）。 */
+export function effectiveKind(
+  info: NtfyKindInfo,
+  table: Record<string, number> | undefined,
+  defaultPriority: number
+): { on: boolean; priority: number } {
+  const v = table?.[info.id]
+  if (v !== undefined && v !== null && Number.isFinite(v)) {
+    return v < 1 ? { on: false, priority: 0 } : { on: true, priority: clampPriority(v) }
+  }
+  if (!info.default_on) return { on: false, priority: 0 }
+  return { on: true, priority: builtinPriority(info, defaultPriority) }
+}
+
+/** 一行下拉框的选项。「默认」那一项会写明它此刻等于几级，用户不用去猜。 */
+export function kindOptions(info: NtfyKindInfo, defaultPriority: number): Array<{ value: KindChoice; label: string }> {
+  const levels: KindChoice[] = ['1', '2', '3', '4', '5']
+  if (!info.default_on) {
+    const suggested = info.suggested_priority ?? 0
+    return [
+      { value: 'default', label: '不推送（默认）' },
+      ...levels.map(v => ({ value: v, label: `推送 · ${priorityLabel(Number(v), Number(v) === suggested ? '建议' : '')}` })),
+    ]
+  }
+  // 「默认」那一项用箭头写明它此刻落在几级：默认 → 较高（4）
+  const p = builtinPriority(info, defaultPriority)
+  let def: string
+  if (info.default_priority > 0) def = `默认 → ${priorityLabel(p)}`
+  else if (info.cap_normal && clampPriority(defaultPriority) > 3) def = `跟随默认优先级（最多按 3）→ ${priorityLabel(p)}`
+  else def = `跟随默认优先级 → ${priorityLabel(p)}`
+  return [
+    { value: 'default', label: def },
+    { value: 'off', label: '不推送' },
+    ...levels.map(v => ({ value: v, label: priorityLabel(Number(v)) })),
+  ]
+}
+
+/** 表头下面的一行小结：让人一眼看出哪些改过、哪些关了、异常提醒开了几类。 */
+export function describeKindTable(
+  kinds: readonly NtfyKindInfo[] | undefined,
+  table: Record<string, number> | undefined,
+  defaultPriority: number
+): string {
+  const list = kinds ?? []
+  if (!list.length) return ''
+  const custom = list.filter(k => kindChoice(k, table) !== 'default').length
+  const closed = list.filter(k => k.default_on && !effectiveKind(k, table, defaultPriority).on).length
+  const exceptions = list.filter(k => k.group === 'exception')
+  const exceptionsOn = exceptions.filter(k => effectiveKind(k, table, defaultPriority).on).length
+  const parts = [custom > 0 ? `已单独设置 ${custom} 类` : '全部使用默认设置']
+  if (closed > 0) parts.push(`${closed} 类已设成不推送`)
+  if (exceptions.length) parts.push(exceptionsOn > 0 ? `异常提醒已开 ${exceptionsOn} / ${exceptions.length} 类` : '异常提醒全部关闭')
+  return parts.join(' · ')
+}
+
+/** 「试发这一类」之后给用户看的话：写明实际用了几级；这一类目前不推送时提醒「这只是预览」。 */
+export function describeKindTest(info: NtfyKindInfo, choice: KindChoice, res: { priority?: number; took_ms: number }): string {
+  const level = res.priority ? priorityLabel(res.priority) : '默认优先级'
+  const preview = choice === 'off' || (!info.default_on && choice === 'default')
+  const base = `已按「${level}」试发「${info.label}」（用时 ${res.took_ms} 毫秒）。请到订阅了这个主题的设备上，看看声音和提醒方式是否合适。`
+  return preview ? `${base}这一类目前是「不推送」，这条只是预览，并没有真的打开。` : base
 }

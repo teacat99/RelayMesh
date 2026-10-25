@@ -31,18 +31,19 @@ import { findEntryBlock, nearestRoundBefore, resolveHit, roundIdOfGap, windowToS
 import { usePreviewUnread } from '../../../composables/usePreviewUnread'
 import { offsetInContainer, useScrollSettle } from '../../../composables/useScrollSettle'
 import { holdBoundaryKeys } from '../../../lib/scrollSettle'
-import { isPinnedAtBottom, repinTarget, wasPinnedBeforeResize, type SizeSnapshot } from '../../../lib/stickBottom'
-import { renderedAgentMs, unreadDividerKey, unreadItems } from '../../../lib/previewUnread'
+import { bottomGap, isPinnedAtBottom, repinTarget, wasPinnedBeforeResize, type SizeSnapshot } from '../../../lib/stickBottom'
+import { newDynamicsText, newSinceAway, renderedAgentMs, unreadDividerKey, unreadItems, unseenNewCount } from '../../../lib/previewUnread'
 import { buildTaskUpdateCards } from '../../../lib/asyncMode'
 import {
   TIMELINE_TAIL_KEY,
   blockHoldsConfirm,
+  branchEntries,
   confirmEntries,
   groupBlocks,
   stackKeysHoldingConfirm,
-  guardEntries,
   needsAnswer,
   placeTimeline,
+  reuseEntries,
   inRoundKey,
   type TimelineBlock,
   type TimelineEntry,
@@ -66,11 +67,26 @@ import {
   nextTailStart,
   revealTailStart,
   shouldFillNow,
-  shouldHoldFirst,
+  tailHoldMode,
 } from '../../../lib/tailWindow'
+import {
+  FOLLOW_RECHECK_DELAY_MS,
+  FOLLOW_RECHECK_FRAMES,
+  USER_SCROLL_GRACE_MS,
+  isEditableTarget,
+  isInputPending,
+  isStaleFrame,
+  isUpwardKey,
+  isUpwardTouchMove,
+  isUpwardWheel,
+  mayFollow,
+  userHolding,
+} from '../../../lib/followBottom'
 import { useWorkItemStore } from '../../../stores/workItems'
+import { useBranchStore } from '../../../stores/branches'
 import CardStack from '../CardStack.vue'
 import TimelineCardEntry from '../TimelineCardEntry.vue'
+import PreviewBranchCard from './PreviewBranchCard.vue'
 import PreviewConfirmCard from './PreviewConfirmCard.vue'
 import PreviewDateSeparator from './PreviewDateSeparator.vue'
 import PreviewInboxCard from './PreviewInboxCard.vue'
@@ -105,16 +121,15 @@ async function copyText(text: string, label: string) {
   }
 }
 
-// PreviewMessageList.vue —— 「预览视图」（#120）的会话列表。
-//
-// 这是 FeedbackMessageList.vue 的复刻：阶段 0 内容与经典逐项一致（对等测试见 lib/previewViewParity.test.ts）；
-// 之后的阶段（紧凑行、右侧轨、版式）只改这里，经典视图一个字不动。
-// 经典里新增了条目或数据来源时，对等测试会提醒这里跟上。
+// PreviewMessageList.vue —— 会话列表（#120 起叫「预览视图」，#165 起是默认，#166 删掉原先的经典列表后是唯一的一套）。
+// 会话页（FeedbackView）与托管自驾任务的「会话」标签（TaskWorkspace）都用它。
 const props = defineProps<{
   /** 真实的轮次（不含异步模式下的进度通知）；轮次编号、微缩轴都只认它。 */
   conversationRounds: FeedbackSession[]
   /** 异步模式下智能体发的进度通知（不阻塞、没有回复框），按时间穿插在轮次之间。 */
   notices?: FeedbackSession[]
+  /** 整表还没到、本地也没有缓存（#186 Q117 a）：只画骨架，整表到达后第一次有内容时一次画出最近一段并贴好底。 */
+  loading?: boolean
   hasDraftImages?: boolean
 }>()
 
@@ -217,7 +232,6 @@ function formatSessionProjectDirectory(session: FeedbackSession): string {
 }
 
 const chatScrollContainer = ref<HTMLElement | null>(null)
-const bottomAnchorRef = ref<HTMLElement | null>(null)
 const highlightedSessionId = ref<string | null>(null)
 let highlightTimer: any = null
 // 右侧轨点击跳转后给目标条目闪一下外框（data-rail-flash，样式见文件末尾）
@@ -225,12 +239,17 @@ let railFlashTimer: ReturnType<typeof setTimeout> | null = null
 const isScrolledUp = ref(false)
 
 // 历史多轮对话无感向上滚动分页加载
-const INITIAL_VISIBLE_ROUNDS = 10
+// 首批只渲染最新 4 轮（#186 C2b-1；10 → 4）：打开会话时用户看的是最底下的一两轮 / 末尾的通知，更早的在更往上的地方，
+// 滚到离顶 250px 以内时再一批一批载入（BATCH_LOAD_ROUNDS，锚点钉住、无感承接）。不是隐藏：向上滚、右侧轨、搜索、跳转都照样到得了。
+// 生产形状夹具上成对对照的数据见 .cursor/planning/2026-10-23-186-C-open-phase-plan.md §10。
+const INITIAL_VISIBLE_ROUNDS = 4
 const BATCH_LOAD_ROUNDS = 10
 const visibleRoundsCount = ref(INITIAL_VISIBLE_ROUNDS)
 const isLoadingEarlier = ref(false)
 const topSentinelRef = ref<HTMLElement | null>(null)
 let topObserver: IntersectionObserver | null = null
+// 浮动条「收到 N 条新动态」的数字（#254）：您从底部往上滚的那一刻起，新到的 Agent 消息（汇报 / 进度通知 / 任务进展 / 提问与计划卡）里，
+// 还在视口下方、没看到的条数。滚到看见一条就少一条；滚回底部 / 点浮动条 / 切换工作流清零。口径与重算见 awayCursor / recountNewBelow。
 const unreadNewMessagesCount = ref(0)
 const currentWorkflowId = ref<string | null>(null)
 const knownSessionIds = ref<Set<string>>(new Set())
@@ -266,7 +285,7 @@ const boundaryRounds = ref<Set<string>>(new Set())
 //     紧挨着锚点的几轮豁免 pv-cv（boundaryRounds），否则它们是占位、晚一帧才变高，浏览器的滚动锚定补不全（真实长会话与放慢 CPU 的实测都复现过）。
 const { settle: settleScroll, hold: holdAnchor, isActive: scrollJobActive } = useScrollSettle()
 // 末尾渐进渲染补齐时钉锚点用另一个实例（#169 第三期）：同一个实例里「新的取消旧的」，共用会让补齐打断一次正在进行的平滑滚动校准（反过来也一样）
-const { hold: holdTailAnchor, isActive: tailJobActive } = useScrollSettle()
+const { hold: holdTailAnchor, cancel: cancelTailHold, isActive: tailJobActive } = useScrollSettle()
 
 // 贴底补强（#222 / #833，纯逻辑见 lib/stickBottom.ts）：停在底部时，内容或容器大小的晚到变化（引用链接晚装饰、图片 / 字体晚加载、
 // 占位高度换成真实高度、窗口或输入区高度变化）会让 scrollHeight 变了而 scrollTop 没变，最后一条滑出底部；
@@ -276,21 +295,203 @@ const { hold: holdTailAnchor, isActive: tailJobActive } = useScrollSettle()
 let pinnedAtBottom = false
 let pinObserver: ResizeObserver | null = null
 let lastSize: SizeSnapshot | null = null
+// 迟到的帧里让掉的那次 repinIfPinned 当时的判定「变化之前是否贴底」，下一帧补跑时沿用：浏览器在那次布局里可能已经自己调过 scrollTop
+// （窗口变宽、内容变矮时的夹紧，或滚动锚定），它的 scroll 事件排到下一帧才派发，handleScroll 会拿调过的位置把 pinnedAtBottom 置假，
+// 而 lastSize 还停在变化之前的大小，「上一次的大小 + 现在的 scrollTop」也推算不对——不沿用就再也贴不回去（preview-stick-bottom「回到桌面宽度」）。
+// 用户真的向上滚的意图（滚轮 / 触摸 / 上翻键）在下一帧的输入事件里已经派发，由补跑里的 userHolding 拦住，不会因此被拽回去。
+let deferredPinned = false
 const columnRef = ref<HTMLElement | null>(null)
 
-function repinIfPinned() {
+function repinIfPinned(afterSkip = false) {
   const el = chatScrollContainer.value
   if (!el) return
+  // 迟到的帧（主线程刚被长任务占过）里不做决定，晚一帧再来（理由见 lib/followBottom.ts 的 isStaleFrame）：
+  // 这里直接 return，lastSize 不动，并把「变化之前是否贴底」记下来（deferredPinned）；连着两帧都迟到就不再让（afterSkip），免得持续卡顿时永远贴不上。
+  if (!afterSkip && currentFrameStale()) {
+    deferredPinned = deferredPinned || pinnedAtBottom || wasPinnedBeforeResize(lastSize, el.scrollTop)
+    retryRepinNextFrame()
+    return
+  }
   const now = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop, clientHeight: el.clientHeight }
-  // 变化之前贴着底部吗：滚动事件记下的标记，或「上一次的大小 + 现在的 scrollTop」推算（标记会因初次渲染中途的滚动事件而过期）
-  const wasPinned = pinnedAtBottom || wasPinnedBeforeResize(lastSize, now.scrollTop)
+  // 变化之前贴着底部吗：滚动事件记下的标记，或「上一次的大小 + 现在的 scrollTop」推算（标记会因初次渲染中途的滚动事件而过期），
+  // 或上一次让位那一刻记下的判定（见 deferredPinned）
+  const wasPinned = pinnedAtBottom || wasPinnedBeforeResize(lastSize, now.scrollTop) || (afterSkip && deferredPinned)
+  deferredPinned = false
   lastSize = { scrollHeight: now.scrollHeight, clientHeight: now.clientHeight }
   if (scrollJobActive() || tailJobActive()) return
+  // 用户刚表达过「向上看」（滚轮事件已处理、scroll 事件还没到）也让位：这一刻 pinnedAtBottom 还是旧的；让位期过后再看一次
+  if (userHolding(lastUpIntentAt, performance.now())) {
+    scheduleFollowAfterHold()
+    return
+  }
   const target = repinTarget(now, wasPinned)
   if (target !== null) {
     el.scrollTop = target
     pinnedAtBottom = true
   }
+}
+
+// ---- 跟随新内容贴底 + 用户让位（#186 C1，判定在 lib/followBottom.ts）----
+// 所有「内容变了、用户本来停在底部」的地方（新追加 / 新通知 / 新一轮）走 followBottom：至多写一次 scrollTop，已经在底部就一个字不写，
+// 复核也只在离底部还有距离时才写。用户一表达「向上看」（滚轮 / 手指下拖 / 上翻键）就让位，不等晚到的 scroll 事件；
+// 「滚到某一轮」的校准（settle）正在跑时同样让位。显式的「到底部」（scrollToBottom：回到底部按钮 / 发送消息 / 打开会话）不受限制。
+// 与 repinIfPinned 不同，这里不为「钉末尾锚点」（tailJobActive）让位：repinIfPinned 是大小变化的补强，错过一次下一次还会来；
+// 而 followBottom 的调用点是「内容真的变了」的一次性事件，补齐期间新到的内容若没人贴底，补齐结束后也没有谁再触发。
+// 两者同写 scrollTop 时，钉锚点自己会把「scrollTop 被动过而版面高度没变」认作用户接手而放手（useScrollSettle.hold），不会反复抢。
+let lastUpIntentAt: number | null = null
+let followRaf = 0
+let followFrames = 0
+let followCheckInput = false
+let followStaleSkipped = false
+let repinRetryRaf = 0
+let holdFollowTimer: ReturnType<typeof setTimeout> | null = null
+let followTimer: ReturnType<typeof setTimeout> | null = null
+let touchY: number | null = null
+
+function markUpIntent() {
+  lastUpIntentAt = performance.now()
+}
+/**
+ * 页面自己发起的跳转（搜索命中 / 点名确认卡 / 右侧轨 / 滚到某一轮 / 恢复胶囊）等同于「用户要看别处」（#186 C2a 的回归里抓到）：
+ *  ① 贴底的所有路径（跟随复核、大小变化补强）让位 USER_SCROLL_GRACE_MS；
+ *  ② 作废「贴着底部」的旧标记。跳转的第一步常常是把窗口撑开：更早的轮次插在视口上方，scrollHeight 变大而 scrollTop 没动、也没有 scroll 事件，
+ *     pinnedAtBottom / isScrolledUp 还停在「在底部」；紧接着摞展开 / 卡片挂载引起的第一次大小变化会被补强当成「底部的内容变了」，
+ *     把页面拽回底部，盖掉刚起跑的平滑滚动（preview-search「命中已答复的提问」：卡亮了边框，页面却停在最底部）。
+ * 跳转没有真的动页面（目标本来就在视口里）时，标记会在下一次滚动事件或下一次贴底请求里恢复，不会从此不再跟随。
+ */
+function beginJump() {
+  markUpIntent()
+  pinnedAtBottom = false
+  deferredPinned = false
+}
+function onWheelIntent(e: WheelEvent) {
+  if (isUpwardWheel(e.deltaY)) markUpIntent()
+}
+function onTouchStartIntent(e: TouchEvent) {
+  touchY = e.touches[0]?.clientY ?? null
+}
+function onTouchMoveIntent(e: TouchEvent) {
+  const y = e.touches[0]?.clientY
+  if (y === undefined) return
+  if (touchY !== null && isUpwardTouchMove(touchY, y)) markUpIntent()
+  touchY = y
+}
+function onKeyIntent(e: KeyboardEvent) {
+  if (isUpwardKey(e) && !isEditableTarget(e.target as HTMLElement | null)) markUpIntent()
+}
+
+/** 现在能不能跟随贴底。checkInput：只在一次请求的第一次尝试上查「有没有排着队的输入」（复核帧上鼠标一直在动会让它永远贴不上）。 */
+function followGateOpen(checkInput: boolean): boolean {
+  return mayFollow({
+    scrolledUp: isScrolledUp.value,
+    holding: userHolding(lastUpIntentAt, performance.now()),
+    inputPending: checkInput && isInputPending(),
+    settling: scrollJobActive(),
+  })
+}
+
+/** 现在是不是迟到的帧（只在动画帧 / ResizeObserver 回调里问才有意义，见 lib/followBottom.ts 的 isStaleFrame）。 */
+function currentFrameStale(frameTime?: number): boolean {
+  const t = frameTime ?? document.timeline.currentTime
+  return isStaleFrame(typeof t === 'number' ? t : null, performance.now())
+}
+
+/**
+ * 因为用户刚表达「向上看」而让掉的贴底：让位期过完再看一次，免得让位把「该跟随」变成永远不跟随。
+ * 用户真的往上滚了，scroll 事件会把 pinnedAtBottom 置假，这里就不动；没滚成（内容比视口矮、已在顶端、只是手搭在滚轮上），
+ * pinnedAtBottom 仍是真，补上这次被让掉的跟随（走 followBottom：动画帧里、仍受所有让位条件约束）。期间又有新的向上意图就接着等。
+ */
+function scheduleFollowAfterHold() {
+  if (holdFollowTimer || lastUpIntentAt === null) return
+  const wait = Math.max(0, USER_SCROLL_GRACE_MS - (performance.now() - lastUpIntentAt)) + 30
+  holdFollowTimer = setTimeout(() => {
+    holdFollowTimer = null
+    if (userHolding(lastUpIntentAt, performance.now())) scheduleFollowAfterHold()
+    else if (pinnedAtBottom) followBottom()
+  }, wait)
+}
+
+/** 在迟到的帧里让掉的 repinIfPinned：下一帧补一次（合并，只排一次；补的那次不再让）。 */
+function retryRepinNextFrame() {
+  if (repinRetryRaf) return
+  repinRetryRaf = requestAnimationFrame(() => {
+    repinRetryRaf = 0
+    repinIfPinned(true)
+  })
+}
+
+/** 贴底写一次：离底部还有距离才写，返回是否写了。 */
+function pinOnce(): boolean {
+  const el = chatScrollContainer.value
+  if (!el) return false
+  const target = repinTarget({ scrollHeight: el.scrollHeight, scrollTop: el.scrollTop, clientHeight: el.clientHeight }, true)
+  if (target !== null) el.scrollTop = target
+  pinnedAtBottom = true
+  return target !== null
+}
+
+/**
+ * 接下来的 frames 帧里，每帧在动画帧回调里复核一次（抵抗异步 DOM 展开导致的高度时滞，D-142）；多次请求合并成同一条复核链，每帧只做一次。
+ * checkInput：这一次请求的第一帧要不要查「有没有排着队的输入」（followBottom 的第一次尝试要查；显式贴底之后的复核不查）。
+ */
+function armFollowRecheck(frames: number, checkInput = false) {
+  followFrames = Math.max(followFrames, frames)
+  if (checkInput) followCheckInput = true
+  if (followRaf) return
+  const step = (frameTime: number) => {
+    followRaf = 0
+    if (followFrames <= 0) return
+    // 迟到的帧不做决定、让一帧（不占复核次数）：它带的是长任务开始之前的帧时间，排在后面的滚轮还没派发，scrollTop 也还没同步用户已经滚过的位移；
+    // 每条复核链最多让一帧，持续卡顿时下一帧照做。
+    if (!followStaleSkipped && currentFrameStale(frameTime)) {
+      followStaleSkipped = true
+      followRaf = requestAnimationFrame(step)
+      return
+    }
+    followFrames--
+    const check = followCheckInput
+    followCheckInput = false
+    if (followGateOpen(check)) pinOnce()
+    else if (userHolding(lastUpIntentAt, performance.now())) scheduleFollowAfterHold()
+    if (followFrames > 0) followRaf = requestAnimationFrame(step)
+    else followStaleSkipped = false
+  }
+  followRaf = requestAnimationFrame(step)
+}
+
+function cancelFollow() {
+  if (followRaf) {
+    cancelAnimationFrame(followRaf)
+    followRaf = 0
+  }
+  if (repinRetryRaf) {
+    cancelAnimationFrame(repinRetryRaf)
+    repinRetryRaf = 0
+  }
+  if (followTimer) {
+    clearTimeout(followTimer)
+    followTimer = null
+  }
+  if (holdFollowTimer) {
+    clearTimeout(holdFollowTimer)
+    holdFollowTimer = null
+  }
+  followFrames = 0
+  followCheckInput = false
+  followStaleSkipped = false
+  deferredPinned = false
+}
+
+/**
+ * 内容变了、用户本来停在底部：跟着贴底。
+ * 第一次尝试也放进下一帧的动画帧回调里，不在内容变化的当下（微任务里）同步写：滚轮 / 触摸这类连续输入是在一帧的开头、
+ * 动画帧回调之前派发给页面的，主线程被占着时它们一直排着队；同步写会抢在它们之前，把用户刚滚到的位置盖掉
+ * （scroll-yield 套件实测：主线程忙时用户上滚 300px、同时来了新一轮，同步贴底先于滚轮监听跑，isInputPending 也报 false）。
+ * 动画帧回调仍在这一帧绘制之前，新内容不会先露出来一帧再被贴底。
+ * 主线程刚被长任务占过的「迟到的帧」连这个也不信（armFollowRecheck 里让一帧，见 lib/followBottom.ts 的 isStaleFrame）。
+ */
+function followBottom() {
+  armFollowRecheck(FOLLOW_RECHECK_FRAMES + 1, true)
 }
 
 // ---- 交付锚点与恢复胶囊（只读标记，缺省时界面与以前一致）----
@@ -378,6 +579,8 @@ async function loadEarlierRounds() {
   const container = chatScrollContainer.value
   const oldScrollHeight = container.scrollHeight
   const oldScrollTop = container.scrollTop
+  // 载入之前是不是已经贴着底部（内容比视口矮、哨兵一直在范围内的情形）：不是的话，下面放回锚点之后要把「贴底基线」作废（理由见 nextTick 里）
+  const wasAtBottom = pinnedAtBottom || wasPinnedBeforeResize(lastSize, oldScrollTop)
   // 锚点：载入前第一轮里的第一条会话块（同一个 DOM 节点，按 session_id 做 key，新轮次插到它上面它也不会重建）及它在视口里的位置。
   // 钉的是这块内容而不是轮次块的顶边：轮次顶上的日期分隔条会随新轮次插到上面而消失（同一天不再重复显示），那几十像素是内容自己的变化，
   // 钉顶边会让用户正在看的内容跟着上移一截。
@@ -403,6 +606,12 @@ async function loadEarlierRounds() {
       } else {
         c.scrollTop = oldScrollTop + (c.scrollHeight - oldScrollHeight)
       }
+      // 用户本来不在底部：上面放回锚点让 scrollTop 随内容长高变大，而 lastSize 还停在载入之前的大小——「上一次的大小 + 现在的 scrollTop」
+      // 会算出负的离底，被当成「变化之前贴着底部」（为浏览器滚动锚定把 scrollTop 往下挪的情形设计的）。紧跟着的那次大小变化若落在迟到的帧里，
+      // repinIfPinned 会把这个判定带到下一帧补跑；锚点校准一放手（用户或惯性滚动动了 scrollTop、校准自己结束），补跑就把页面拽到最底部，
+      // 顶部哨兵也再不会通知（preview-light「向上载入」：scrollTop 落在 41387 = 最底部、哨兵在视口上方 4.1 万像素）。
+      // 基线作废：下一次观察到的大小才是新基线，这段时间里的贴底只认 pinnedAtBottom（真的在底部时才为真）。
+      if (!wasAtBottom) lastSize = null
     }
     setTimeout(() => {
       isLoadingEarlier.value = false
@@ -459,15 +668,23 @@ const inboxNow = ref(Date.now())
 let inboxClock: number | undefined
 
 // ---- 轮次之外的所有条目：合并成一条按提交时间排序的流（#52 / #105）----
-// 您的追加、智能体的进度通知、任务进展卡、确认 / 授权卡、文档决策汇总卡、守护告警、恢复胶囊，
+// 您的追加、智能体的进度通知、任务进展卡、确认 / 授权卡、文档决策汇总卡、恢复胶囊，
 // 以前是各自独立的几条流，每条流各自落位、同一个间隙里再一类一类渲染，所以会错序。
 // 现在先整体按提交时间排好，再落在「第一个比它晚创建的轮次」之前，比所有轮次都新的落在末尾；
 // 用全部轮次计算而不是当前窗口，分页展开更早的轮次时位置不会漂移。
 const confirmStore = useConfirmStore()
 // 任务进展卡只在这个工作流开启过异步模式时出现（同步工作流的时间线保持原样）。
 const workStore = useWorkItemStore()
+// 条目是每次重算时现拼的包装对象，卡片拿它当属性；不复用的话，任何一个来源有动静就让几百张通知卡整个重渲染（#186 C2a，原理见 lib/timeline.ts 的 reuseEntries）。
+// entryMemo 只是个不响应式的「上一次」缓存：复用与否不影响结果，只影响下游是不是白算一遍。
+let entryMemo: { byKey: ReadonlyMap<string, TimelineEntry>; list: ReadonlyArray<TimelineEntry> } = { byKey: new Map(), list: [] }
+// 分支会话（#236）：主会话 ↔ 分支的消息与建立 / 结束事件，来自分支仓库的消息流；只有「有分支关系」的会话才有内容，
+// 别的会话这里恒为空数组、不多任何条目。工作流编号与页头取同一个口径（选中的会话，没有再退回当前会话）。
+const branchStore = useBranchStore()
+const branchWorkflowId = computed(() => sessionStore.selectedSession?.workflow_id || sessionStore.currentSession?.workflow_id || '')
 const timelineEntries = computed<TimelineEntry[]>(() => {
   const entries: TimelineEntry[] = []
+  entries.push(...branchEntries(branchStore.itemsFor(branchWorkflowId.value)))
   for (const q of sessionStore.queuedFeedbacks ?? []) {
     entries.push({ kind: 'inbox', key: `inbox-${q.id}`, at: q.created_at, q })
   }
@@ -475,7 +692,6 @@ const timelineEntries = computed<TimelineEntry[]>(() => {
     entries.push({ kind: 'notice', key: `notice-${n.session_id}`, at: n.created_at, session: n })
   }
   entries.push(...confirmEntries(confirmStore.timelineItems))
-  entries.push(...guardEntries(confirmStore.board.guard_alerts))
   for (const c of workflowCapsules.value) {
     entries.push({ kind: 'capsule', key: `capsule-${c.revision}`, at: c.created_at, capsule: c })
   }
@@ -485,7 +701,8 @@ const timelineEntries = computed<TimelineEntry[]>(() => {
       entries.push({ kind: 'task', key: card.key, at: card.at, card })
     }
   }
-  return entries
+  entryMemo = reuseEntries(entryMemo, entries)
+  return entryMemo.list as TimelineEntry[]
 })
 // 每一轮带上「你的回复」的时刻：夹在提问与回复之间的条目放进卡里（见 placeTimeline）
 const timelinePlacement = computed(() =>
@@ -583,8 +800,14 @@ function firstTailBlockEl(): HTMLElement | null {
 }
 
 /**
- * 补齐一批。插入点在已渲染的第一块之上：视口在它或它下面（用户停在底部的常见情形）时，把这一块钉在原位，视口里的内容纹丝不动；
- * 用户正在看插入点上面（轮次）时不钉，免得把视口推走。钉锚点用独立的实例，不打断正在进行的平滑滚动校准。
+ * 补齐一批。插入点在已渲染的第一块之上，用什么保住视口由 tailHoldMode 定（理由见 lib/tailWindow.ts）：
+ *   · 用户停在底部：不钉锚点，批插入之后走贴底（followBottom；内容再变由 ResizeObserver 的 repinIfPinned 接着贴）。
+ *     以前这里也钉第一块，补齐期间锚点下方长高（占位换真实高度、末尾晚到的卡 / 新通知）时钉锚点写得最晚，页面停在底部上方（#252）；
+ *   · 视口在已渲染的第一块或它下面、但没贴底：把这一块钉在原位，视口里的内容纹丝不动；
+ *   · 用户正在看插入点上面（轮次）：不钉，免得把视口推走。
+ * 钉锚点用独立的实例，不打断正在进行的平滑滚动校准；这一批改走贴底时，前一批（当时没贴底）留下的钉锚点要撤掉，免得又和贴底抢 scrollTop。
+ * 批大小固定（TAIL_BATCH_BLOCKS）：#186 C1 试过按时间预算把批切小（每个切片约 12 ms、AIMD 调大小），实验室的成对对照里
+ * 空闲回调那几个任务并没有变短（每次补齐有近似固定的渲染 / 版面成本，切小只会让总量变多），已撤销——没有对照数据别再改回去（D-381）。
  */
 async function fillTailBatch() {
   const container = chatScrollContainer.value
@@ -593,10 +816,23 @@ async function fillTailBatch() {
   try {
     const first = firstTailBlockEl()
     const firstTop = first ? offsetInContainer(container, first) : 0
-    const hold = first !== null && shouldHoldFirst(firstTop)
+    // 贴底与 repinIfPinned 同一口径：滚动事件记下的标记，或「上一次的大小 + 现在的 scrollTop」推算，或迟到的帧里让掉的那次的判定（deferredPinned）；
+    // 三项都没有才看当前几何。只看标记不够：内容长高之后才派发的 scroll 事件（主线程忙时晚到一帧）会按长高之后的几何把标记翻成假，
+    // 批这时若判成没贴底就钉锚点，而钉锚点期间 repinIfPinned 让位、又已把长高记进 lastSize，之后没有谁再把页面贴回底部，
+    // 停在底部上方几百像素（#252 的残留，生产上见过一次，离底 723px）。
+    // 用户刚表达过「向上看」时按没贴底算（他正要离开底部，钉锚点保住他正在看的内容）
+    const wasPinned = pinnedAtBottom || deferredPinned || wasPinnedBeforeResize(lastSize, container.scrollTop)
+    const gap = userHolding(lastUpIntentAt, performance.now())
+      ? Number.POSITIVE_INFINITY
+      : wasPinned
+        ? 0
+        : bottomGap({ scrollHeight: container.scrollHeight, scrollTop: container.scrollTop, clientHeight: container.clientHeight })
+    const mode = first === null ? 'none' : tailHoldMode(firstTop, gap)
+    if (mode === 'bottom') cancelTailHold()
     pinTailStart(nextTailStart(tailStart.value))
     await nextTick()
-    if (hold && first && first.isConnected && chatScrollContainer.value === container) holdTailAnchor(container, first, firstTop)
+    if (mode === 'bottom') followBottom()
+    else if (mode === 'anchor' && first && first.isConnected && chatScrollContainer.value === container) holdTailAnchor(container, first, firstTop)
   } finally {
     tailFilling = false
   }
@@ -661,6 +897,63 @@ const unreadMarkKey = computed(() => {
 watch(() => currentWorkflowId.value || confirmStore.workflowId || '', wf => void previewUnread.open(wf), { immediate: true })
 // 渲染出新的 Agent 消息（SSE 刷新数据之后）：停在底部就重新计时
 watch(() => renderedAgentMs(unreadList.value), () => previewUnread.touch())
+// 「离开底部之后的新动态」浮动条的数字（#254）。以前这个数字只数新增的轮次（conversationRounds），进度通知 / 任务进展 / 提问卡都不计，
+// 而且只增不减（滚到哪都不变），只有一条时还干脆不写数字——所以「数字没有维护」。现在的口径：
+//   awayCursor：您从底部往上滚（> 80px）的那一刻，已渲染的最晚一条 Agent 消息的毫秒（在底部为 null）；之后严格晚于它的 Agent 消息才是「新动态」；
+//   newDynamics：按显示顺序列出有新动态的顶层项与各自条数（lib/previewUnread.newSinceAway，口径同未读：您自己的话、系统行不计）；
+//   数字 = 其中还没被看到的条数：项的顶边进入视口就算看到了（seenNewKeys 记着，滚走了再回来不重复计），还没渲染出来的按没看到算。
+// 重算时机：滚动（rAF 合并）、列表变了（新消息到 / 渲染补齐）；切换工作流、滚回底部、点浮动条时清空。
+const awayCursor = ref<number | null>(null)
+const seenNewKeys = new Set<string>()
+const newDynamics = computed(() => (awayCursor.value === null ? [] : newSinceAway(unreadList.value, awayCursor.value)))
+function clearAway() {
+  awayCursor.value = null
+  seenNewKeys.clear()
+  unreadNewMessagesCount.value = 0
+}
+// 顶层项在 DOM 里的元素：间隙里的块带 data-timeline-key，轮次的元素 id 是 session-<session_id>
+function itemElOf(container: HTMLElement, key: string): HTMLElement | null {
+  return (
+    container.querySelector<HTMLElement>(`[data-timeline-key="${CSS.escape(key)}"]`) ??
+    container.querySelector<HTMLElement>(`#${CSS.escape(`session-${key}`)}`)
+  )
+}
+function recountNewBelow() {
+  const container = chatScrollContainer.value
+  const list = newDynamics.value
+  if (!container || !list.length) {
+    unreadNewMessagesCount.value = 0
+    return
+  }
+  // 项的顶边在视口底边之上（含刚好露头）= 看到它的开头了
+  const limit = container.getBoundingClientRect().bottom - 1
+  const { count, seen } = unseenNewCount(
+    list,
+    key => {
+      const el = itemElOf(container, key)
+      return !!el && el.getBoundingClientRect().top < limit
+    },
+    seenNewKeys,
+  )
+  for (const key of seen) seenNewKeys.add(key)
+  unreadNewMessagesCount.value = count
+}
+let recountRaf = 0
+function scheduleRecountNewBelow() {
+  if (recountRaf) return
+  recountRaf = requestAnimationFrame(() => {
+    recountRaf = 0
+    recountNewBelow()
+  })
+}
+function cancelRecountNewBelow() {
+  if (recountRaf) cancelAnimationFrame(recountRaf)
+  recountRaf = 0
+}
+// 列表变了（新消息到 / 渲染补齐）：等 DOM 更新之后重算。停在底部（awayCursor 为 null）时没有什么要数，不排帧——末尾每补一批通知这里都会触发
+watch(newDynamics, () => {
+  if (awayCursor.value !== null) scheduleRecountNewBelow()
+}, { flush: 'post' })
 // 间隙里的条目渲染（轮次之间与末尾两处共用，只写一份）。
 // cv：这个间隙里的进度通知卡允许套离屏跳过渲染（pv-cv-notice，#169）。只有「末尾」那一处传它：
 // 轮次之间的间隙在轮次组（turn-group）里面，更早的轮次已经整组套了 pv-cv，最近 20 轮要精确的几何（贴底 / 向上载入的锚点），
@@ -674,6 +967,7 @@ const liveNotices = computed(() => liveNoticeKeys(props.notices ?? []))
 // 卡挂载时自己读取 focusRef 完成滚动与高亮（见 ConfirmTimelineCard）。
 watch(() => confirmStore.focusRef, ref => {
   if (!ref) return
+  beginJump() // 卡自己平滑滚过去并做落地校准（useConfirmFocus.reveal，#253），不经过本列表的校准任务；贴底的路径要让位，否则会把刚起跑的平滑滚动盖掉
   const closed = stackKeysHoldingConfirm(timelineBlocks.value, ref).filter(key => !expandedStacks.value.has(key))
   if (closed.length) expandedStacks.value = new Set([...expandedStacks.value, ...closed])
   const placement = timelinePlacement.value
@@ -703,13 +997,13 @@ function toggleStack(key: string) {
 }
 
 // 出现新的追加、或状态变化撑高了气泡时：用户本来就停在底部就跟着滚到底部（否则最新一条会被输入区盖住），
-// 正在向上翻历史则不打扰。
+// 正在向上翻历史则不打扰（followBottom 里还会再看一遍：滚轮刚到、scroll 事件还没到的那一刻同样让位，#186 C1）。
 watch(() => sessionStore.queuedFeedbacks, () => {
-  if (!isScrolledUp.value) nextTick(() => scrollToBottom(false))
+  if (!isScrolledUp.value) nextTick(followBottom)
 })
 // 新的进度通知 / 卡片同理
 watch(() => timelineEntries.value.map(e => e.key).join('|'), () => {
-  if (!isScrolledUp.value) nextTick(() => scrollToBottom(false))
+  if (!isScrolledUp.value) nextTick(followBottom)
 })
 function statusOf(q: QueuedFeedback): InboxStatusView {
   return inboxStatus(q, inboxNow.value)
@@ -737,9 +1031,14 @@ onMounted(() => {
   setupTopObserver()
   setupPinObserver()
   inboxClock = window.setInterval(tickInboxClock, 10_000)
+  // 上翻类按键是键盘事件，落在 body 上而不是滚动容器上（容器不可聚焦），只能挂在 window；输入框里的按键在 onKeyIntent 里排除
+  window.addEventListener('keydown', onKeyIntent, { passive: true })
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeyIntent)
+  cancelFollow()
+  cancelRecountNewBelow()
   if (topObserver) {
     topObserver.disconnect()
     topObserver = null
@@ -777,7 +1076,7 @@ watch(() => props.conversationRounds, (newRounds) => {
   if (targetWId !== currentWorkflowId.value) {
     currentWorkflowId.value = targetWId
     previewSearch.close() // 搜索面板是按工作流搜的，换了工作流就关掉
-    unreadNewMessagesCount.value = 0
+    clearAway()
     visibleRoundsCount.value = INITIAL_VISIBLE_ROUNDS
     boundaryRounds.value = new Set()
     // 末尾渐进渲染也从头来：撤掉上一个工作流还没补完的批次，起点重新钉（见 watch(() => tailBlocks…) 与 lib/tailWindow）
@@ -799,18 +1098,13 @@ watch(() => props.conversationRounds, (newRounds) => {
       knownSessionIds.value.add(s.session_id)
     }
 
-    // 仅当用户向上滚动查看历史时，才展示未读新消息浮动提醒
-    if (isScrolledUp.value) {
-      unreadNewMessagesCount.value += newlyAddedSessions.length
-    } else {
-      unreadNewMessagesCount.value = 0
-      nextTick(() => scrollToBottom(true))
-    }
+    // 停在底部：跟着新轮次到底。往上滚了不动——浮动条的数字由 newDynamics 维护（不只数新轮次，#254）
+    if (!isScrolledUp.value) nextTick(followBottom)
   }
 }, { deep: true, immediate: true })
 
 function handleJumpToLatest() {
-  unreadNewMessagesCount.value = 0
+  clearAway()
   scrollToBottom(true)
 }
 
@@ -835,6 +1129,7 @@ function formatDateTimeCustom(dateStr?: string): string {
 async function scrollToSession(sessionId: string) {
   const targetIdx = props.conversationRounds.findIndex(s => s.session_id === sessionId)
   if (targetIdx === -1) return
+  beginJump()
 
   const total = props.conversationRounds.length
   const neededVisibleCount = total - targetIdx
@@ -871,36 +1166,24 @@ async function scrollToSession(sessionId: string) {
   })
 }
 
+// 显式的「到底部」：回到底部按钮 / 发送消息 / 打开会话（FeedbackView 与输入区也调它）。一定要到，并清掉让位状态；
+// 只写 scrollTop = scrollHeight（以前还先 scrollIntoView 锚点，见模板里底部留白的注释），已经在底部就不写。
+// 之后的复核只在离底部还有距离、且用户没有在这期间表达「向上看」时才写（#186 C1）。
+// smooth 只决定复核的方式：true（点按钮）250 ms 后一次；false（首次载入 / 刷新 / 切换会话）下两帧各一次（D-142）。
 function scrollToBottom(smooth = true) {
+  lastUpIntentAt = null
   isScrolledUp.value = false
-  unreadNewMessagesCount.value = 0
+  clearAway()
   emit('scroll-state-change', false)
-  // 瞬时贴底：马上就在底部了，晚到的变化接着贴（平滑滚动不动它——动画途中的滚动事件会照实更新，落地后自然为真，别把动画变成一跳）
-  if (!smooth) pinnedAtBottom = true
-
-  const doScroll = () => {
-    if (bottomAnchorRef.value) {
-      bottomAnchorRef.value.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' })
-    }
-    if (chatScrollContainer.value) {
-      chatScrollContainer.value.scrollTop = chatScrollContainer.value.scrollHeight
-    }
-  }
-
-  doScroll()
-
+  pinOnce()
   if (smooth) {
-    setTimeout(() => {
-      doScroll()
-    }, 250)
+    if (followTimer) clearTimeout(followTimer)
+    followTimer = setTimeout(() => {
+      followTimer = null
+      if (!userHolding(lastUpIntentAt, performance.now())) pinOnce()
+    }, FOLLOW_RECHECK_DELAY_MS)
   } else {
-    // 首次加载/刷新/切换会话：双帧 rAF 校准，抵抗异步 DOM 展开导致的高度时滞 (D-142)
-    requestAnimationFrame(() => {
-      doScroll()
-      requestAnimationFrame(() => {
-        doScroll()
-      })
-    })
+    armFollowRecheck(FOLLOW_RECHECK_FRAMES)
   }
 }
 
@@ -954,6 +1237,7 @@ const previewSearch = usePreviewSearch()
 async function revealEntry(entryKey: string) {
   let found = findEntryBlock(timelineBlocks.value, entryKey)
   if (!found) return null
+  beginJump()
   // 在末尾的块可能还没渲染（渐进渲染，#169 第三期）：先让它露出来
   if (found.gapKey === TIMELINE_TAIL_KEY) revealTailBlock(found.block.key)
   const roundId = roundIdOfGap(found.gapKey)
@@ -1013,7 +1297,7 @@ async function jumpToHit(hit: ChatMessage) {
       await revealEntry(target.key)
       confirmStore.focusRef = ''
       await nextTick()
-      confirmStore.focusRef = target.ref
+      confirmStore.focusRef = target.ref // 点名即 beginJump（上面 focusRef 的监听里）：让位期从「卡就要滚过去」这一刻重新算起，窗口撑开要等网络
       return
     case 'entry':
       if (await scrollToEntry(target.key)) return
@@ -1030,13 +1314,17 @@ function handleScroll() {
   const scrolledUp = scrollHeight - (scrollTop + clientHeight) > 80
   isScrolledUp.value = scrolledUp
   emit('scroll-state-change', scrolledUp)
+  // 离开底部那一刻记下「已经看到的最新 Agent 消息」，之后新到的才算新动态；滚回底部清空（#254）。还没有任何已渲染的 Agent 消息（毫秒为 0）时先不记：
+  // 记成 0 会让之后渲染出来的全部旧消息都被算成新的
+  if (scrolledUp) {
+    if (awayCursor.value === null) {
+      const rendered = renderedAgentMs(unreadList.value)
+      if (rendered > 0) awayCursor.value = rendered
+    }
+    scheduleRecountNewBelow()
+  } else clearAway()
   // 最近一次滚动之后是否仍紧贴底部（4px 容差）：大小变化时是否重新贴底只看它（lib/stickBottom.ts）
   pinnedAtBottom = isPinnedAtBottom({ scrollHeight, scrollTop, clientHeight })
-
-  // 滚回底部时自动清除未读计数
-  if (!scrolledUp) {
-    unreadNewMessagesCount.value = 0
-  }
 
   // 向上滚动触顶或接近顶部 (scrollTop < 250px) 时自动无感加载更早轮次
   if (scrollTop < 250 && hasMoreEarlierRounds.value && !isLoadingEarlier.value) {
@@ -1062,7 +1350,7 @@ defineExpose({
   <div class="pv-list flex-1 overflow-hidden relative">
     <!--
       一个间隙里的条目：按 groupBlocks 分好的块依次渲染。连续的可叠卡片成一摞（默认收起，点开看全部），
-      其余各自单独一块——您的话、智能体的话、还没答复的提问 / 授权、守护告警、恢复胶囊永远摊开。
+      其余各自单独一块——您的话、智能体的话、还没答复的提问 / 授权、恢复胶囊永远摊开。
       在「轮次之间」与「末尾」两处用 <ReuseGap> 渲染，这里只定义一次。
     -->
     <DefineGap v-slot="{ blocks, cv }">
@@ -1080,16 +1368,15 @@ defineExpose({
         v-bind="railDomAttrs(railMetaOfBlock(block))"
         :class="noticeCvClass(liveNotices, block, cv)"
       >
-        <!-- compact：没有正文的事件（任务进展 / 已处理的提问与决策 / 告警 / 恢复胶囊 / 卡片摞）都是 32px 的事件行（#120 · D-273 阶段 C2；经典列表不传它） -->
+        <!-- 没有正文的事件（任务进展 / 已处理的提问与决策 / 告警 / 恢复胶囊 / 卡片摞）都是 32px 的事件行（#120 · D-273 阶段 C2） -->
         <CardStack
           v-if="block.type === 'stack'"
           :entries="block.entries"
           :expanded="expandedStacks.has(block.key)"
-          compact
           @toggle="toggleStack(block.key)"
         >
           <template #card="{ entry }">
-            <TimelineCardEntry :entry="entry" compact />
+            <TimelineCardEntry :entry="entry" />
           </template>
         </CardStack>
         <!-- 您的追加（D-212 的追加指令收件箱）：靠右的统一消息卡，状态由这里的 10 秒时钟算好后传进去（#120 · D-273 阶段 C） -->
@@ -1101,7 +1388,6 @@ defineExpose({
         />
         <CapsuleMarker
           v-else-if="block.entry.kind === 'capsule'"
-          compact
           :capsule="block.entry.capsule"
           :expanded="expandedCapsules.has(block.entry.capsule.revision)"
           :time-text="formatDateTimeCustom(block.entry.capsule.created_at)"
@@ -1110,15 +1396,22 @@ defineExpose({
           @jump="scrollToSession(block.entry.capsule.basis?.anchor_session_id || '')"
           @copy="copyText"
         />
-        <!-- 进度通知是正文，不折叠：套统一消息卡（#120 · D-273 阶段 B）；其余没有正文的卡片走事件行（compact） -->
+        <!-- 进度通知是正文，不折叠：套统一消息卡（#120 · D-273 阶段 B）；其余没有正文的卡片走事件行 -->
         <PreviewNoticeCard v-else-if="block.entry.kind === 'notice'" :entry="block.entry" />
+        <!-- 分支会话（#236）：主会话 ↔ 分支的话（具名卡，写明是谁说的）与分支建立 / 结束事件行 -->
+        <PreviewBranchCard
+          v-else-if="block.entry.kind === 'branch'"
+          :entry="block.entry"
+          :workflow-id="branchWorkflowId"
+          :titles="branchStore.titlesFor(branchWorkflowId)"
+        />
         <!-- 还要您处理的提问 / 计划确认：统一消息卡，作答区在卡里（#120 · D-273 阶段 C3）；答复 / 忽略后条目变成已处理，下一帧起走下面的事件行 -->
         <PreviewConfirmCard
           v-else-if="block.entry.kind === 'confirm' && needsAnswer(block.entry.item)"
           :item="block.entry.item"
           :workflow-id="confirmStore.workflowId"
         />
-        <TimelineCardEntry v-else :entry="block.entry" compact />
+        <TimelineCardEntry v-else :entry="block.entry" />
       </div>
       </template>
     </DefineGap>
@@ -1129,10 +1422,36 @@ defineExpose({
       class="h-full overflow-y-auto max-md:overflow-x-hidden px-3 sm:px-8 py-4 sm:py-6 space-y-6 sm:space-y-8 transition-[padding] duration-150 no-scrollbar scrollbar-none"
       :class="props.hasDraftImages ? 'pb-28 sm:pb-32' : 'pb-14 sm:pb-16'"
       @scroll="handleScroll"
+      @wheel.passive="onWheelIntent"
+      @touchstart.passive="onTouchStartIntent"
+      @touchmove.passive="onTouchMoveIntent"
     >
+      <!--
+        整表还没到（#186 Q117 a）：只画骨架。简略列表里的几个壳不画（见 FeedbackView 的 timelineWaiting）：整表到达后版面一下长高数万像素再贴底，
+        用户会先看到一屏无关内容然后整页跳走。骨架撑满视口高度，整表到达那一刻整块换成最近一段并贴好底，不产生版面位移。
+      -->
+      <div
+        v-if="props.loading"
+        data-testid="pv-skeleton"
+        role="status"
+        aria-busy="true"
+        aria-label="正在载入会话"
+        class="max-w-4xl mx-auto min-h-[60vh] space-y-8 sm:space-y-10 pr-2 sm:pr-6 animate-pulse motion-reduce:animate-none"
+      >
+        <div v-for="n in 3" :key="n" class="space-y-3 rounded-xl border border-border/40 bg-card/30 p-4 sm:p-5">
+          <div class="flex items-center gap-2">
+            <div class="h-3 w-16 rounded bg-muted/60"></div>
+            <div class="h-3 w-24 rounded bg-muted/40"></div>
+          </div>
+          <div class="h-3 w-11/12 rounded bg-muted/50"></div>
+          <div class="h-3 w-9/12 rounded bg-muted/50"></div>
+          <div class="h-3 w-7/12 rounded bg-muted/40"></div>
+        </div>
+      </div>
+
       <!-- Empty State -->
       <div
-        v-if="props.conversationRounds.length === 0 && timelineEntries.length === 0"
+        v-else-if="props.conversationRounds.length === 0 && timelineEntries.length === 0"
         class="flex flex-col items-center justify-center min-h-[50vh] text-center p-8 space-y-3"
       >
         <Inbox class="w-12 h-12 text-muted-foreground stroke-[1.2]" />
@@ -1175,7 +1494,7 @@ defineExpose({
           data-testid="turn-group"
         >
         <!--
-          轮次之间的所有条目（您的追加 / 智能体的进度通知 / 任务进展卡 / 确认与授权卡 / 文档决策汇总 / 守护告警 / 恢复胶囊）：
+          轮次之间的所有条目（您的追加 / 智能体的进度通知 / 任务进展卡 / 确认与授权卡 / 文档决策汇总 / 恢复胶囊）：
           合并成一条按提交时间排序的流再渲染；连续的卡片叠成一摞（#52 / #105）。
         -->
         <ReuseGap :blocks="timelineBlocks[session.session_id] || []" />
@@ -1267,17 +1586,21 @@ defineExpose({
           <ReuseGap :blocks="visibleTailBlocks" :cv="true" />
         </div>
 
-        <!-- 底部物理定位锚点 (D-142: 确保 100% 直达会话流最新最底部，消灭虚拟高度塌陷和高度时滞导致的半途卡顿) -->
-        <div ref="bottomAnchorRef" class="h-0 w-full pointer-events-none opacity-0"></div>
+        <!--
+          底部留白：space-y 在它上面加一段间距，最后一条与输入区之间留出呼吸空间。
+          以前它还是 scrollIntoView 的锚点（D-142），#186 C1 起贴底只写 scrollTop = scrollHeight——scrollIntoView 把位置挪到锚点而不是真正的底部，
+          紧跟着的 scrollTop 又把它挪回去，每次两次强制版面、没有净位移；元素本身保留，版面不变。
+        -->
+        <div class="h-0 w-full pointer-events-none opacity-0" aria-hidden="true"></div>
       </div>
     </div>
 
     <!--
-      右侧轨（#120 阶段 2）：取代经典的 TimelineScrubber。列表里每个带 data-rail-* 的条目在轨上都有一道刻度，
+      右侧轨（#120 阶段 2；取代了原先经典列表的微缩轴）：列表里每个带 data-rail-* 的条目在轨上都有一道刻度，
       位置按真实位置等比缩放、长度与颜色按类型 / 状态；点击跳转、悬停看标题；内容不足 1.5 屏时自己隐藏（桌面宽度才有）。
     -->
     <PreviewTimelineRail
-      v-if="props.conversationRounds.length > 0 || timelineEntries.length > 0"
+      v-if="!props.loading && (props.conversationRounds.length > 0 || timelineEntries.length > 0)"
       :scroll-el="chatScrollContainer"
       :has-earlier="hasMoreEarlierRounds"
       :loading-earlier="isLoadingEarlier"
@@ -1297,7 +1620,7 @@ defineExpose({
     >
       <div
         v-if="unreadNewMessagesCount > 0"
-        class="absolute bottom-12 sm:bottom-14 left-1/2 -translate-x-1/2 z-40 select-none pointer-events-auto"
+        class="absolute bottom-12 sm:bottom-14 left-1/2 -translate-x-1/2 w-max max-w-[92%] z-40 select-none pointer-events-auto"
       >
         <button
           type="button"
@@ -1307,13 +1630,13 @@ defineExpose({
         >
           <Sparkles class="w-3.5 h-3.5" />
           <span>
-            {{ unreadNewMessagesCount === 1 ? '收到 AI 最新方案汇报' : `收到 ${unreadNewMessagesCount} 条新动态` }} · 点击直达最新 ↓
+            {{ newDynamicsText(unreadNewMessagesCount) }} · 点击直达最新 ↓
           </span>
         </button>
       </div>
     </Transition>
 
-    <!-- 消息搜索（E-c1）：入口是会话区上方的「搜索消息」（ViewTrialLinks，只在预览视图出现）；点中结果后面板收成一行输入条，目标卡露出来 -->
+    <!-- 消息搜索（E-c1）：入口是会话区上方的「搜索消息」（MessageSearchLink）；点中结果后面板收成一行输入条，目标卡露出来 -->
     <PreviewSearchPanel
       v-if="previewSearch.open.value"
       :workflow-id="confirmStore.workflowId || currentWorkflowId || ''"
@@ -1326,7 +1649,7 @@ defineExpose({
 <style scoped>
 /*
   竖图底色统一（#120 阶段 1）：附件缩略图用 bg-muted，Markdown 内嵌图在这里补同一个底色（--muted 就是 bg-muted 的值，暗色主题自动跟着换）。
-  作用域只限预览列表：不改共享的 markdownSafe / MarkdownRenderer，经典视图里的内嵌图保持原样。
+  作用域只限预览列表：不改共享的 markdownSafe / MarkdownRenderer，其它用到它们的地方保持原样。
 */
 .pv-list :deep(.markdown-body img) {
   background-color: var(--muted);
@@ -1369,7 +1692,7 @@ defineExpose({
 
 /*
   右侧轨点击跳转后的落点提示（#120 阶段 2）：给目标条目的根节点短暂套一圈外框再淡出。
-  轮次走经典的 ring 高亮（highlightedSessionId），这里只管其余条目（data-rail-flash 由 onRailJump 加上 / 去掉）。
+  轮次走原有的 ring 高亮（highlightedSessionId），这里只管其余条目（data-rail-flash 由 onRailJump 加上 / 去掉）。
 */
 .pv-list :deep([data-rail-flash]) {
   animation: pv-rail-flash 1.6s ease-out 1;

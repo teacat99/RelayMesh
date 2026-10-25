@@ -7,18 +7,26 @@
 // 一旦有智能体接入，按钮自己消失，换成「运行」按钮接着它。点开是弹窗（EnableAgentDialog），选项、预览与确认都在弹窗里。
 import { computed, ref } from 'vue'
 import { Rocket } from 'lucide-vue-next'
-import EnableAgentDialog from '@/components/terminal/EnableAgentDialog.vue'
 import { isAwaitingAgent } from '@/lib/newSession'
 import { enableSupported } from '@/lib/terminal/sessionEnable'
 import { useSessionStore } from '@/stores/session'
 import { useTerminalStore } from '@/stores/terminal'
+import { lazyDialog } from '@/utils/lazyComponent'
+import { chunkLoaders } from '@/utils/lazyChunks'
 
 const props = defineProps<{ workflowId: string }>()
 
 const sessionStore = useSessionStore()
 const terminal = useTerminalStore()
 
+// 弹窗是懒加载块（#186）：第一次点「启用 Agent」才挂载（块此时才取；悬停按钮时已提前取），挂上之后保持挂载。
+const EnableAgentDialog = lazyDialog(chunkLoaders.enableAgent)
 const open = ref(false)
+const armed = ref(false)
+function openDialog() {
+  armed.value = true
+  open.value = true
+}
 
 const awaiting = computed(() => {
   const cur = sessionStore.selectedSession
@@ -38,11 +46,12 @@ const visible = computed(() => !!props.workflowId && terminal.gateOpen && suppor
     title="在主机上无人值守地新开一个 Cursor CLI 对话，让它接入这个会话（不用再把启动提示词复制给智能体）"
     aria-label="启用 Agent：在主机上新开一个 Cursor CLI 对话接入这个会话"
     data-testid="session-enable-agent"
-    @click="open = true"
+    data-prefetch="enableAgent"
+    @click="openDialog"
   >
     <Rocket class="size-3.5" aria-hidden="true" />
     <span>启用 Agent</span>
   </button>
-  <!-- 弹窗开着时即使会话刚好被别的智能体接入、按钮消失，也不把弹窗收掉（服务端会在预览 / 提交时说明「已经接入过了」） -->
-  <EnableAgentDialog v-if="visible || open" v-model:open="open" :workflow-id="workflowId" />
+  <!-- 弹窗开着时即使会话刚好被别的智能体接入、按钮消失，也不把弹窗收掉（服务端会在预览 / 提交时说明「已经接入过了」）：挂载只看 armed，不看按钮是否还在 -->
+  <EnableAgentDialog v-if="armed" v-model:open="open" :workflow-id="workflowId" />
 </template>

@@ -253,12 +253,28 @@ type CreateWebWorkflowInput struct {
 	// HostName 可选：用户指定的主机名（会话的归属标签），经 NormalizeWebHostName 规整；
 	// 为空沿用「全局设置 > 服务环境变量 > hosts」。智能体接入后，凭据绑定的主机仍以凭据为准。
 	HostName string
+	// Branch 可选（#236）：把新工作流建成 Branch.ParentWorkflowID 的分支。关系与占位会话在同一个事务里落库：
+	// 主会话不存在 / 深度 / 上限 / 限额任何一条不满足，整个创建回滚，不会留下半个会话。
+	Branch *CreateWebBranchSpec
+}
+
+// CreateWebBranchSpec 是网页新建分支时的关系入参。
+type CreateWebBranchSpec struct {
+	ParentWorkflowID string
+	// CreatedBy 是谁建的：human（默认，网页用户）或 agent:<主会话工作流编号>（主会话经 MCP 建的）。
+	CreatedBy string
+	// ExposePreset 与 Expose 二选一；都空 = 协作预设。
+	ExposePreset  string
+	Expose        *model.BranchExpose
+	CopyUserNotes *bool
 }
 
 // CreateWebWorkflowResult 是网页新建会话的结果。
 type CreateWebWorkflowResult struct {
 	Session     *model.FeedbackSession
 	StartPrompt string
+	// Branch 是新建分支时落库的关系；不是分支则为 nil。
+	Branch *model.WorkflowBranch
 }
 
 // CreateWebWorkflow 新建一个工作流：落一行占位会话 + 写入自定义标题，返回占位会话与启动提示词。
@@ -287,10 +303,32 @@ func (s *Store) CreateWebWorkflow(ctx context.Context, input CreateWebWorkflowIn
 		return nil, err
 	}
 
+	// 分支的开放范围也在落库之前校验。
+	var branchIn *LinkBranchInput
+	if spec := input.Branch; spec != nil {
+		createdBy := strings.TrimSpace(spec.CreatedBy)
+		if createdBy == "" {
+			createdBy = model.BranchCreatedByHuman
+		}
+		in := LinkBranchInput{ParentWorkflowID: spec.ParentWorkflowID, BranchWorkflowID: workflowID, CreatedBy: createdBy, Expose: spec.Expose, CopyUserNotes: spec.CopyUserNotes}
+		switch {
+		case strings.TrimSpace(spec.ExposePreset) != "" && spec.Expose != nil:
+			return nil, NewInvalidInputError("expose_preset 与 expose 只能给一个")
+		case strings.TrimSpace(spec.ExposePreset) != "":
+			p, ok := model.BranchExposePreset(spec.ExposePreset)
+			if !ok {
+				return nil, NewInvalidInputError("expose_preset 只能是 visible / collab / managed")
+			}
+			in.Expose = &p
+		}
+		branchIn = &in
+	}
+
 	sessionID := WebPlaceholderSessionPrefix + uuid.New().String()[:8]
-	prompt := WebWorkflowStartPrompt(title, workflowID, projectDir)
+	prompt := s.webStartPrompt(ctx, title, workflowID, projectDir)
 
 	var session model.FeedbackSession
+	var linked *model.WorkflowBranch
 	err = s.WithTx(ctx, func(tx *gorm.DB) error {
 		var existing int64
 		if err := tx.Model(&model.FeedbackSession{}).Where("workflow_id = ?", workflowID).Count(&existing).Error; err != nil {
@@ -334,10 +372,31 @@ func (s *Store) CreateWebWorkflow(ctx context.Context, input CreateWebWorkflowIn
 			return err
 		}
 		// 用户起的名字固定下来：智能体以后汇报里带的 title 不会覆盖它（与重命名同一机制）。
-		return tx.Save(&model.SystemSetting{Key: "wf_custom_title:" + workflowID, Value: title, UpdatedAt: now}).Error
+		if err := tx.Save(&model.SystemSetting{Key: "wf_custom_title:" + workflowID, Value: title, UpdatedAt: now}).Error; err != nil {
+			return err
+		}
+		if branchIn == nil {
+			return nil
+		}
+		// 分支关系与占位会话同事务：关系校验不过，上面落的会话与标题一并回滚。
+		res, err := linkBranchTx(tx, *branchIn, now)
+		if err != nil {
+			return err
+		}
+		linked = &res.Branch
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &CreateWebWorkflowResult{Session: &session, StartPrompt: prompt}, nil
+	if linked != nil {
+		s.auditBranch(ctx, AuditBranchLink, linked.CreatedBy, linked.ParentWorkflowID, linked.BranchWorkflowID,
+			map[string]any{"created": true, "expose": linked.Expose.PresetName()})
+		// 用户在网页里建的：让主会话的 Agent 知道有了新分支（写进它的收件箱）；失败不影响创建结果。
+		// 主会话的 Agent 自己建的不用通知它。
+		if linked.CreatedBy == model.BranchCreatedByHuman {
+			_, _ = s.NotifyMainBranchCreated(ctx, *linked)
+		}
+	}
+	return &CreateWebWorkflowResult{Session: &session, StartPrompt: prompt, Branch: linked}, nil
 }

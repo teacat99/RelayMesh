@@ -297,7 +297,7 @@ func TestHeadlessRunNewConversationRules(t *testing.T) {
 		run  HeadlessRun
 		want string
 	}{
-		"固定了对话编号又要新开": {HeadlessRun{WorkflowID: "wf", ConversationID: "chat-1", NewConversation: true}, "不能再选「新开对话」"},
+		"固定了对话编号又要新开": {HeadlessRun{WorkflowID: "wf", ConversationID: "chat-1", NewConversation: true}, "不能再选「新会话」"},
 		"新开却没有工作流编号":  {HeadlessRun{NewConversation: true}, "请填工作流编号"},
 		"不认识的来源":      {HeadlessRun{WorkflowID: "wf", Origin: "somewhere"}, "不认识的预设来源"},
 	} {
@@ -325,5 +325,160 @@ func TestHeadlessRunNewConversationRules(t *testing.T) {
 	bad.Run.ConversationID, bad.Run.NewConversation = "chat-1", true
 	if _, _, err := st.UpsertTerminalLauncher(ctx, bad); err == nil || !errors.Is(err, ErrInvalidLauncher) {
 		t.Fatalf("固定对话与新开互斥，保存应被拒绝: %v", err)
+	}
+}
+
+// 对话来源三选一（#191）：存量预设按旧字段推导，行为不变；设了 Source 之后旧的「新开」勾选只是镜像；
+// 「新会话」之外的来源没有「运行之后的去向」；非法组合被拒绝并说明原因。
+func TestHeadlessRunSourceRules(t *testing.T) {
+	type want struct {
+		src, after string
+		newConv    bool   // 规整之后的旧字段镜像
+		storedSrc  string // 规整之后实际存的 Source（存量预设不改写，保持空）
+		storedAft  string
+	}
+	for name, c := range map[string]struct {
+		run  HeadlessRun
+		want want
+	}{
+		"存量：只有工作流（跟随）":         {HeadlessRun{WorkflowID: "wf"}, want{src: HeadlessSourceResume}},
+		"存量：固定了对话编号":           {HeadlessRun{ConversationID: "chat-1"}, want{src: HeadlessSourceResume}},
+		"存量：勾了新开":              {HeadlessRun{WorkflowID: "wf", NewConversation: true}, want{src: HeadlessSourceNew, after: HeadlessAfterRemember, newConv: true}},
+		"新：指定会话（跟随）":           {HeadlessRun{Source: "resume", WorkflowID: "wf"}, want{src: HeadlessSourceResume, storedSrc: HeadlessSourceResume}},
+		"新：指定会话带旧勾选 → 勾选被镜像清掉": {HeadlessRun{Source: "resume", ConversationID: "chat-1", NewConversation: true}, want{src: HeadlessSourceResume, storedSrc: HeadlessSourceResume}},
+		"新：新会话默认记下编号":          {HeadlessRun{Source: "new", WorkflowID: "wf"}, want{src: HeadlessSourceNew, after: HeadlessAfterRemember, newConv: true, storedSrc: HeadlessSourceNew}},
+		"新：新会话 remember":       {HeadlessRun{Source: "new", AfterNew: "remember", WorkflowID: "wf"}, want{src: HeadlessSourceNew, after: HeadlessAfterRemember, newConv: true, storedSrc: HeadlessSourceNew, storedAft: HeadlessAfterRemember}},
+		"新：新会话不切换（旧勾选为假）":      {HeadlessRun{Source: "new", AfterNew: "stay", WorkflowID: "wf", NewConversation: true}, want{src: HeadlessSourceNew, after: HeadlessAfterStay, storedSrc: HeadlessSourceNew, storedAft: HeadlessAfterStay}},
+		"新：新会话成功后切到最近会话":       {HeadlessRun{Source: " NEW ", AfterNew: " Continue ", WorkflowID: "wf"}, want{src: HeadlessSourceNew, after: HeadlessAfterContinue, storedSrc: HeadlessSourceNew, storedAft: HeadlessAfterContinue}},
+		"新：最近会话清掉没用的去向":        {HeadlessRun{Source: "continue", AfterNew: "stay", WorkflowID: "wf"}, want{src: HeadlessSourceContinue, storedSrc: HeadlessSourceContinue}},
+	} {
+		norm, err := NormalizeHeadlessRun(c.run)
+		if err != nil {
+			t.Errorf("%s：应合法: %v", name, err)
+			continue
+		}
+		if got := norm.EffectiveSource(); got != c.want.src {
+			t.Errorf("%s：EffectiveSource = %q，想要 %q", name, got, c.want.src)
+		}
+		if got := norm.EffectiveAfterNew(); got != c.want.after {
+			t.Errorf("%s：EffectiveAfterNew = %q，想要 %q", name, got, c.want.after)
+		}
+		if norm.NewConversation != c.want.newConv {
+			t.Errorf("%s：旧勾选镜像 = %v，想要 %v", name, norm.NewConversation, c.want.newConv)
+		}
+		if norm.Source != c.want.storedSrc || norm.AfterNew != c.want.storedAft {
+			t.Errorf("%s：存的 source/after_new = %q/%q，想要 %q/%q", name, norm.Source, norm.AfterNew, c.want.storedSrc, c.want.storedAft)
+		}
+	}
+
+	for name, c := range map[string]struct {
+		run  HeadlessRun
+		want string
+	}{
+		"不认识的来源":          {HeadlessRun{Source: "bogus", WorkflowID: "wf"}, "对话来源只能是"},
+		"不认识的去向":          {HeadlessRun{Source: "new", AfterNew: "bogus", WorkflowID: "wf"}, "运行之后只能是"},
+		"新会话固定了对话编号":      {HeadlessRun{Source: "new", AfterNew: "stay", WorkflowID: "wf", ConversationID: "chat-1"}, "不能再选「新会话」"},
+		"新会话没有工作流编号":      {HeadlessRun{Source: "new", AfterNew: "stay", ConversationID: ""}, "请填工作流编号"},
+		"最近会话固定了对话编号":     {HeadlessRun{Source: "continue", WorkflowID: "wf", ConversationID: "chat-1"}, "不能再固定对话编号"},
+		"最近会话没有工作流编号":     {HeadlessRun{Source: "continue"}, "请填工作流编号"},
+		"最近会话只固定了编号也不行":   {HeadlessRun{Source: "continue", ConversationID: "chat-1"}, "不能再固定对话编号"},
+		"指定会话至少要工作流或对话编号": {HeadlessRun{Source: "resume"}, "请填工作流编号"},
+		"存量勾选新开又固定编号仍被拒绝": {HeadlessRun{WorkflowID: "wf", ConversationID: "chat-1", NewConversation: true}, "不能再选「新会话」"},
+	} {
+		if _, err := NormalizeHeadlessRun(c.run); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s：应被拒绝并说明原因（含 %q）: %v", name, c.want, err)
+		}
+	}
+
+	// 存取原样：新字段带着 JSON 往返，存量预设（没有新字段）读出来仍没有新字段。
+	st := newMemStore(t)
+	ctx := context.Background()
+	legacy := okHeadless("h-old", "旧预设")
+	legacy.Run.NewConversation = true
+	cont := okHeadless("h-cont", "最近会话")
+	cont.Run.Source = HeadlessSourceContinue
+	stay := okHeadless("h-stay", "不切换")
+	stay.Run.Source, stay.Run.AfterNew = HeadlessSourceNew, HeadlessAfterStay
+	for _, l := range []TerminalLauncher{legacy, cont, stay} {
+		if _, _, err := st.UpsertTerminalLauncher(ctx, l); err != nil {
+			t.Fatalf("保存 %s: %v", l.ID, err)
+		}
+	}
+	list, err := st.ListTerminalLaunchers(ctx)
+	if err != nil || len(list) != 3 {
+		t.Fatalf("应有三条: %+v %v", list, err)
+	}
+	if r := list[0].Run; r.Source != "" || r.AfterNew != "" || !r.NewConversation || r.EffectiveSource() != HeadlessSourceNew {
+		t.Errorf("存量预设不被改写: %+v", r)
+	}
+	if r := list[1].Run; r.Source != HeadlessSourceContinue || r.NewConversation || r.AfterNew != "" {
+		t.Errorf("最近会话原样存取: %+v", r)
+	}
+	if r := list[2].Run; r.Source != HeadlessSourceNew || r.AfterNew != HeadlessAfterStay || r.NewConversation {
+		t.Errorf("新会话不切换原样存取: %+v", r)
+	}
+}
+
+// 「新会话」成功后切到最近会话（#559）是比较并交换：只有预设还是 new + continue 才改；改完 source 变 continue、去向清空；
+// 被人改过或删掉就什么都不做。
+func TestSwitchLauncherToContinue(t *testing.T) {
+	st := newMemStore(t)
+	ctx := context.Background()
+	mk := func(id, name, src, after string) {
+		l := okHeadless(id, name)
+		l.Run.Source, l.Run.AfterNew = src, after
+		if _, _, err := st.UpsertTerminalLauncher(ctx, l); err != nil {
+			t.Fatalf("保存 %s: %v", id, err)
+		}
+	}
+	mk("sw", "切换", HeadlessSourceNew, HeadlessAfterContinue)
+	mk("stay", "不切换", HeadlessSourceNew, HeadlessAfterStay)
+	mk("rem", "记下编号", HeadlessSourceNew, "")
+	mk("res", "指定会话", HeadlessSourceResume, "")
+	if _, _, err := st.UpsertTerminalLauncher(ctx, TerminalLauncher{ID: "term", Name: "终端", Host: launcherHost}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"stay", "rem", "res", "term", "missing"} {
+		if _, switched, err := st.SwitchLauncherToContinue(ctx, id); err != nil || switched {
+			t.Errorf("%s 不该被切换: switched=%v err=%v", id, switched, err)
+		}
+	}
+	list, _ := st.ListTerminalLaunchers(ctx)
+	for _, l := range list {
+		if l.ID != "sw" && l.IsHeadless() && l.Run.EffectiveSource() == HeadlessSourceContinue {
+			t.Errorf("%s 被误改成最近会话", l.ID)
+		}
+	}
+
+	got, switched, err := st.SwitchLauncherToContinue(ctx, "sw")
+	if err != nil || !switched || got.ID != "sw" || got.Run.Source != HeadlessSourceContinue || got.Run.AfterNew != "" || got.Run.NewConversation {
+		t.Fatalf("应切换成最近会话: %+v switched=%v err=%v", got, switched, err)
+	}
+	list, _ = st.ListTerminalLaunchers(ctx)
+	for _, l := range list {
+		if l.ID == "sw" && (l.Run.Source != HeadlessSourceContinue || l.Run.AfterNew != "" || l.Run.NewConversation) {
+			t.Errorf("切换应落库: %+v", l.Run)
+		}
+		if l.ID == "stay" && l.Run.AfterNew != HeadlessAfterStay {
+			t.Errorf("别的预设不受影响: %+v", l.Run)
+		}
+	}
+	// 同一份预设不会被切换第二次：已经是最近会话了。
+	if _, switched, err := st.SwitchLauncherToContinue(ctx, "sw"); err != nil || switched {
+		t.Errorf("已经是最近会话，不该再切: switched=%v err=%v", switched, err)
+	}
+
+	// 竞争：运行期间用户把预设手动改成指定会话，成功回调晚到——不覆盖手动改动。
+	mk("race", "竞争", HeadlessSourceNew, HeadlessAfterContinue)
+	mk("race", "竞争", HeadlessSourceResume, "")
+	if _, switched, err := st.SwitchLauncherToContinue(ctx, "race"); err != nil || switched {
+		t.Errorf("手动改过就不覆盖: switched=%v err=%v", switched, err)
+	}
+	list, _ = st.ListTerminalLaunchers(ctx)
+	for _, l := range list {
+		if l.ID == "race" && l.Run.Source != HeadlessSourceResume {
+			t.Errorf("手动改动被覆盖了: %+v", l.Run)
+		}
 	}
 }

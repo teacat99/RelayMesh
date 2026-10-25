@@ -104,9 +104,41 @@ describe('校验', () => {
     assert.match(validateEnableDraft(WF, { ...filled(), dir: '/' + 'x'.repeat(LIMITS.dir) }, LIMITS, hosts).dir ?? '', /最长/)
   })
 
-  it('主机要选；Windows 主机选了也不行', () => {
+  it('主机要选；Windows 主机从 #178 起和其他主机一样可以选', () => {
     assert.match(validateEnableDraft(WF, { ...filled(), host: '' }, LIMITS, hosts).host ?? '', /选择/)
-    assert.match(validateEnableDraft(WF, { ...filled(), host: 'RM-WIN1' }, LIMITS, hosts).host ?? '', /Windows/)
+    assert.equal(validateEnableDraft(WF, { ...filled(), host: 'RM-WIN1', dir: 'C:\\work\\app' }, LIMITS, hosts).host, undefined)
+    assert.deepEqual(validateEnableDraft(WF, { ...filled(), host: 'RM-WIN1', dir: 'C:\\work\\app' }, LIMITS, hosts), {})
+  })
+
+  it('目录的写法跟着所选主机的系统走：Windows 主机要盘符 / UNC 路径，其余要 / 开头；没选主机时两种都放行（#178）', () => {
+    const win = (dir: string) => validateEnableDraft(WF, { ...filled(), host: 'RM-WIN1', dir }, LIMITS, hosts).dir
+    const nix = (dir: string) => validateEnableDraft(WF, { ...filled(), dir }, LIMITS, hosts).dir
+    const none = (dir: string) => validateEnableDraft(WF, { ...filled(), host: '', dir }, LIMITS, hosts).dir
+    assert.equal(win('C:\\work'), undefined)
+    assert.equal(win('D:/项目/app'), undefined)
+    assert.equal(win('\\\\srv\\share\\app'), undefined)
+    assert.match(win('/work/app') ?? '', /Windows.*盘符/)
+    assert.match(nix('C:\\work') ?? '', /不是 Windows.*以 \/ 开头/)
+    assert.equal(nix('/work/app'), undefined)
+    assert.equal(none('C:\\work'), undefined, '还没选主机：只查是不是某种绝对路径')
+    assert.equal(none('/work'), undefined)
+    assert.match(none('work/app') ?? '', /绝对路径/)
+    assert.match(none('C:work') ?? '', /绝对路径/)
+  })
+
+  it('Windows 目录里有 cmd 语法字符：拒绝并指出字符（和服务端一致）', () => {
+    for (const [dir, want] of [['C:\\R&D', /「&」/], ['C:\\a"b', /「"」/], ['C:\\100%', /「%」/], ['C:\\a:b', /冒号/]] as const) {
+      assert.match(validateEnableDraft(WF, { ...filled(), host: 'RM-WIN1', dir }, LIMITS, hosts).dir ?? '', want, dir)
+    }
+    assert.equal(validateEnableDraft(WF, { ...filled(), dir: '/srv/R&D' }, LIMITS, hosts).dir, undefined, 'POSIX 目录不受影响')
+  })
+
+  it('可执行文件可以写 Windows 的命令名与路径，shell 不行', () => {
+    const bin = (b: string) => validateEnableDraft(WF, { ...filled(), host: 'RM-WIN1', dir: 'C:\\work', bin: b }, LIMITS, hosts).bin
+    assert.equal(bin('agent.cmd'), undefined)
+    assert.equal(bin('C:\\tools\\agent.cmd'), undefined)
+    assert.ok(bin('powershell'))
+    assert.ok(bin('C:\\Windows\\System32\\cmd.exe'))
   })
 
   it('模型、可执行文件、提示词、最长运行时间沿用续聊预设的规则', () => {
@@ -130,13 +162,14 @@ describe('主机候选', () => {
   const offline = host({ machine_code: 'RM-OFF', hostname: 'off-box', online: false })
   const win = host({ machine_code: 'RM-WIN', hostname: 'win-box', os: 'windows' })
 
-  it('在线的在前，Windows 在最后并且不能选，离线的标出来但可选', () => {
+  it('在线的在前（Windows 主机与其他主机一样排，#178），离线的标出来但可选', () => {
     const c = enableHostChoices([win, offline, online])
-    assert.deepEqual(c.map(x => x.code), ['RM-ON', 'RM-OFF', 'RM-WIN'])
-    assert.deepEqual(c.map(x => x.disabled), [false, false, true])
-    assert.match(c[0].label, /开发机/)
-    assert.match(c[1].label, /离线/)
-    assert.match(c[2].label, /Windows 暂不支持/)
+    assert.deepEqual(c.map(x => x.code), ['RM-WIN', 'RM-ON', 'RM-OFF'], '输入顺序 win, offline, online → 在线的（win、online）在前并保持输入顺序，离线的垫底')
+    assert.match(c[1].label, /开发机/)
+    assert.match(c[2].label, /离线/)
+    assert.match(c[0].label, /windows/, 'Windows 主机的标签里有系统名，没有「暂不支持」')
+    assert.doesNotMatch(c[0].label, /暂不支持/)
+    assert.equal('disabled' in c[0], false)
   })
 
   it('没有候选 = 空列表', () => {
@@ -152,9 +185,10 @@ describe('主机候选', () => {
     assert.equal(pickEnableHost('', undefined, undefined, hs), '')
   })
 
-  it('Windows 主机与不在候选里的主机不会被默认选中', () => {
+  it('Windows 主机可以被默认选中（#178）；不在候选里的主机不会', () => {
     const hs = [online, win]
-    assert.equal(pickEnableHost('RM-WIN', 'RM-WIN', 'RM-WIN', hs), '')
+    assert.equal(pickEnableHost('RM-WIN', 'RM-WIN', 'RM-WIN', hs), 'RM-WIN')
+    assert.equal(pickEnableHost('', 'RM-WIN', 'RM-ON', hs), 'RM-WIN')
     assert.equal(pickEnableHost('RM-GONE', 'RM-GONE', 'RM-ON', hs), 'RM-ON')
   })
 

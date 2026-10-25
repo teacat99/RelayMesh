@@ -57,19 +57,20 @@ type Status struct {
 	Dropped int `json:"dropped"`
 }
 
-// job 是队列里的一条事件：新反馈请求（info）、模型运行结束（run 非 nil）、终端会话守护事件（guard 非 nil）、
-// 新消息类事件（event 非 nil，见 event.go）或一批聚合到期的新消息（flush 非 nil）。
+// job 是队列里的一条事件：新反馈请求（info）、模型运行结束（run 非 nil）、「不再自动续跑」（autoResume 非 nil）、
+// 新消息类事件（event 非 nil，见 event.go）、一批聚合到期的新消息（flush 非 nil）或异常（exception 非 nil，见 exception.go）。
 type job struct {
-	info    RequestInfo
-	run     *RunInfo
-	guard   *GuardInfo
-	event   *EventInfo
-	flush   *flushItem
-	delayed bool // 已经等过延迟，这次是到期后的复核与发送（只对请求有意义）
+	info       RequestInfo
+	run        *RunInfo
+	autoResume *AutoResumeInfo
+	event      *EventInfo
+	flush      *flushItem
+	exception  *ExceptionInfo
+	delayed    bool // 已经等过延迟，这次是到期后的复核与发送（只对请求有意义）
 }
 
-// Notifier 把「新反馈请求」「模型运行结束」「终端会话守护事件」与新消息类事件异步推送到 ntfy。
-// NotifyRequest / NotifyRun / NotifyGuard / NotifyEvent 永远不会阻塞调用方，推送失败或 ntfy 变慢也不会影响智能体的请求，更不会影响命令运行的收尾与守护的下一轮判断。
+// Notifier 把「新反馈请求」「模型运行结束」「不再自动续跑」与新消息类事件异步推送到 ntfy。
+// NotifyRequest / NotifyRun / NotifyAutoResume / NotifyEvent 永远不会阻塞调用方，推送失败或 ntfy 变慢也不会影响智能体的请求，更不会影响命令运行的收尾与自动续跑的下一轮判断。
 type Notifier struct {
 	opts   Options
 	sender *Sender
@@ -91,6 +92,9 @@ type Notifier struct {
 	batches   map[string]*eventBatch
 	lastFlush map[string]time.Time
 
+	// 异常（见 exception.go）：每个 Key 在去重窗口里被挡掉的重复次数，下一条同 Key 的推送会说明。
+	excRepeats map[string]int
+
 	// 以下三项只为测试存在：缩短延迟的单位、缩短聚合与冷却的单位、替换时钟。
 	delayUnit time.Duration
 	mergeUnit time.Duration
@@ -109,9 +113,11 @@ func New(opts Options) *Notifier {
 		seen:      make(map[string]time.Time),
 		batches:   make(map[string]*eventBatch),
 		lastFlush: make(map[string]time.Time),
-		delayUnit: time.Second,
-		mergeUnit: time.Second,
-		now:       time.Now,
+
+		excRepeats: make(map[string]int),
+		delayUnit:  time.Second,
+		mergeUnit:  time.Second,
+		now:        time.Now,
 	}
 	if n.sender == nil {
 		n.sender = NewSender("RelayMesh")
@@ -188,13 +194,13 @@ func (n *Notifier) NotifyRun(in RunInfo) {
 	n.submit(job{run: &in})
 }
 
-// NotifyGuard 登记一条终端会话守护事件（会话意外结束 / 智能体停摆）。立即返回；事件当场复制。
-// 「同一次事件只推一次」由守护服务按持久化的事件标识保证，这里的去重（按 Key）只是进程内的第二道保险。
-func (n *Notifier) NotifyGuard(in GuardInfo) {
+// NotifyAutoResume 登记一条「不再自动续跑」事件（#151）。立即返回；事件当场复制。
+// 「同一次放弃只推一次」由自动续跑的登记保证，这里的去重（按 Key）只是进程内的第二道保险。
+func (n *Notifier) NotifyAutoResume(in AutoResumeInfo) {
 	if n == nil || in.Key == "" {
 		return
 	}
-	n.submit(job{guard: &in})
+	n.submit(job{autoResume: &in})
 }
 
 func (n *Notifier) submit(j job) {
@@ -238,14 +244,22 @@ func (n *Notifier) EffectiveConfig(ctx context.Context) (Config, error) {
 // SendTest 用给定配置立刻发一条测试推送（不排队、不限流、不看总开关），并记入「最近一次推送」。
 // 只试一次、不重试：人在界面上等着看结果，要的是马上知道通不通，而不是后台悄悄再试几轮。
 func (n *Notifier) SendTest(ctx context.Context, cfg Config) (Result, error) {
+	res, _, err := n.SendKindTest(ctx, cfg, "")
+	return res, err
+}
+
+// SendKindTest 是「试发这一类」：kind 为空（或不认识）就是普通测试推送，否则按这一类此刻的优先级发一条，
+// 正文写明是哪一类、几级。返回实际用的优先级，界面据此告诉用户。其余与 SendTest 相同（不排队、不限流、不看总开关）。
+func (n *Notifier) SendKindTest(ctx context.Context, cfg Config, kind string) (Result, int, error) {
 	cfg = cfg.Normalize().WithEnvToken(n.opts.EnvToken)
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout+2*time.Second)
 	defer cancel()
 	once := *n.sender
 	once.Backoff = nil
-	res, err := once.Send(ctx, cfg, BuildTestMessage(cfg, n.now()))
+	msg, priority := BuildKindTestMessage(cfg, kind, n.now())
+	res, err := once.Send(ctx, cfg, msg)
 	n.record(res, err, true)
-	return res, err
+	return res, priority, err
 }
 
 func (n *Notifier) worker() {
@@ -283,8 +297,8 @@ func (n *Notifier) handle(j job) {
 		n.handleRun(cfg, *j.run)
 		return
 	}
-	if j.guard != nil {
-		n.handleGuard(cfg, *j.guard)
+	if j.autoResume != nil {
+		n.handleAutoResume(cfg, *j.autoResume)
 		return
 	}
 	if j.event != nil {
@@ -295,7 +309,15 @@ func (n *Notifier) handle(j job) {
 		n.handleFlush(cfg, *j.flush)
 		return
 	}
+	if j.exception != nil {
+		n.handleException(cfg, *j.exception)
+		return
+	}
 
+	// 「智能体在等你回复」在表里设成了不推送：不去重、不排延迟（延迟到期后重新进来时也会在这里再挡一次）。
+	if !cfg.kindEnabled(KindRequest) {
+		return
+	}
 	if !j.delayed {
 		if !n.firstSight(j.info.SessionID) {
 			return
@@ -322,6 +344,10 @@ func (n *Notifier) handleRun(cfg Config, in RunInfo) {
 	if !in.WorthNotifying(cfg) {
 		return
 	}
+	// 「运行结束推送」是总开关；表里再按结局分开：顺利完成与出状况各有各的优先级，也可以单独不推。
+	if !cfg.kindEnabled(runKind(in.State)) {
+		return
+	}
 	if !n.firstSight("run:" + in.RunID) {
 		return
 	}
@@ -332,9 +358,12 @@ func (n *Notifier) handleRun(cfg Config, in RunInfo) {
 	n.deliver(cfg, BuildRunMessage(cfg, in, n.hostName(in.Machine), merged), merged)
 }
 
-// handleGuard 处理一条守护事件：能走到这里的都是守护服务已经判定「该打扰你」的事件（预设里打开了守护），
-// 所以不再另设开关，只受总开关与主题约束（见 handle）；去重、限流之后解析主机名并发送。
-func (n *Notifier) handleGuard(cfg Config, in GuardInfo) {
+// handleAutoResume 处理一条「不再自动续跑」事件：能走到这里的都是自动续跑已经判定「该打扰你」的事件（预设里打开了自动续跑），
+// 所以只受消息类型开关、总开关与主题约束（见 handle）；去重、限流之后解析主机名并发送。
+func (n *Notifier) handleAutoResume(cfg Config, in AutoResumeInfo) {
+	if !cfg.kindEnabled(KindAutoResume) {
+		return
+	}
 	if !n.firstSight("guard:" + in.Key) {
 		return
 	}
@@ -342,7 +371,7 @@ func (n *Notifier) handleGuard(cfg Config, in GuardInfo) {
 	if !ok {
 		return
 	}
-	n.deliver(cfg, BuildGuardMessage(cfg, in, n.hostName(in.Machine), merged, n.now()), merged)
+	n.deliver(cfg, BuildAutoResumeMessage(cfg, in, n.hostName(in.Machine), merged), merged)
 }
 
 // deliver 发送一条已经生成好的消息并记录结果。merged 是这条消息替此前被合并的通知做了说明的条数：

@@ -12,24 +12,33 @@ import {
   Save,
   Send,
   Shuffle,
+  SlidersHorizontal,
   Smartphone,
   XCircle
 } from 'lucide-vue-next'
-import { ntfyApi, ntfyErrorMessage, type NtfyConfig, type NtfyStatus } from '@/api/ntfy'
+import { ntfyApi, ntfyErrorMessage, type NtfyConfig, type NtfyKindInfo, type NtfyStatus } from '@/api/ntfy'
 import {
   NTFY_AUTH_OPTIONS,
   NTFY_DELAY_OPTIONS,
+  NTFY_PRIORITY_EFFECTS,
   NTFY_PRIORITY_OPTIONS,
   buildUpdate,
   describeCounters,
+  describeKindTable,
+  describeKindTest,
   describeLast,
   formFromConfig,
+  groupKinds,
   isDirty,
+  kindChoice,
+  kindOptions,
   privacyWarnings,
   randomTopic,
   runMinOptions,
   subscribeUrl,
   validateForm,
+  withKindChoice,
+  type KindChoice,
   type NtfyAuthMode,
   type NtfyForm
 } from '@/lib/ntfy'
@@ -51,16 +60,23 @@ const loadError = ref('')
 const saved = ref<NtfyConfig | null>(null)
 const status = ref<NtfyStatus | null>(null)
 const form = ref<NtfyForm | null>(null)
+// 服务端的消息类型目录（设置页的「按消息类型设置」表按它画；老服务端没有，表就不出现）
+const kinds = ref<NtfyKindInfo[]>([])
 
 const saving = ref(false)
 const testing = ref(false)
+// 正在试发的消息类型 id（只有点了某一行的「试发」才有值）
+const testingKind = ref('')
 const showSecret = ref(false)
 const formError = ref('')
 const testResult = ref<{ ok: boolean; text: string } | null>(null)
+// 某一行「试发」的结果：就显示在那一行下面，免得结果落在页面最底下看不见
+const kindResult = ref<{ id: string; ok: boolean; text: string } | null>(null)
 
-function apply(view: { config: NtfyConfig; status: NtfyStatus }) {
+function apply(view: { config: NtfyConfig; status: NtfyStatus; kinds?: NtfyKindInfo[] }) {
   saved.value = view.config
   status.value = view.status
+  kinds.value = view.kinds ?? []
   form.value = formFromConfig(view.config)
   formError.value = ''
 }
@@ -86,6 +102,10 @@ const counters = computed(() => describeCounters(status.value))
 const subscribe = computed(() => (form.value ? subscribeUrl(form.value.server, form.value.topic) : ''))
 // 门槛的下拉选项：当前值不在预设里时补一项，免得下拉框显示成别的值
 const runMinChoices = computed(() => runMinOptions(form.value?.runMinSeconds ?? 0))
+// 按消息类型的表：分组、「默认」一项要写明落在几级（取决于当前选的默认优先级）、一行小结
+const defaultPriority = computed(() => form.value?.priority ?? 0)
+const kindGroups = computed(() => groupKinds(kinds.value))
+const kindSummary = computed(() => (form.value ? describeKindTable(kinds.value, form.value.priorityByKind, defaultPriority.value) : ''))
 const credentialHint = computed(() => {
   const s = saved.value
   const f = form.value
@@ -136,6 +156,7 @@ async function save() {
   try {
     apply(await ntfyApi.update(buildUpdate(form.value, saved.value)))
     testResult.value = null
+    kindResult.value = null
     toast.success(form.value?.enabled ? 'ntfy 推送已保存并启用' : 'ntfy 设置已保存')
   } catch (e) {
     formError.value = ntfyErrorMessage(e, '保存失败')
@@ -154,6 +175,7 @@ async function sendTest() {
   formError.value = ''
   testing.value = true
   testResult.value = null
+  kindResult.value = null
   try {
     // 带上尚未保存的表单一起试发：先确认通了，再保存
     const res = await ntfyApi.test(buildUpdate(form.value, saved.value))
@@ -165,6 +187,42 @@ async function sendTest() {
     testResult.value = { ok: false, text: ntfyErrorMessage(e, '测试推送失败') }
   } finally {
     testing.value = false
+  }
+}
+
+function onKindChange(info: NtfyKindInfo, e: Event) {
+  if (!form.value) return
+  form.value.priorityByKind = withKindChoice(form.value.priorityByKind, info, (e.target as HTMLSelectElement).value as KindChoice)
+  if (kindResult.value?.id === info.id) kindResult.value = null
+}
+
+// 按这一类现在选的优先级，在手机上试发一条（带上尚未保存的表单，所以不用先保存）。
+async function sendKindTest(info: NtfyKindInfo) {
+  if (!form.value || !saved.value || testing.value) return
+  testResult.value = null
+  kindResult.value = null
+  const problem = validateForm(form.value, saved.value, true)
+  if (problem) {
+    // 问题就显示在被点的这一行下面：全局的错误条在页面最底下，点了「试发」的人根本看不到
+    kindResult.value = { id: info.id, ok: false, text: problem }
+    return
+  }
+  const choice = kindChoice(info, form.value.priorityByKind)
+  testing.value = true
+  testingKind.value = info.id
+  try {
+    const res = await ntfyApi.test(buildUpdate(form.value, saved.value), info.id)
+    status.value = res.status
+    kindResult.value = {
+      id: info.id,
+      ok: res.ok,
+      text: res.ok ? describeKindTest(info, choice, res) : res.error || '测试推送失败，原因未知'
+    }
+  } catch (e) {
+    kindResult.value = { id: info.id, ok: false, text: ntfyErrorMessage(e, '测试推送失败') }
+  } finally {
+    testing.value = false
+    testingKind.value = ''
   }
 }
 
@@ -217,7 +275,7 @@ const inputClass =
             <BellRing class="w-3.5 h-3.5 text-primary" />
             <span>启用 ntfy 推送</span>
           </div>
-          <div class="text-[10px] text-muted-foreground">智能体发起新的反馈请求时推送一条通知（改完要点「保存」才生效）</div>
+          <div class="text-[10px] text-muted-foreground">总开关：关闭时下面所有消息都不推送；启用后，哪些消息要推、各用什么优先级，在下面分别设置（改完要点「保存」才生效）</div>
         </div>
         <div class="w-8 h-4.5 rounded-full transition-colors flex items-center p-0.5 shrink-0" :class="form.enabled ? 'bg-primary' : 'bg-muted-foreground/30'">
           <div class="w-3.5 h-3.5 rounded-full bg-white transition-transform" :class="form.enabled ? 'translate-x-3.5' : 'translate-x-0'"></div>
@@ -336,7 +394,7 @@ const inputClass =
         <!-- 优先级 / 延迟 -->
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           <div class="space-y-1">
-            <label class="text-xs font-mono font-medium text-foreground" for="ntfy-priority">优先级</label>
+            <label class="text-xs font-mono font-medium text-foreground" for="ntfy-priority">默认优先级</label>
             <select id="ntfy-priority" v-model.number="form.priority" data-testid="ntfy-priority" :class="inputClass + ' cursor-pointer'">
               <option v-for="opt in NTFY_PRIORITY_OPTIONS" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
@@ -348,7 +406,10 @@ const inputClass =
             </select>
           </div>
         </div>
-        <div class="text-[10px] text-muted-foreground -mt-1.5">延迟推送：这段时间里你在网页上处理掉了这条请求，就不再打扰手机。</div>
+        <div class="text-[10px] text-muted-foreground -mt-1.5 leading-relaxed space-y-0.5">
+          <div>默认优先级：下面「按消息类型设置」里选了「跟随默认优先级」的几类用它；其余各类有自己的出厂优先级，也可以单独改。</div>
+          <div>延迟推送：这段时间里你在网页上处理掉了这条请求，就不再打扰手机。</div>
+        </div>
 
         <!-- 内容 -->
         <button
@@ -412,6 +473,79 @@ const inputClass =
           </select>
           <div class="text-[10px] text-muted-foreground leading-relaxed">
             更短的命令不会打扰你。你自己或模型主动取消的运行不推送；主机上的守护进程停止或重启把命令中断了，会照常推送。
+          </div>
+        </div>
+
+        <!-- 按消息类型设置：每一类单独选「不推送」或优先级；异常提醒也在这里打开 -->
+        <div class="space-y-2.5 pt-1" data-testid="ntfy-kinds">
+          <div class="space-y-1">
+            <div class="text-xs font-mono font-medium text-foreground flex items-center gap-1.5">
+              <SlidersHorizontal class="w-3.5 h-3.5 text-primary" />
+              <span>按消息类型设置</span>
+            </div>
+            <div class="text-[10px] text-muted-foreground leading-relaxed">
+              每一类消息可以单独选择「不推送」或指定优先级；选「默认」就是出厂设置。改完要点「保存」才生效；「试发」不用先保存，它会按你现在选的优先级在手机上发一条。
+            </div>
+            <div class="text-[10px] text-muted-foreground leading-relaxed" data-testid="ntfy-priority-effects">{{ NTFY_PRIORITY_EFFECTS }}</div>
+            <div v-if="kindSummary" class="text-[10px] font-mono text-foreground" data-testid="ntfy-kinds-summary">{{ kindSummary }}</div>
+          </div>
+
+          <div v-if="!kindGroups.length" class="text-[10px] font-mono text-muted-foreground" data-testid="ntfy-kinds-empty">
+            当前服务端没有提供消息类型目录，暂时不能按类型设置；上面的默认优先级仍然有效。
+          </div>
+
+          <div
+            v-for="group in kindGroups"
+            :key="group.id"
+            class="rounded-xs border border-border/60 bg-background/50 px-2.5 py-2"
+            :data-testid="`ntfy-kind-group-${group.id}`"
+          >
+            <div class="text-[11px] font-mono font-semibold text-foreground">{{ group.title }}</div>
+            <div v-if="group.hint" class="text-[10px] text-muted-foreground leading-relaxed">{{ group.hint }}</div>
+            <div class="divide-y divide-border/50 mt-1">
+              <div v-for="k in group.kinds" :key="k.id" class="py-2 space-y-1.5" :data-testid="`ntfy-kind-${k.id}`">
+                <div class="flex flex-col sm:flex-row sm:items-center gap-2">
+                  <div class="min-w-0 flex-1">
+                    <div class="text-xs font-mono font-semibold text-foreground">{{ k.label }}</div>
+                    <div class="text-[10px] text-muted-foreground leading-relaxed">{{ k.desc }}</div>
+                  </div>
+                  <div class="flex items-center gap-2 sm:w-[21rem] shrink-0 min-w-0">
+                    <select
+                      :value="kindChoice(k, form.priorityByKind)"
+                      :aria-label="`「${k.label}」怎么推送`"
+                      :data-testid="`ntfy-kind-select-${k.id}`"
+                      :class="inputClass + ' cursor-pointer min-w-0'"
+                      @change="onKindChange(k, $event)"
+                    >
+                      <option v-for="o in kindOptions(k, defaultPriority)" :key="o.value" :value="o.value">{{ o.label }}</option>
+                    </select>
+                    <button
+                      type="button"
+                      class="h-8 px-2.5 rounded-xs border border-border/80 bg-background text-xs font-mono flex items-center gap-1 shrink-0 cursor-pointer hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      :disabled="saving || testing"
+                      :aria-label="`试发「${k.label}」`"
+                      :title="`按现在选的优先级，在手机上试发一条「${k.label}」`"
+                      :data-testid="`ntfy-kind-test-${k.id}`"
+                      @click="sendKindTest(k)"
+                    >
+                      <Loader2 v-if="testingKind === k.id" class="w-3 h-3 animate-spin" />
+                      <Send v-else class="w-3 h-3" />
+                      <span>试发</span>
+                    </button>
+                  </div>
+                </div>
+                <div
+                  v-if="kindResult && kindResult.id === k.id"
+                  class="p-2 rounded-xs border text-[10px] font-mono flex items-start gap-1.5"
+                  :class="kindResult.ok ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400' : 'bg-destructive/10 border-destructive/30 text-destructive'"
+                  role="status"
+                  data-testid="ntfy-kind-result"
+                >
+                  <component :is="kindResult.ok ? CheckCircle2 : XCircle" class="w-3.5 h-3.5 shrink-0 mt-px" />
+                  <span class="leading-normal">{{ kindResult.text }}</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 

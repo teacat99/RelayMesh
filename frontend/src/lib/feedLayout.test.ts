@@ -34,11 +34,11 @@ const NEGATIVE_VERTICAL_MARGIN = /(?:^|\s)-m[tby]-/
 const ANY_VERTICAL_MARGIN = /(?:^|\s)-?m[tby]-/
 
 describe('会话流排版', () => {
-  const list = read('components/feedback/FeedbackMessageList.vue')
+  const list = read('components/feedback/preview-view/PreviewMessageList.vue')
   const capsule = read('components/feedback/CapsuleMarker.vue')
 
   it('会话流与恢复胶囊都不使用负的纵向外边距', () => {
-    for (const [name, source] of [['FeedbackMessageList.vue', list], ['CapsuleMarker.vue', capsule]] as const) {
+    for (const [name, source] of [['PreviewMessageList.vue', list], ['CapsuleMarker.vue', capsule]] as const) {
       for (const cls of classLiterals(source)) {
         assert.ok(!NEGATIVE_VERTICAL_MARGIN.test(cls), `${name} 里出现负纵向外边距：${cls}`)
       }
@@ -46,7 +46,7 @@ describe('会话流排版', () => {
   })
 
   it('每一轮都包在「轮次组」里，组内间距由 space-y-3 给出', () => {
-    const group = /<div\s+v-for="session in displayedConversationRounds"[^>]*?class="space-y-3"[^>]*?data-testid="turn-group"/s
+    const group = /<div\s+v-for="\(session, gi\) in displayedConversationRounds"[^>]*?class="space-y-3"[^>]*?data-testid="turn-group"/s
     assert.match(list, group, '缺少 data-testid="turn-group" 的轮次组容器')
   })
 
@@ -70,7 +70,7 @@ describe('会话流排版', () => {
 
   it('轮次之外的条目只有一条合并后的流：不再各类各自一份独立落位', () => {
     for (const stale of ['inboxPlacement', 'confirmPlacement', 'extraPlacement', 'capsulePlacement']) {
-      assert.ok(!list.includes(stale), `FeedbackMessageList.vue 里不应再出现独立的落位流 ${stale}`)
+      assert.ok(!list.includes(stale), `PreviewMessageList.vue 里不应再出现独立的落位流 ${stale}`)
     }
   })
 

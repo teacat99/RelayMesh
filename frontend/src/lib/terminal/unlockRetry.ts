@@ -67,11 +67,33 @@ export async function withFreshUnlock<T>(fn: () => Promise<T>, deps: FreshUnlock
   }
 }
 
-/** 需要解锁的 API 路径前缀：终端接口，以及令牌管理（授予终端能力的令牌操作）。 */
-const UNLOCK_AWARE_PREFIXES = ['/terminal/', '/credentials', '/oauth/requests', '/oauth/policy']
+/**
+ * 需要解锁的 API 路径前缀：终端接口，以及令牌管理（授予终端能力的令牌操作）、OAuth 的批准 / 策略，
+ * 还有 OAuth 接入窗口与「刚登记的客户端」的管理（#239：开 / 续 / 关窗口、删除一条登记都要解锁）。
+ * 漏掉任何一个前缀，对应的请求就不会带解锁令牌，服务端回 unlock_required、页面反复弹出密码框——新增需要解锁的接口时记得加在这里。
+ */
+const UNLOCK_AWARE_PREFIXES = ['/terminal/', '/credentials', '/oauth/requests', '/oauth/policy', '/oauth/window', '/oauth/clients']
 
-/** 这个请求路径是否应该带上解锁令牌（令牌只发往本站点自己的这几类接口）。 */
-export function carriesUnlock(url: string | undefined): boolean {
+/**
+ * 只在「这个方法 + 这条路径」上才带解锁令牌的精确接口（不能整段加前缀，否则 /workflows/ 下所有读写请求都会带上令牌）：
+ * - POST /workflows：建会话；带 parent_workflow_id 建分支时，协作 / 托管预设含「改参数」，服务端要求解锁（#236 P3）；
+ *   普通建会话也会带上（服务端不看它，令牌只发往本站点）；
+ * - PUT /workflows/<id>/branch：改分支向主会话开放的范围，放宽「改参数」档位或打开「启动」要解锁。
+ */
+const UNLOCK_AWARE_ROUTES: ReadonlyArray<{ method: string; path: RegExp }> = [
+  { method: 'post', path: /^\/workflows\/?$/ },
+  { method: 'put', path: /^\/workflows\/[^/]+\/branch\/?$/ },
+]
+
+/**
+ * 这个请求是否应该带上解锁令牌（令牌只发往本站点自己的这几类接口）。method 不给时只按前缀判断；
+ * 精确接口按「方法 + 路径」判断，路径里的查询串不参与。
+ */
+export function carriesUnlock(url: string | undefined, method?: string): boolean {
   const u = url ?? ''
-  return UNLOCK_AWARE_PREFIXES.some(p => u.startsWith(p))
+  if (UNLOCK_AWARE_PREFIXES.some(p => u.startsWith(p))) return true
+  const m = (method ?? '').toLowerCase()
+  if (!m) return false
+  const path = u.split('?')[0]
+  return UNLOCK_AWARE_ROUTES.some(r => r.method === m && r.path.test(path))
 }

@@ -1,13 +1,25 @@
 <script setup lang="ts">
-// 预览视图的消息搜索面板（#120 阶段 E-c1）：浮在列表顶部。输入关键词 → 服务端子串搜索（覆盖整段历史）→ 点结果落到那张卡。
-// 只负责「搜」与「列」：落点由列表（PreviewMessageList 的 jumpToHit）按命中消息的 source 认卡，这里只把命中交出去。
-// 不碰群聊窗口的 store（那边要先打开一个群才能搜），直接走会话接口：GET /conversations/wf:<工作流>/messages?q=。
+// 消息搜索面板（#120 阶段 E-c1；#241 起群聊窗口也用它）：浮在列表顶部。输入关键词 → 服务端子串搜索（覆盖整段历史）→ 点结果落到那条消息。
+// 只负责「搜」与「列」：落点由宿主（预览列表的 jumpToHit、群聊窗口的 openResult）按命中消息认卡，这里只把命中交出去。
+// 不碰任何 store，直接走会话接口：GET /conversations/<wf:工作流 | grp:群>/messages?q=。
+// workflowId 就是会话键：工作流会话传工作流编号，群聊传 grp:…（conversationIdOf 对 grp: 原样放行）。
+// 群聊没有「汇报 / 提问」这些种类（群消息只有文字与系统行；服务端搜群消息只看文字，不看 kinds 参数），
+// 所以群聊宿主传 kinds=[]：不带这个参数，免得把工作流会话的种类词表带进群聊请求（默认只搜有对应卡片的种类）。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Loader2, Search, X } from 'lucide-vue-next'
 import { chatErrorMessage, conversationIdOf, conversationsApi, type ChatMessage } from '../../../api/conversations'
 import { SEARCH_KINDS, SEARCH_LIMIT, hitKindLabel, hitSnippet, hitWhen } from '../../../lib/previewSearch'
 
-const props = defineProps<{ workflowId: string }>()
+const props = withDefaults(
+  defineProps<{
+    workflowId: string
+    /** 输入框的占位文字；默认是工作流会话的说法 */
+    placeholder?: string
+    /** 只搜这些种类；空数组 = 不过滤 */
+    kinds?: readonly string[]
+  }>(),
+  { placeholder: '搜索这个工作流的全部消息（汇报 / 回复 / 追加 / 提问 / 任务进展）', kinds: () => SEARCH_KINDS },
+)
 const emit = defineEmits<{ close: []; pick: [hit: ChatMessage] }>()
 
 const inputEl = ref<HTMLInputElement | null>(null)
@@ -45,7 +57,7 @@ watch(trimmed, q => {
   searching.value = true
   timer = setTimeout(async () => {
     try {
-      const page = await conversationsApi.list(conversationIdOf(props.workflowId), { limit: SEARCH_LIMIT, q, kinds: [...SEARCH_KINDS] })
+      const page = await conversationsApi.list(conversationIdOf(props.workflowId), { limit: SEARCH_LIMIT, q, kinds: [...props.kinds] })
       if (mine !== seq) return // 晚到的旧响应丢弃
       // 接口按时间升序给最新的一批，面板里新的在上
       results.value = [...page.items].reverse()
@@ -124,7 +136,7 @@ onBeforeUnmount(() => {
         autocomplete="off"
         spellcheck="false"
         :disabled="!props.workflowId"
-        :placeholder="props.workflowId ? '搜索这个工作流的全部消息（汇报 / 回复 / 追加 / 提问 / 任务进展）' : '这个会话没有工作流编号，无法搜索'"
+        :placeholder="props.workflowId ? props.placeholder : '这个会话没有工作流编号，无法搜索'"
         class="min-w-0 flex-1 bg-transparent text-[16px] outline-none placeholder:text-muted-foreground/70 sm:text-[13px]"
         data-testid="preview-search-input"
         @keydown="onKey"
@@ -162,7 +174,7 @@ onBeforeUnmount(() => {
           @mouseenter="active = i"
           @click="pick(m)"
         >
-          <span class="mt-px shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">{{ hitKindLabel(m) }}</span>
+          <span class="mt-px max-w-[8rem] shrink-0 truncate rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground" data-testid="preview-search-hit-label">{{ hitKindLabel(m) }}</span>
           <span class="min-w-0 flex-1 break-words">
             <template v-for="(part, k) in hitSnippet(m, resultQuery)" :key="k"><mark v-if="part.hit" class="rounded-sm bg-primary/20 px-px text-foreground">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template>
           </span>

@@ -244,7 +244,7 @@ relay.example.com {
 - 浏览器访问 `https://relay.example.com/`，验证里的 `BASE` 换成 `https://relay.example.com`；
 - MCP 客户端地址是 `https://relay.example.com/mcp`，令牌放在请求头 `Authorization: Bearer <令牌>`；
 - 反向代理与 RelayMesh 在同一台机器、或在私网内时，不需要额外设置；经公网 CDN 或其他主机上的反代访问时，请按 README 设置 `RELAYMESH_TRUSTED_PROXIES`，否则登录防暴力破解会把所有人当成同一个 IP；
-- 要使用 OAuth 连接器（ChatGPT / Claude 等），还需要设置 `RELAYMESH_PUBLIC_URL=https://relay.example.com`，见 [OAuth 文档](oauth.md)。
+- 要使用 OAuth 连接器（ChatGPT / Claude 等），还需要设置 `RELAYMESH_PUBLIC_URL=https://relay.example.com`，见 [OAuth 文档](oauth.md)；新客户端第一次接入前，要在网页「设置 → OAuth 授权」里开启总开关，并打开「接入窗口」（默认限时 10 分钟，窗口之外客户端无法自动注册）。
 
 ---
 

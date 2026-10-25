@@ -94,6 +94,32 @@ func (s *Store) RecycleOldestUnusedOAuthClient(ctx context.Context) bool {
 	return true
 }
 
+// ListUnusedOAuthClients 返回从未签发过令牌的 DCR 登记（登记后还没走完授权），新的在前；since 非零时只要这个时间之后登记的。
+// 一旦某个客户端第一次拿到令牌（TouchOAuthClient 写入 last_used_at），它就不再出现在这里，改在授权列表里管理。
+func (s *Store) ListUnusedOAuthClients(ctx context.Context, since time.Time) ([]model.OAuthClient, error) {
+	var list []model.OAuthClient
+	q := s.db.WithContext(ctx).Where("last_used_at IS NULL")
+	if !since.IsZero() {
+		q = q.Where("created_at >= ?", since)
+	}
+	err := q.Order("created_at DESC").Find(&list).Error
+	return list, err
+}
+
+// DeleteUnusedOAuthClient 删除一条从未签发过令牌的登记；不存在或已经被使用过的不删，返回 false。
+// 只删「没用过」的：已授权客户端的刷新要靠这条登记，误删会让它的授权突然失效。
+func (s *Store) DeleteUnusedOAuthClient(ctx context.Context, clientID string) (bool, error) {
+	res := s.db.WithContext(ctx).Where("client_id = ? AND last_used_at IS NULL", clientID).Delete(&model.OAuthClient{})
+	return res.RowsAffected > 0, res.Error
+}
+
+// ListLiveOAuthGrantsByClient 返回某个客户端名下还没撤销的授权。
+func (s *Store) ListLiveOAuthGrantsByClient(ctx context.Context, clientID string) ([]model.OAuthGrant, error) {
+	var list []model.OAuthGrant
+	err := s.db.WithContext(ctx).Where("client_id = ? AND revoked_at IS NULL", clientID).Find(&list).Error
+	return list, err
+}
+
 func (s *Store) CreateOAuthGrant(ctx context.Context, g *model.OAuthGrant) error {
 	return s.db.WithContext(ctx).Create(g).Error
 }

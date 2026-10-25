@@ -30,6 +30,9 @@ const (
 	followerRetryWindow = 15 * time.Second
 )
 
+// watchInterval 是 watch 实际用的间隔（默认就是 followerWatchInterval；只有测试会改，好在几十毫秒里复现收尾期间的竞态）。
+var watchInterval = followerWatchInterval
+
 // sleepContext 睡 d；ctx 先结束则返回 false。
 func sleepContext(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
@@ -52,6 +55,9 @@ type stdioFollower struct {
 	hub            *stdioHub        // 升级成主进程后非空
 	local          mcp.StdioHandler // 升级成主进程后非空：本进程内直接处理
 	lastPromoteErr string           // 上一次接管失败的原因（去重日志）
+	// closed 在 close() 之后为真：此后不再接管。退出途中还在跑的监视协程、通知派发协程若恰好赶上端口空出来，
+	// 不能再拉起一个没人去关的主进程——进程带着它退出，数据目录里就留下 stdio-hub.json（#248）。
+	closed bool
 }
 
 func newStdioFollower(cfg *config.Config, fw *mcp.LocalForwarder) *stdioFollower {
@@ -72,6 +78,9 @@ func (f *stdioFollower) localHandler() mcp.StdioHandler {
 func (f *stdioFollower) tryPromote() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closed {
+		return false // 本进程已经在收尾（#248）：宁可不接管，也不留下一个没人关的主进程
+	}
 	if f.hub != nil {
 		return true
 	}
@@ -91,9 +100,11 @@ func (f *stdioFollower) tryPromote() bool {
 	return true
 }
 
-// close 在本进程退出时调用：升级成过主进程就把 Hub 优雅关掉（别的转发进程随后会接管）。
+// close 在本进程退出时调用：升级成过主进程就把 Hub 优雅关掉（别的转发进程随后会接管）；此后 tryPromote 一律拒绝。
+// tryPromote 拉起 Hub 的整个过程都持有 f.mu，所以 close 要么等它拉起完再关掉它，要么先于它、让它直接放弃。
 func (f *stdioFollower) close() {
 	f.mu.Lock()
+	f.closed = true
 	hub := f.hub
 	f.hub = nil
 	f.local = nil
@@ -106,7 +117,7 @@ func (f *stdioFollower) close() {
 // watch 每秒看一眼主进程的端口：连不上就尝试接管。端口绑定是唯一的仲裁——主进程只是卡了一下时抢不到端口，
 // 什么都不会发生；主进程真的没了才会抢到。接管成功后不再需要监视。
 func (f *stdioFollower) watch(ctx context.Context) {
-	ticker := time.NewTicker(followerWatchInterval)
+	ticker := time.NewTicker(watchInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -289,6 +300,8 @@ func runStdioFollower(cfg *config.Config) {
 		log.Printf("[RelayMesh stdio] stdio transport exited with error: %v", err)
 	}
 
+	// stdin 关了：先让监视 / 派发协程收工，再关 Hub（#248）。它们此后即使赶上端口空出来，也不会再接管出一个没人关的主进程。
+	cancel()
 	f.close()
 	log.Printf("[RelayMesh stdio] Exited cleanly.")
 }

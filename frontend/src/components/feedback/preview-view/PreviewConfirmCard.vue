@@ -14,12 +14,13 @@ import { FileText, X } from 'lucide-vue-next'
 import type { ConfirmItem } from '../../../api/confirms'
 import { useConfirmAnswer } from '../../../composables/useConfirmAnswer'
 import { useConfirmFocus } from '../../../composables/useConfirmFocus'
-import { RISK_LABEL, RISK_SHORT, riskTone } from '../../../lib/confirms'
+import { RISK_SHORT, riskHint, riskTone, routedToMain } from '../../../lib/confirms'
 import { CARD_CHIP_BASE, CARD_PANEL_CLASS, CARD_TYPES, cardTimeText, type CardMenuItem } from '../../../lib/messageCard'
 import { confirmRefToken } from '../../../lib/replyRef'
 import { STATUS_WORD } from '../../../lib/statusWords'
 import ConfirmChoice from '../../confirms/ConfirmChoice.vue'
 import ConfirmLinks from '../../confirms/ConfirmLinks.vue'
+import ConfirmRouteNotice from '../../confirms/ConfirmRouteNotice.vue'
 import PreviewMarkdown from './PreviewMarkdown.vue'
 import EventStatus from '../EventStatus.vue'
 import ReplyRefButton from '../ReplyRefButton.vue'
@@ -35,6 +36,8 @@ const focused = useConfirmFocus(() => props.item.ref, rootEl)
 
 const testid = computed(() => `confirm-${props.item.ref}`)
 const statusTone = computed(() => CARD_TYPES[props.item.kind].tone)
+// 分支会话里智能体的请示先送主会话定夺（#236 P2）：状态词换成「待主会话」、不脉动（暂时不用您管；您仍可直接答复，先到先得）
+const routed = computed(() => routedToMain(props.item))
 
 // 风险标签：与事件行同一套让位规则——手机上只留高风险（L2），其余让位给标题（完整等级在悬停提示里）
 const riskClass = computed(() => {
@@ -64,8 +67,9 @@ const menuItems = computed<CardMenuItem[]>(() => [
       :data-risk="item.risk"
     >
       <template #status>
-        <span :class="[CARD_CHIP_BASE, riskClass]" :title="RISK_LABEL[item.risk]" :data-testid="`${testid}-risk`">{{ RISK_SHORT[item.risk] || item.risk }}</span>
-        <EventStatus :tone="statusTone" pulse>{{ STATUS_WORD.pending }}</EventStatus>
+        <span :class="[CARD_CHIP_BASE, riskClass]" :title="riskHint(item.risk)" :data-testid="`${testid}-risk`">{{ RISK_SHORT[item.risk] || item.risk }}</span>
+        <EventStatus v-if="routed" tone="violet">{{ STATUS_WORD.routed }}</EventStatus>
+        <EventStatus v-else :tone="statusTone" pulse>{{ STATUS_WORD.pending }}</EventStatus>
       </template>
       <template #menu>
         <PreviewCardMenu :items="menuItems" />
@@ -81,6 +85,9 @@ const menuItems = computed<CardMenuItem[]>(() => [
         <p v-if="item.kind === 'plan'" class="flex items-center gap-1 text-[11px] text-muted-foreground">
           <FileText class="size-3" />批准之前，智能体只会做只读的准备工作。
         </p>
+
+        <!-- 决策路由（#236 P2）：先送了主会话 / 被转交给您时，说明原因与您能做什么 -->
+        <ConfirmRouteNotice :item="item" :testid="testid" />
 
         <!-- 作答区：要您动手的这一块从正文里浮出来（色调取自卡的色条） -->
         <div :class="[CARD_PANEL_CLASS, 'p-2.5']" :data-testid="`${testid}-answer`">

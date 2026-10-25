@@ -49,6 +49,20 @@ export interface LinkTarget {
 }
 
 /** 「哪些目标存在」：每个函数返回目标（规范化后的键 + 标题），不存在返回 null。 */
+/**
+ * 一批确认项按序号建的索引，连同其中最大的序号（正文里的 Q<N> 引用靠它解析；最大序号进「存在集合变了没有」的签名）。
+ * 序号相同的后面的覆盖前面的；最大序号至少为 0。性能原因与会话短哈希索引相同（#186 C2a）：只在 store 里建一份共用。
+ */
+export function buildSeqIndex<T extends { seq: number }>(items: readonly T[]): { bySeq: Map<number, T>; maxSeq: number } {
+  const bySeq = new Map<number, T>()
+  let maxSeq = 0
+  for (const item of items) {
+    bySeq.set(item.seq, item)
+    if (item.seq > maxSeq) maxSeq = item.seq
+  }
+  return { bySeq, maxSeq }
+}
+
 export interface LinkRefIndex {
   task(seq: number): { title?: string } | null
   /** n = 确认项编号（Q23 的 23）。 */
@@ -251,7 +265,8 @@ export function wholeLinkRef(text: string, idx: LinkRefIndex, fromPath = ''): Li
 
 /**
  * 每种引用的真实深链地址（站内相对路径；⌘ / Ctrl / 中键点链接在新标签页里打开的就是它）：
- *   任务 → 任务页并弹出详情（/work/<工作流>?task=N，WorkPage 本来就认）
+ *   任务 → 任务页并弹出详情（/work/<工作流>?seq=N，WorkPage 按「板内序号」向服务端解析；
+ *          注意不能写成 ?task=N：那是数据库编号，#N 是板内序号，两个数不同，新标签页会打开别的任务，#242）
  *   确认项 → 会话页并点名那张卡（/?wf=<工作流>&q=Q23，useNotifyRuntime 处理）
  *   会话 → 会话页并选中那一轮（/?wf=<工作流>&s=<会话号>，通知深链同一套）
  *   文档 → 老文档地址（/docs/<工作流>/<路径>#锚点；工作流属于项目时路由守卫会替换成项目内的文档页）
@@ -260,7 +275,7 @@ export function linkRefHref(ref: LinkRef, workflowId: string): string {
   const wf = encodeURIComponent(workflowId)
   switch (ref.kind) {
     case 'task':
-      return `/work/${wf}?task=${encodeURIComponent(ref.key)}`
+      return `/work/${wf}?seq=${encodeURIComponent(ref.key)}`
     case 'confirm':
       return `/?wf=${wf}&q=${encodeURIComponent(ref.key)}`
     case 'session':

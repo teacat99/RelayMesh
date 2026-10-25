@@ -58,9 +58,6 @@ type workflowContextArgs struct {
 	Source   string      `json:"source,omitempty"`   // inbox_peek：调用方自报来源——hook（编辑器 hook 的轮询）/ check（安装检查）；智能体自己调用时不用填
 	// inbox_peek（source=hook）：hook 所在的 Cursor 对话编号。对话被 Hub 发起的运行认领时，提醒要查认领它的工作流的收件箱（#182）。
 	ConversationID string `json:"conversation_id,omitempty"`
-
-	// wake_permit：唤醒许可（0 = 标记任务全部完成，1 = 取消标记）。
-	Permit flexInt `json:"permit,omitempty"`
 }
 
 func (s *Server) handleWorkflowContext(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -133,8 +130,8 @@ func (s *Server) handleWorkflowContextWith(ctx context.Context, credCtx *Credent
 		return s.handleInboxPeek(ctx, args)
 	case "inbox_ack":
 		return s.handleInboxAck(ctx, args)
-	case "wake_permit":
-		return s.handleWakePermit(ctx, args)
+	case "resident_get":
+		return s.handleResidentGet(ctx, args)
 	default:
 		return nil, fmt.Errorf("unknown action: %s", args.Action)
 	}

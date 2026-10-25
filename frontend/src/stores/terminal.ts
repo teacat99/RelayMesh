@@ -8,9 +8,6 @@ import {
   toApiError,
   type AuditLog,
   type DiscoveryView,
-  type GuardItem,
-  type GuardView,
-  type GuardWakePlan,
   type HistoryEntry,
   type HostDefault,
   type HostGrantResult,
@@ -33,8 +30,7 @@ import {
 } from '../api/terminal'
 import { withFreshUnlock, withUnlockOnDemand } from '../lib/terminal/unlockRetry'
 import { hostTitle } from '../lib/terminal/format'
-import { guardAttention, type GuardAttention } from '../lib/terminal/guard'
-import { runPollDelay } from '../lib/terminal/launcherRun'
+import { runPollDelay, runsJustEnded } from '../lib/terminal/launcherRun'
 import { finishedUpgrades } from '../lib/terminal/upgrade'
 import { failureTitle, finishedWebUpgrades, jobIsAuto, jobKindLabel } from '../lib/terminal/webUpgrade'
 
@@ -59,8 +55,6 @@ export interface HistoryState {
 const TABS_KEY = 'relaymesh_term_tabs'
 const HOSTS_POLL_MS = 5_000
 const STATUS_POLL_MS = 15_000
-/** 会话守护的状态不需要秒级：服务端一分钟才判断一次，这里半分钟读一次足够。 */
-const GUARD_POLL_MS = 30_000
 const KEEPALIVE_CHECK_MS = 60_000
 /** 用户在终端里有过操作的这段时间内，才会替他延长解锁有效期。 */
 const ACTIVITY_WINDOW_MS = 5 * 60_000
@@ -304,64 +298,6 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
 
-  // ---------- 会话守护（D-214） ----------
-  // 守护的状态来自 GET /terminal/guard（登录即可读）。入口按钮上的提示点和启动器清单共用这一份；
-  // 只有存在「开了监测」的预设时才轮询；旧版 Hub 没有这个接口（404）：记下来，不再请求。
-  const guard = ref<GuardView | null>(null)
-  const guardUnsupported = ref(false)
-  const guardItems = computed<GuardItem[]>(() => guard.value?.items ?? [])
-  const guardWatching = computed(() => !guardUnsupported.value && launchers.value.some(l => l.guard?.enabled))
-  /** 需要你处理的会话（意外结束 / 停摆）：入口按钮上的提示点用。 */
-  const guardNeeds = computed<GuardAttention>(() => guardAttention(guardItems.value))
-  let guardTimer: ReturnType<typeof setInterval> | null = null
-  let guardUsers = 0
-
-  async function refreshGuard(): Promise<void> {
-    if (guardUnsupported.value) return
-    try {
-      guard.value = await terminalApi.guard()
-    } catch (e) {
-      // 网络抖动：保留上一次的结果；404 说明服务端还不认识守护，之后不用再问。
-      if (toApiError(e).status === 404) guardUnsupported.value = true
-    }
-  }
-
-  /** 开始定时读取守护状态（可重入；没有预设开着监测时不发请求）。 */
-  function startGuardPolling() {
-    guardUsers++
-    if (guardUsers > 1) return
-    guardTimer = setInterval(() => {
-      if (!document.hidden && guardWatching.value) void refreshGuard()
-    }, GUARD_POLL_MS)
-    if (guardWatching.value) void refreshGuard()
-  }
-
-  function stopGuardPolling() {
-    guardUsers = Math.max(0, guardUsers - 1)
-    if (guardUsers > 0) return
-    if (guardTimer) clearInterval(guardTimer)
-    guardTimer = null
-  }
-
-  /**
-   * 生成并登记一次唤醒，返回要执行的计划。需要解锁（它会把一句话输入到会话里，等于人在键盘上敲）；
-   * 用户取消解锁时抛 UnlockCancelled。服务端只登记，真正去输入的是调用方（浏览器）。
-   */
-  async function wakeGuard(presetId: string, mode?: 'type' | 'relaunch' | 'headless'): Promise<GuardWakePlan> {
-    const r = await withUnlock(() => terminalApi.wakeGuard(presetId, mode), '唤醒会话会把一句话输入到会话里（等于你在键盘上敲），需要再次验证密码')
-    void refreshGuard()
-    return r.plan
-  }
-
-  /** 标记 / 取消「任务全部完成」（唤醒许可 0 / 1）；需要解锁。 */
-  async function setGuardPermit(presetId: string, permit: 0 | 1): Promise<void> {
-    await withUnlock(
-      () => terminalApi.setGuardPermit(presetId, permit),
-      permit === 0 ? '标记任务全部完成需要再次验证密码' : '取消标记需要再次验证密码',
-    )
-    void refreshGuard()
-  }
-
   // ---------- 非交互续聊预设的运行（#126） ----------
   // 点「运行」由服务端提交一次 `agent -p --resume …`（不开终端），预设清单要看到它跑完没有、结果是什么：
   // 弹窗开着期间轮询 GET /terminal/launchers/runs——有运行在进行时勤一点，否则慢一点；
@@ -378,8 +314,11 @@ export const useTerminalStore = defineStore('terminal', () => {
     if (launcherRunsUnsupported.value) return
     try {
       const r = await terminalApi.launcherRuns()
+      const before = launcherRuns.value
       launcherRuns.value = r.runs ?? {}
       launcherOthers.value = r.others ?? []
+      // 有运行刚结束：预设可能被服务端改了（#191：「新会话」成功后切成「最近会话」），马上把预设清单读新
+      if (runsJustEnded(before, launcherRuns.value)) void loadStatus()
     } catch (e) {
       // 网络抖动：保留上一次的结果；404 说明服务端还不认识这个接口，之后不用再问。
       if (toApiError(e).status === 404) launcherRunsUnsupported.value = true
@@ -805,7 +744,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     code: string,
     name?: string,
     size?: { rows: number; cols: number },
-    opts?: { incognito?: boolean; idleSeconds?: number; cwd?: string; open?: boolean; sshTarget?: string; compact?: boolean },
+    opts?: { incognito?: boolean; idleSeconds?: number; cwd?: string; open?: boolean; sshTarget?: string },
   ): Promise<SessionInfo> {
     const r = await withUnlock(
       () =>
@@ -816,7 +755,6 @@ export const useTerminalStore = defineStore('terminal', () => {
           incognito: opts?.incognito || undefined,
           idle_seconds: opts?.idleSeconds,
           cwd: opts?.cwd || undefined,
-          compact: opts?.compact || undefined,
           ssh_target: opts?.sshTarget || undefined,
         }),
       opts?.incognito ? '新建无痕会话需要再次验证密码' : '新建会话需要再次验证密码',
@@ -1031,16 +969,6 @@ export const useTerminalStore = defineStore('terminal', () => {
     launchers,
     saveLauncher,
     deleteLauncher,
-    guard,
-    guardItems,
-    guardWatching,
-    guardNeeds,
-    guardUnsupported,
-    refreshGuard,
-    startGuardPolling,
-    stopGuardPolling,
-    wakeGuard,
-    setGuardPermit,
     launcherRuns,
     launcherOthers,
     cancelOtherRun,

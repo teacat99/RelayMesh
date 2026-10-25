@@ -144,8 +144,11 @@ func isQueryCall(tool, action string) bool {
 	switch tool {
 	case "list_sessions", "get_session_history", "get_session_image", "get_system_info", "terminal_targets", "usage_guide":
 		return true
-	case "workflow_context", "task_board", "project_docs", "async_ask", "chat", "manage_skills":
+	case "workflow_context", "task_board", "project_docs", "async_ask", "chat", "branch", "manage_skills":
 		return isReadAction(action)
+	case "session_params":
+		// action 缺省等同 get（只读）；set 是写入，算「在干活」。
+		return strings.TrimSpace(action) == "" || isReadAction(action)
 	}
 	return false
 }

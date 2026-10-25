@@ -39,19 +39,40 @@ export interface SettleMetrics {
   scrollTop: number
   scrollHeight: number
   clientHeight: number
+  /** 目标条目自己的高度（px）。只有居中对齐用得到；没给（或不是正数）就按装不进视口处理，退回顶边对齐。 */
+  itemHeight?: number
 }
 
 /**
- * 现在该把容器放到哪：与 jumpScrollTop 同一套规则（条目顶边上方留 padding，夹在可滚范围内）。
+ * 目标条目最后落在视口的哪里：
+ *   'start'  顶边上方留 padding（右侧轨 / 搜索命中 / 滚到某一轮：条目顶边是用户要看的开头）；
+ *   'center' 在视口里居中（确认卡被点名，与 scrollIntoView({ block: 'center' }) 的落点一致，#253）。
+ */
+export type SettleAlign = 'start' | 'center'
+
+/**
+ * 居中对齐该把容器放到哪：条目中线对准视口中线，夹在可滚范围内。
+ * 条目装不进视口（高度比视口减去上下 padding 还大，或高度未知）时居中会切掉它的头部，退回顶边对齐。
+ */
+export function centerScrollTop(m: SettleMetrics, padding: number = SETTLE_PADDING_PX): number {
+  const h = m.itemHeight ?? 0
+  if (!(h > 0) || h > m.clientHeight - 2 * padding) return jumpScrollTop(m.itemTop, m, padding)
+  const max = Math.max(0, m.scrollHeight - m.clientHeight)
+  return Math.max(0, Math.min(max, m.itemTop - (m.clientHeight - h) / 2))
+}
+
+/**
+ * 现在该把容器放到哪：'start' 与 jumpScrollTop 同一套规则（条目顶边上方留 padding，夹在可滚范围内），'center' 见 centerScrollTop。
  * 已经在目标的容差之内返回 null（不用动）。
  */
 export function settleTarget(
   m: SettleMetrics,
   padding: number = SETTLE_PADDING_PX,
   tolerance: number = SETTLE_TOLERANCE_PX,
+  align: SettleAlign = 'start',
 ): number | null {
   if (![m.itemTop, m.scrollTop, m.scrollHeight, m.clientHeight].every(Number.isFinite)) return null
-  const target = jumpScrollTop(m.itemTop, m, padding)
+  const target = align === 'center' ? centerScrollTop(m, padding) : jumpScrollTop(m.itemTop, m, padding)
   return Math.abs(target - m.scrollTop) <= tolerance ? null : target
 }
 

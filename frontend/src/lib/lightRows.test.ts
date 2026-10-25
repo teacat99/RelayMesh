@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { BODY_CHUNK, applyBodies, chunk, hasLightRows, isLightRow, lightIdsAfter, preserveFullBodies } from './lightRows'
+import { BODY_CHUNK, applyBodies, chunk, isLightRow, lightIdsAfter, preserveFullBodies } from './lightRows'
 import type { FeedbackSession, SessionBody } from '../api/types'
 
 const T = (n: number) => new Date(Date.UTC(2026, 9, 1, 0, n)).toISOString()
@@ -47,9 +47,6 @@ describe('轻量行判断', () => {
     assert.equal(isLightRow({ body_omitted: false }), false)
     assert.equal(isLightRow(null), false)
     assert.equal(isLightRow(undefined), false)
-    assert.equal(hasLightRows([full('a', 1), light('b', 2)]), true)
-    assert.equal(hasLightRows([full('a', 1)]), false)
-    assert.equal(hasLightRows(undefined), false)
   })
 })
 
@@ -227,17 +224,15 @@ describe('轻量行的源码级防线（#169 第二期）', () => {
     assert.match(src, /onBeforeUnmount\(\(\) => \{\s*\n\s*if \(timer\) clearInterval\(timer\)/)
   })
 
-  it('store：只有预览视图才请求轻量表；经典视图拿到的缓存里有轻量行就不能用', () => {
+  it('store：整表一律请求轻量表，再接回已取过的正文；不再有按视图开关分叉的分支（#166 删掉经典视图）', () => {
     const src = read('stores', 'session.ts')
-    assert.match(src, /const light = previewView\.enabled\.value\s*\n\s*const res = await sessionsApi\.getWorkflowSessions\(workflowId, \{ light \}\)/)
-    assert.match(src, /const fetched = light \? preserveFullBodies\(local, res\.sessions\) : res\.sessions/)
-    // 摆给展示层的行一律过 displayRows（经典视图看不到轻量行）；缓存是否可直接用一律过 cacheUsable
-    assert.equal((src.match(/currentWorkflowSessions\.value = displayRows\(/g) ?? []).length, 4, '整表取回 / 秒开缓存 / 选中会话 / 正文取回，四处摆展示层的地方都要过 displayRows')
-    assert.match(src, /if \(cacheUsable\(cached\) && isCacheFresh\(/)
-    assert.match(src, /if \(cacheUsable\(cached\)\) \{\s*\n\s*if \(activeWorkflowId\(\) === workflowId/)
-    // 取的时候是预览视图、回来时已切到经典：再强制取一份完整的
-    assert.match(src, /if \(light && !previewView\.enabled\.value && hasLightRows\(merged\)\) void upgradeToFull\(workflowId\)/)
-    assert.match(src, /watch\(\(\) => previewView\.enabled\.value, \(enabled\) => \{\s*\n\s*if \(enabled\) return/)
+    assert.match(src, /const res = await sessionsApi\.getWorkflowSessions\(workflowId, \{ light: true \}\)/)
+    assert.match(src, /const fetched = preserveFullBodies\(local, res\.sessions\)/)
+    assert.ok(!/displayRows|cacheUsable|upgradeToFull|usePreviewView|previewView|hasLightRows/.test(src), '轻量行不再因视图开关而分支')
+    // 摆给展示层的行直接用整表：整表取回 / 秒开缓存 / 补一份缓存 / 选中会话 / 正文取回，五处
+    assert.equal((src.match(/currentWorkflowSessions\.value = (?:merged|cached|next|workflowSessionsCache\.value\[wId\] \?\? \[\])\n/g) ?? []).length, 5)
+    assert.match(src, /if \(isCacheFresh\(workflowSyncedAt\.get\(workflowId\), lastSseGapAt, Date\.now\(\), WORKFLOW_CACHE_TTL_MS\)\) return/)
+    assert.match(src, /if \(cached\?\.length\) \{\s*\n\s*if \(activeWorkflowId\(\) === workflowId/)
   })
 
   it('预览列表：窗口只在三处改大小，增长都先取回正文；向上载入要在取回之后再量锚点', () => {

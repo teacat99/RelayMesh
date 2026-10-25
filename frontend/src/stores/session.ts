@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import type { AgentLiveView, AsyncModeView, FeedbackSession, InboxConfigView, InboxSummary, QueuedFeedback, SessionBody, SessionImage } from '../api/types'
 import { authApi, sessionsApi, workflowsApi } from '../api/client'
 import type { CreateWorkflowRequest } from '../api/client'
@@ -22,6 +22,7 @@ import {
   isCacheFresh,
   isSameSessionData,
   isStaleIncoming,
+  isWorkflowTableBehind,
   mergeFetchedList,
   mergeSessionPatch,
   shouldFollowNewPending,
@@ -29,12 +30,13 @@ import {
   type SyncScope,
 } from '../utils/sessionSync'
 import { watchPageLifecycle } from '../lib/pageLifecycle'
-import { usePreviewView } from '../composables/usePreviewView'
-import { BODY_CHUNK, applyBodies, chunk, hasLightRows, isLightRow, lightIdsAfter, preserveFullBodies } from '../lib/lightRows'
+import { BODY_CHUNK, applyBodies, chunk, isLightRow, lightIdsAfter, preserveFullBodies } from '../lib/lightRows'
 import { createRequestAnnouncer } from '../lib/requestAnnouncer'
+import { buildSessionHashIndex } from '../lib/replyRef'
 import { mergeWorkflowAggregates, patchPendingCount, type WorkflowAggregates } from '../lib/sidebarStatus'
 import { mergeWorkflowRounds, type WorkflowRounds } from '../lib/workflowRounds'
 import { secondaryGate } from '../lib/secondaryGate'
+import { runConnectHooks } from '../lib/connectHooks'
 
 // 会话类 SSE 事件的种类；载荷形态（完整会话 / 仅 session_id）由 classifySessionPayload 判定
 type SessionEventKind = 'update' | 'updated' | 'completed' | 'cancelled' | 'keepalive' | 'archived' | 'unarchived'
@@ -104,7 +106,35 @@ export const useSessionStore = defineStore('session', () => {
 
   const workflowSessionsCache = ref<Record<string, FeedbackSession[]>>({})
   const currentWorkflowSessions = ref<FeedbackSession[]>([])
+  /**
+   * 当前工作流的会话按短哈希（sess- 之后的部分）建的索引，正文里的会话号引用靠它解析：整个页面共用这一份。
+   * 以前每段 Markdown 的 useLinkRefs 实例各扫一遍整张表，长会话里（几百段正文 × 几百行）是几万次计算，
+   * 生产实测占打开过程 5～6 秒忙碌时间的约一成（#186 C2a，见 lib/replyRef.ts 的 buildSessionHashIndex）。
+   */
+  const sessionByHash = computed(() => buildSessionHashIndex(currentWorkflowSessions.value))
   const loadingWorkflowSessions = ref(false)
+  /**
+   * 「整表还没到、本地也没有缓存」的工作流 → 在途的冷加载个数（#186 Q117 a）。预览视图据此在整表到达前画骨架，
+   * 而不是先画简略列表里的几个壳、整表到达后版面一下长高数万像素再贴底（一屏无关内容然后整页跳走，CLS 的主要来源）。
+   * 只有「发起时本地没有任何整表行」的加载才计入；有缓存的刷新（先秒开缓存、再回源）不计，显示不受影响。
+   */
+  const coldLoading = ref<Record<string, number>>({})
+  function markColdLoading(workflowId: string, delta: 1 | -1) {
+    const next = (coldLoading.value[workflowId] ?? 0) + delta
+    const copy = { ...coldLoading.value }
+    if (next > 0) copy[workflowId] = next
+    else delete copy[workflowId]
+    coldLoading.value = copy
+  }
+  function isWorkflowColdLoading(workflowId: string): boolean {
+    return !!workflowId && (coldLoading.value[workflowId] ?? 0) > 0
+  }
+  /**
+   * 第一次取「简略会话列表」是否已有结果（成败都算，#186 Q117 a 的延伸）。在此之前侧栏与会话页还不知道「有没有会话」，
+   * 不能画「暂无匹配 Workflow 或工单」「暂无交互对话」这类空状态——生产录像里它们先占了约 0.7～1 秒，随后内容才出来。
+   * 只认不带状态过滤的那次（常规取数）；取数失败也算「有结果了」，回到原来的空状态，不会一直转。之后的刷新不再改它。
+   */
+  const sessionsListSettled = ref(false)
 
   // —— 同步引擎（D-171 / P1）：以下均为非响应式的同步元数据 ——
   // 工作流完整列表最近一次「开始拉取」的时间，用于判断缓存是否仍可信
@@ -115,7 +145,8 @@ export const useSessionStore = defineStore('session', () => {
   const sessionsListTouched = new Set<Set<string>>()
   // 最近一次 SSE 断线的时间：此前完成的整表缓存不再可信（期间可能漏事件）
   let lastSseGapAt = 0
-  let hasConnectedOnce = false
+  // 实时流是否连上过：只有选中工作流的整表校准区分「首次 / 重连」（见 resyncAfterConnect）
+  let sseOpenedBefore = false
   let activeWorkflowLoads = 0
   const awayTracker = createAwayTracker(AWAY_RECALIBRATE_MS)
 
@@ -134,24 +165,8 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   // —— 轻量行 / 正文按需（#169 第二期，纯函数规则见 lib/lightRows.ts）——
-  // 预览视图取的会话表，较早的行只带首行预览（body_omitted），完整正文用 ensureSessionBodies 按需补；经典视图不认轻量行，照旧取整表。
-  const previewView = usePreviewView()
-
-  /** 要摆给展示层的行：经典视图不能看到轻量行（首行预览会被当成正文），有的话先摆空，等完整表取回来。 */
-  function displayRows(rows: FeedbackSession[] | undefined): FeedbackSession[] {
-    if (!rows) return []
-    return previewView.enabled.value || !hasLightRows(rows) ? rows : []
-  }
-
-  /** 缓存里的整表能不能直接用：经典视图不能用带轻量行的那份。 */
-  function cacheUsable(rows: FeedbackSession[] | undefined): rows is FeedbackSession[] {
-    return !!rows?.length && (previewView.enabled.value || !hasLightRows(rows))
-  }
-
-  /** 强制取一份完整整表（此时预览开关已关，请求不带 light）。 */
-  function upgradeToFull(workflowId: string) {
-    return workflowFlight.request(workflowId, true)
-  }
+  // 取的会话表是「索引优先」的轻量表：较早的行只带首行预览（body_omitted），完整正文用 ensureSessionBodies 按需补。
+  // （曾经还有不认轻量行的经典视图，要另取一份完整整表；#166 删掉经典视图后这些分支一并去掉。）
 
   // 正文按需：在途的行共用同一个 Promise（同一行不重复取）；自动重试的失败行 BODY_RETRY_MS 内不再试（用户手势除外）
   const BODY_RETRY_MS = 10 * 1000
@@ -166,7 +181,7 @@ export const useSessionStore = defineStore('session', () => {
     const next = applyBodies(local, bodies)
     if (next === local) return
     workflowSessionsCache.value[workflowId] = next
-    if (activeWorkflowId() === workflowId) currentWorkflowSessions.value = displayRows(next)
+    if (activeWorkflowId() === workflowId) currentWorkflowSessions.value = next
     const picked = selectedSession.value
     if (picked && isLightRow(picked)) {
       const fresh = next.find(r => r.session_id === picked.session_id)
@@ -245,15 +260,6 @@ export const useSessionStore = defineStore('session', () => {
     }, 30)
   }
 
-  // 预览视图关掉（切到经典）：缓存里若有轻量行，经典视图不能用——先摆空，再取一份完整的
-  watch(() => previewView.enabled.value, (enabled) => {
-    if (enabled) return
-    const wId = activeWorkflowId()
-    if (!wId || !hasLightRows(workflowSessionsCache.value[wId])) return
-    currentWorkflowSessions.value = []
-    void upgradeToFull(wId)
-  })
-
   // 整表拉取统一走单飞：同一工作流同时最多 1 个在途请求 + 1 个尾随，合并并发触发（INV-R3）
   const workflowFlight = createKeyedFlight(
     async (workflowId: string) => {
@@ -263,22 +269,19 @@ export const useSessionStore = defineStore('session', () => {
       activeWorkflowLoads++
       loadingWorkflowSessions.value = true
       try {
-        // 预览视图取「索引优先」的轻量表（较早的行只带首行预览，正文按需补，#169 第二期）；经典视图要完整正文，照旧取整表
-        const light = previewView.enabled.value
-        const res = await sessionsApi.getWorkflowSessions(workflowId, { light })
+        // 取「索引优先」的轻量表（较早的行只带首行预览，正文按需补，#169 第二期）
+        const res = await sessionsApi.getWorkflowSessions(workflowId, { light: true })
         if (res && Array.isArray(res.sessions)) {
           const local = workflowSessionsCache.value[workflowId]
           // 再取一次表不能丢已经取过的正文：轻量行里本地有同版本完整行的，把正文接回来
-          const fetched = light ? preserveFullBodies(local, res.sessions) : res.sessions
+          const fetched = preserveFullBodies(local, res.sessions)
           const merged = mergeFetchedList(local, fetched, touched, { localOnlyPosition: 'end' })
           workflowSessionsCache.value[workflowId] = merged
           workflowSyncedAt.set(workflowId, startedAt)
           // 如果当前仍然停留在这个工作流，更新当前展示列表
           if (activeWorkflowId() === workflowId) {
-            currentWorkflowSessions.value = displayRows(merged)
+            currentWorkflowSessions.value = merged
           }
-          // 取的时候是预览视图、回来时已切到经典：经典不认轻量行，再取一份完整的
-          if (light && !previewView.enabled.value && hasLightRows(merged)) void upgradeToFull(workflowId)
         }
       } finally {
         workflowTouched.delete(workflowId)
@@ -298,21 +301,28 @@ export const useSessionStore = defineStore('session', () => {
     if (!workflowId) return
     const cached = workflowSessionsCache.value[workflowId]
     if (!force && cached?.length) {
-      // 本地已有缓存且非强制刷新，先赋给展示层（0ms 秒开）；经典视图不能用带轻量行的缓存（displayRows / cacheUsable）
-      currentWorkflowSessions.value = displayRows(cached)
-      if (cacheUsable(cached) && isCacheFresh(workflowSyncedAt.get(workflowId), lastSseGapAt, Date.now(), WORKFLOW_CACHE_TTL_MS)) return
+      // 本地已有缓存且非强制刷新，先赋给展示层（0ms 秒开）
+      currentWorkflowSessions.value = cached
+      if (isCacheFresh(workflowSyncedAt.get(workflowId), lastSseGapAt, Date.now(), WORKFLOW_CACHE_TTL_MS)) return
     }
     // 次要请求让路（#169 第三期，lib/secondaryGate.ts）：打开 / 切换会话（非强制）的整表加载期间，任务 / 确认项 / 收件箱 / 恢复胶囊先不发，
     // 等整表到齐（成败都算，最长 1.5 秒）；强制刷新（SSE 触发、刚做完变更）不拦，次要请求照常即时发出。
-    if (force) {
-      await workflowFlight.request(workflowId, force)
-      return
-    }
-    secondaryGate.hold()
+    // 发起时本地没有任何整表行 = 冷加载：到整表到达（成败都算）为止，预览视图画骨架（isWorkflowColdLoading，#186 Q117 a）
+    const cold = !cached?.length
+    if (cold) markColdLoading(workflowId, 1)
     try {
-      await workflowFlight.request(workflowId, force)
+      if (force) {
+        await workflowFlight.request(workflowId, force)
+        return
+      }
+      secondaryGate.hold()
+      try {
+        await workflowFlight.request(workflowId, force)
+      } finally {
+        secondaryGate.release()
+      }
     } finally {
-      secondaryGate.release()
+      if (cold) markColdLoading(workflowId, -1)
     }
   }
 
@@ -357,6 +367,26 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   /**
+   * 首次连上时核对当前工作流的整张会话表有没有落后于刚取回的会话列表（#243）。
+   *
+   * 会话列表（侧栏）每次连上都重取，整表却只在重连时才强制重取；页面载入到连上之间别处新增 / 更新的会话行（例如智能体刚接入、
+   * 答复完一轮）于是出现在列表里、不在整表里——侧栏已经更新，会话页的对话还停在旧的。这种情形没有待答复的会话，
+   * 当前会话的校准补丁与 20 秒兜底同步都不会碰整表，要等下一个事件或切换会话才补上。
+   * 整表很大（生产上压缩后 0.6～1 MB），ETag 是内容哈希、304 与整表同价，所以不无条件再取，只在列表里有整表没有的行、
+   * 或某一行比整表里的新时才强制取一次：常态（没有缺口）不多一个请求，load-budget.mjs 钉着的「深链接页整表恰好取 1 次」仍成立。
+   * 整表还在途（深链接 / 冷加载）时先等它落地再核对：它是在实时流连上之前发出的，同样可能带着缺口之前的状态；不另发一次。
+   */
+  async function reconcileWorkflowTable() {
+    const wId = activeWorkflowId()
+    if (!wId) return
+    if (workflowFlight.isBusy(wId)) await workflowFlight.request(wId)
+    const table = workflowSessionsCache.value[wId]
+    if (!table?.length) return
+    const rows = sessions.value.filter(s => (s.workflow_id || s.session_id) === wId)
+    if (isWorkflowTableBehind(table, rows)) loadWorkflowSessionsIfShown(wId, true)
+  }
+
+  /**
    * 保证某个工作流的整表在本地：非会话页上的正文引用（sess-xxxxxxxx）要靠它解析，而这些页面不再顺带加载整表。
    * 已有缓存（不管新旧）就只把它摆给展示层、不发请求；没有就走单飞取一次。
    */
@@ -364,7 +394,7 @@ export const useSessionStore = defineStore('session', () => {
   function ensureWorkflowSessions(workflowId: string) {
     if (!workflowId) return
     const cached = workflowSessionsCache.value[workflowId]
-    if (cacheUsable(cached)) {
+    if (cached?.length) {
       if (activeWorkflowId() === workflowId && currentWorkflowSessions.value !== cached) currentWorkflowSessions.value = cached
       return
     }
@@ -382,7 +412,7 @@ export const useSessionStore = defineStore('session', () => {
       if (wId) {
         // 展示层先对齐到目标工作流：有缓存用缓存，没有就清空，让时间线回退到简略列表里这个工作流自己的行。
         // 此前不清空，整表在途期间时间线（以及按选中工作流解析的引用）仍是上一个工作流的轮次。
-        currentWorkflowSessions.value = displayRows(workflowSessionsCache.value[wId])
+        currentWorkflowSessions.value = workflowSessionsCache.value[wId] ?? []
         loadWorkflowSessionsIfShown(wId)
       }
     } else {
@@ -588,18 +618,26 @@ export const useSessionStore = defineStore('session', () => {
   function handleSessionEvent(kind: SessionEventKind, payload: unknown) {
     const classified = classifySessionPayload(payload)
     // 「等你回答」是由待答复的汇报推导出来的状态，不会有 agent_state 事件：交互请求变化时让 Agent 状态跟着校准一次（#113）
+    let agentWorkflow: string | undefined
     if (kind !== 'keepalive') {
-      const wf =
+      agentWorkflow =
         classified.session?.workflow_id ||
         (classified.sessionId ? sessions.value.find(s => s.session_id === classified.sessionId)?.workflow_id : undefined)
-      useAgentStateStore().onSessionEvent(wf)
+      useAgentStateStore().onSessionEvent(agentWorkflow)
     }
     if (classified.kind === 'full' && classified.session) {
       // 载荷即权威：只打补丁，不整表重拉（INV-R4）
       applySessionPayload(classified.session)
       scheduleSync(scopeForFullEvent(kind, classified.session))
     } else if (classified.kind === 'poke' && classified.sessionId) {
-      void pokeFlight.request(classified.sessionId, true)
+      const sessionId = classified.sessionId
+      const flight = pokeFlight.request(sessionId, true)
+      // 智能体刚发起 interactive_feedback 时，新会话的事件只带 session_id，事件到达时本地列表里还没有它，
+      // 上面按 session_id 找不到工作流，Agent 状态就不会校准：芯片要等一分钟一次的定时校准才变成「等你回答」（#203）。
+      // 会话取回之后列表里有了，按它自带的工作流补一次；上面已经能找到工作流的事件通知过了，不重复。
+      if (kind !== 'keepalive' && !agentWorkflow) {
+        void flight.then(() => useAgentStateStore().onSessionEvent(sessions.value.find(s => s.session_id === sessionId)?.workflow_id))
+      }
       // 新会话创建需要触发「新反馈请求」通知并同步 currentSession，这些都在 fetchCurrentSession 里
       scheduleSync({ current: true, queued: true })
     } else {
@@ -644,6 +682,8 @@ export const useSessionStore = defineStore('session', () => {
       console.error('Failed to list sessions', err)
     } finally {
       sessionsListTouched.delete(touched)
+      // 在 try 里选中默认会话（selectSession → 整表冷加载计数 +1）之后才置位：同一段同步代码里，页面不会出现「列表有结果、却什么都没选」的一帧
+      if (!status) sessionsListSettled.value = true
     }
   }
 
@@ -890,6 +930,19 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  // 严格收尾门（#232 D2）：任务一变，挡着收尾的名单与个数就变了（窗口本身没变，服务端不会广播 workflow_mode_updated）。
+  // 只在异步生效且门开着的会话里，把状态顺带重取一次（去抖，成批写入只取一次）。
+  let gateRefreshTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleGateRefresh() {
+    const m = asyncMode.value
+    if (!m?.effective || m.strict_wrapup !== true) return
+    if (gateRefreshTimer) clearTimeout(gateRefreshTimer)
+    gateRefreshTimer = setTimeout(() => {
+      gateRefreshTimer = null
+      void fetchQueuedFeedbacks()
+    }, 400)
+  }
+
   /** 开关 / 选档位提交后，直接采用服务端返回的状态（仍然只采纳对得上当前工作流的）。 */
   function setAsyncMode(view: AsyncModeView) {
     const nowWf = selectedSession.value?.workflow_id || currentSession.value?.workflow_id || ''
@@ -1120,6 +1173,38 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  /**
+   * 实时流（首次或重新）连上之后，把「连上之前 / 断线期间发生、没人听见」的变化补取一次（#243）。
+   *
+   * 服务端的事件只发给此刻在线的订阅者、不补发。页面载入后先用 REST 取一遍各个仓库的快照、再换票据建立实时流，
+   * 这中间的变化没有订阅者听见——首次连上与重连是同一种缺口，所以走同一个函数；以前这里只在重连时跑、而且漏了设置与托管自驾任务，
+   * 页面载入后几百毫秒内的改动要等下一个事件才会出现（e2e 里 preset-versions 的间歇失败就是它，D-391）。
+   * 每个仓库自己决定「没被用过就什么也不做」：有些在自己的 setup 里登记（只有用到它的页面才会实例化），有些自己判断。
+   *
+   * 区分首次与重连的只有选中工作流的整表：它的 ETag 是内容哈希，服务端要把整张表查出来、序列化完才知道能不能回 304，
+   * 校准一次的服务端代价与完整下载相同（生产上整表压缩后 0.6～1 MB）。重连时缺口是整段断线，直接强制重取；
+   * 首次连上的缺口只有几百毫秒、常态里什么也没发生，不无条件再取（load-budget.mjs 把「深链接页整表恰好取 1 次」钉成预算），
+   * 而是等刚取回的会话列表到齐，核对整表有没有落后于它（reconcileWorkflowTable），落后了才取一次。
+   * 不在这里的：Artifact 的数据 / 评论事件、阶段 / 检查点 / 工作表信号、凭据页（它们没有「快照 + 事件」的双通道，或另有校准路径）。
+   */
+  function resyncAfterConnect(reconnected: boolean, listsLanded: Promise<unknown>) {
+    // 选中工作流的整表：重连时强制重取；首次连上等刚取回的会话列表到齐，只在整表落后于列表时才取（reconcileWorkflowTable）
+    if (reconnected) {
+      const wId = activeWorkflowId()
+      if (wId) loadWorkflowSessionsIfShown(wId, true)
+    } else {
+      void listsLanded.then(reconcileWorkflowTable)
+    }
+    void fetchQueuedFeedbacks()
+    // 每个页面都有的：全局设置、托管自驾任务（后者自己判断「没被取过就什么也不做」）
+    useSettingsStore().onConnected()
+    useTaskStore().onConnected()
+    // 其余仓库（任务清单 / 确认项 / 项目文档 / 常驻提示词 / 异步档位）在自己的 setup 里登记补取（lib/connectHooks.ts）：
+    // 只补取已经被实例化的。这里不能直接 use…Store()——那会把设置页这类从不显示它们的页面上也实例化出来，白发请求，
+    // 还会改变行为（任务清单仓库一旦存在，/work 的默认项目跳转就不再等一次计数请求）；惰性加载的三个也不会因此被拉代码块
+    runConnectHooks()
+  }
+
   async function openEventSource() {
     let sseUrl: string | null = null
     try {
@@ -1140,8 +1225,8 @@ export const useSessionStore = defineStore('session', () => {
       reconnectAttempt = 0
       kickWatchdog()
       // 连接恢复后主动拉取最新数据，确保断线期间事件不丢失
-      fetchCurrentSession()
-      fetchSessions()
+      const current = fetchCurrentSession()
+      const listed = fetchSessions()
       // Agent 身份与状态：首次连上取一次全量，重连后再校准一次（断线期间可能漏了 agent_state 事件）
       useAgentStateStore().onConnected()
       // 通知偏好（免打扰 / 会话静音 / 预览模式）：首次连上取一次，重连后再校准一次
@@ -1149,16 +1234,9 @@ export const useSessionStore = defineStore('session', () => {
       // 聊天与群聊：页面载入到连上之间、断线期间的消息事件没人听见，也不会补发——打开着的会话补取最新一页，侧栏的未读数与群列表重取（#204）
       useChatStore().onConnected()
       useGroupStore().onConnected()
-      if (hasConnectedOnce) {
-        // 重连：断线期间可能漏掉了事件，选中工作流与队列都要整表校准一次（首次连接没有这个问题，避免重复拉取）
-        const wId = activeWorkflowId()
-        if (wId) loadWorkflowSessionsIfShown(wId, true)
-        void fetchQueuedFeedbacks()
-        useWorkItemStore().onServerEvent()
-        useConfirmStore().onServerEvent()
-        void import('./projectDocs').then(({ useProjectDocStore }) => useProjectDocStore().onConfirmEvent())
-      }
-      hasConnectedOnce = true
+      const reconnected = sseOpenedBefore
+      sseOpenedBefore = true
+      resyncAfterConnect(reconnected, Promise.allSettled([current, listed]))
     }
 
     eventSource.onerror = () => {
@@ -1230,6 +1308,20 @@ export const useSessionStore = defineStore('session', () => {
       void import('./asyncMode').then(({ useAsyncModeStore }) => useAsyncModeStore().onProfilesEvent())
       void fetchQueuedFeedbacks()
     })
+    // 会话常驻规则（#232）：你在别处改了，或智能体第一次读到新版本（「已读到 / 待读」翻转）；只对已加载过的工作流重取
+    eventSource.addEventListener('workflow_prompts_updated', (e: MessageEvent) => {
+      kickWatchdog()
+      const payload = parseSSEEventData(e)
+      void import('./workflowPrompts').then(({ useWorkflowPromptsStore }) => useWorkflowPromptsStore().onEvent(payload?.workflow_id))
+    })
+    // 分支会话（#236）：关系有变化（建立 / 改设置 / 结束），或主会话与分支之间有了新消息——侧栏的分支树、页头芯片与会话页的分支消息流据此重取
+    for (const evName of ['branch_changed', 'branch_message']) {
+      eventSource.addEventListener(evName, (e: MessageEvent) => {
+        kickWatchdog()
+        const payload = parseSSEEventData(e)
+        void import('./branches').then(({ useBranchStore }) => useBranchStore().onEvent(payload))
+      })
+    }
     eventSource.addEventListener('task_update', (e: MessageEvent) => {
       kickWatchdog()
       const payload = parseSSEEventData(e)
@@ -1252,6 +1344,7 @@ export const useSessionStore = defineStore('session', () => {
     eventSource.addEventListener('work_item_updated', (e: MessageEvent) => {
       kickWatchdog()
       useWorkItemStore().onServerEvent(parseSSEEventData(e) || undefined)
+      scheduleGateRefresh()
     })
     // 任务模块规划（树）有变化：任务页重新取一次（任务的归属、各节点的统计都随之更新）
     eventSource.addEventListener('work_module_updated', (e: MessageEvent) => {
@@ -1460,7 +1553,10 @@ export const useSessionStore = defineStore('session', () => {
     lastSheetEvent,
     lastCheckpointEvent,
     currentWorkflowSessions,
+    sessionByHash,
     loadingWorkflowSessions,
+    isWorkflowColdLoading,
+    sessionsListSettled,
     loadWorkflowSessions,
     loadWorkflowSessionsList,
     setTimelineActive,

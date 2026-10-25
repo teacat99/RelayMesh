@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/teacat99/RelayMesh/v2/internal/sessionprompt"
 	"github.com/teacat99/RelayMesh/v2/internal/store"
 	"github.com/teacat99/RelayMesh/v2/internal/termproto"
 )
@@ -62,17 +63,6 @@ type PrefsLimits struct {
 	LauncherNameMax    int `json:"launcher_name_max"`
 	LauncherDirMax     int `json:"launcher_dir_max"`
 	LauncherCommandMax int `json:"launcher_command_max"`
-	// 预设里的会话守护（D-214）：停摆判定时长的范围与默认值（分钟）、各文本字段的上限（按字符数）、
-	// 唤醒提示词里不允许出现的字符、一天参考的唤醒次数上限。
-	GuardSilenceMin     int    `json:"guard_silence_min"`
-	GuardSilenceMax     int    `json:"guard_silence_max"`
-	GuardSilenceDefault int    `json:"guard_silence_default"`
-	GuardWorkflowMax    int    `json:"guard_workflow_max"`
-	GuardPromptMax      int    `json:"guard_prompt_max"`
-	GuardPromptUnsafe   string `json:"guard_prompt_unsafe"`
-	GuardWakeMax        int    `json:"guard_wake_max"`
-	// GuardPromptDefault 是没写自定义提示词时服务端用的默认正文（占位符原样保留），表单里展示出来方便照着改。
-	GuardPromptDefault string `json:"guard_prompt_default"`
 	// 「非交互续聊」预设（#126）：各文本字段的上限（按字符数）与默认提示词（%workflow 原样保留）。
 	// 旧版 Hub 没有这几项——界面据此判断这台 Hub 认不认识这种预设。
 	LauncherRunPromptMax     int    `json:"launcher_run_prompt_max"`
@@ -127,13 +117,12 @@ func (h *Hub) prefsView(ctx context.Context) *PrefsView {
 			RecordMaxLinesMin: store.MinRecordMaxLines, RecordMaxLinesMax: store.MaxRecordMaxLines,
 			LauncherMax: store.MaxTerminalLaunchers, LauncherNameMax: store.MaxLauncherNameRunes,
 			LauncherDirMax: store.MaxLauncherDirRunes, LauncherCommandMax: store.MaxLauncherCommandRunes,
-			GuardSilenceMin: store.MinGuardSilenceMinutes, GuardSilenceMax: store.MaxGuardSilenceMinutes,
-			GuardSilenceDefault: store.DefaultGuardSilenceMinutes, GuardWorkflowMax: store.MaxGuardWorkflowRunes,
-			GuardPromptMax: store.MaxGuardPromptRunes, GuardPromptUnsafe: store.GuardPromptUnsafe, GuardWakeMax: guardWakeMax,
-			GuardPromptDefault:   guardDefaultWakeBody,
+			// 两个默认正文都是内置模板（带 %变量原样保留）压成一行：预设里的正文必须是一行，且不得超过上面的字数上限，
+			// 这样「以默认为底稿」填进去一定能存。会话模板与全局覆盖排在内置默认前面，见 store.ResolveWakeTemplate。
 			LauncherRunPromptMax: store.MaxHeadlessPromptRunes, LauncherRunModelMax: store.MaxHeadlessModelRunes,
-			LauncherRunBinMax: store.MaxHeadlessBinRunes, LauncherRunPromptDefault: launcherDefaultPrompt,
-			LauncherRunNewPromptDefault: launcherNewConversationPrompt,
+			LauncherRunBinMax:           store.MaxHeadlessBinRunes,
+			LauncherRunPromptDefault:    sessionprompt.OneLine(sessionprompt.Builtin(sessionprompt.KindResume, true)),
+			LauncherRunNewPromptDefault: sessionprompt.OneLine(sessionprompt.Builtin(sessionprompt.KindNew, true)),
 			LauncherRunMaxMinutes:       store.MaxHeadlessRunMinutes,
 		},
 	}

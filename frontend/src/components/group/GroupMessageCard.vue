@@ -15,6 +15,7 @@ import { extractArtifactRefs } from '../../lib/artifactRef'
 import { readsLabel, readsTitle } from '../../lib/group'
 import { senderIdentity } from '../../lib/groupCard'
 import { cardTimeText, type CardType } from '../../lib/messageCard'
+import { railDomAttrs, railMetaOfGroupMessage } from '../../lib/timelineRail'
 import { usePreviewStore } from '../../stores/preview'
 import ArtifactRefCard from '../artifact/ArtifactRefCard.vue'
 import PreviewMarkdown from '../feedback/preview-view/PreviewMarkdown.vue'
@@ -50,6 +51,12 @@ const DELIVERY_TEXT: Record<string, string> = { delivered: '已送达', read: '�
 const deliveries = computed(() => (mine.value ? (m.value.deliveries ?? []).map(d => `${d.name} ${DELIVERY_TEXT[d.status] ?? d.status}`).join(' · ') : ''))
 const hasFooter = computed(() => !!(reads.value || mentionsYou.value || deliveries.value))
 
+// 右侧缩略轴（#241）：别的成员说的话挂 data-rail-*，轨扫到就画一道刻度；您自己的话不挂（不上轨）
+const railAttrs = computed(() => {
+  const meta = railMetaOfGroupMessage(m.value)
+  return meta ? railDomAttrs(meta) : {}
+})
+
 const time = computed(() => cardTimeText(m.value.sent_at))
 const timeTitle = computed(() => {
   const t = dayjs(m.value.sent_at)
@@ -81,6 +88,7 @@ function openImage(url: string, name: string | undefined, width?: number, height
     :hue="ident.hue"
     :hide-type="hideType"
     :class="mentionsYou ? 'ring-1 ring-amber-500/50' : ''"
+    v-bind="railAttrs"
     data-testid="chat-message"
     :data-message-id="m.id"
     :data-sender="m.sender.kind"

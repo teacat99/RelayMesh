@@ -5,7 +5,7 @@ import { dateLabel, sameDay } from './dateLabel'
 export interface DayItem {
   /** 条目的键：间隙里的块用 block.key，轮次用 session_id（两者不会重名）。 */
   key: string
-  /** 条目的时间（ISO 字符串或毫秒）；解析不了的条目不参与，当作和前一个同一天（例如守护告警描述的是「现在」）。 */
+  /** 条目的时间（ISO 字符串或毫秒）；解析不了的条目不参与，当作和前一个同一天。 */
   at: string | number | undefined | null
 }
 

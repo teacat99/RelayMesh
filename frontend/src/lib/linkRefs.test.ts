@@ -9,9 +9,12 @@ import {
   parseDocRef,
   splitLinkRefs,
   wholeLinkRef,
+  buildSeqIndex,
   type LinkRef,
   type LinkRefIndex,
 } from './linkRefs'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 interface IndexSpec {
   tasks?: Record<number, string>
@@ -199,12 +202,14 @@ test('wholeLinkRef：整段文字恰好是一个引用才返回（行内代码�
 test('linkRefHref：每种引用的真实深链地址（站内相对路径，参数转义）', () => {
   const wf = 'relaymesh-continuation'
   const href = (ref: LinkRef) => linkRefHref(ref, wf)
-  assert.equal(href({ kind: 'task', key: '36' }), '/work/relaymesh-continuation?task=36')
+  // 任务引用里的 36 是板内序号 #36，地址带 ?seq=（由服务端解析成任务）；写成 ?task=36 会把它当数据库编号、打开别的任务（#242）
+  assert.equal(href({ kind: 'task', key: '36' }), '/work/relaymesh-continuation?seq=36')
+  assert.ok(!href({ kind: 'task', key: '36' }).includes('task='), '任务引用的深链不能用 ?task=（那是数据库编号）')
   assert.equal(href({ kind: 'confirm', key: 'Q23' }), '/?wf=relaymesh-continuation&q=Q23')
   assert.equal(href({ kind: 'session', key: 'sess-9f02517c' }), '/?wf=relaymesh-continuation&s=sess-9f02517c')
   assert.equal(href({ kind: 'doc', key: 'design/x.md' }), '/docs/relaymesh-continuation/design/x.md')
   assert.equal(href({ kind: 'doc', key: '设计/说明.md', anchor: '8 节' }), `/docs/relaymesh-continuation/${encodeURIComponent('设计')}/${encodeURIComponent('说明.md')}#${encodeURIComponent('8 节')}`)
-  assert.equal(linkRefHref({ kind: 'task', key: '1' }, 'a b&c'), '/work/a%20b%26c?task=1')
+  assert.equal(linkRefHref({ kind: 'task', key: '1' }, 'a b&c'), '/work/a%20b%26c?seq=1')
 })
 
 test('linkRefHint：悬停说明写类型 + 引用，有标题就补标题（压缩空白、过长截断）', () => {
@@ -222,4 +227,36 @@ test('linkRefClass：每种引用都有 link-ref + link-ref-<kind>，只有任�
   assert.equal(linkRefClass('confirm'), 'link-ref link-ref-confirm')
   assert.equal(linkRefClass('doc'), 'link-ref link-ref-doc')
   assert.equal(linkRefClass('session'), 'link-ref link-ref-session')
+})
+
+// ---- #186 C2a：引用索引在 store 里共用一份，不在每段 Markdown 的 useLinkRefs 实例里各建一份 ----
+test('buildSeqIndex：按序号建索引，序号相同后面的覆盖前面的，最大序号至少为 0', () => {
+  const a = { seq: 3, t: 'a' }
+  const b = { seq: 11, t: 'b' }
+  const c = { seq: 3, t: 'c' }
+  const idx = buildSeqIndex([a, b, c])
+  assert.equal(idx.bySeq.size, 2)
+  assert.equal(idx.bySeq.get(3), c)
+  assert.equal(idx.bySeq.get(11), b)
+  assert.equal(idx.maxSeq, 11)
+  const empty = buildSeqIndex([])
+  assert.equal(empty.bySeq.size, 0)
+  assert.equal(empty.maxSeq, 0)
+})
+
+test('结构守卫：useLinkRefs 不再自己扫整张会话表 / 确认项表；共用的索引由两个 store 提供', () => {
+  const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), 'utf8')
+  const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '') // 去掉注释再查，免得说明文字里的词误伤
+  const composable = code(read('src/composables/useLinkRefs.ts'))
+  assert.ok(!/currentWorkflowSessions/.test(composable), 'useLinkRefs 不应遍历 currentWorkflowSessions（每个实例一份是 O(实例 × 行)）')
+  assert.ok(!/timelineItems/.test(composable), 'useLinkRefs 不应遍历 timelineItems')
+  assert.ok(!/replyHash\(/.test(composable), 'useLinkRefs 不应自己逐行算 replyHash')
+  assert.match(composable, /sessionStore\.sessionByHash/)
+  assert.match(composable, /confirmStore\.timelineSeqIndex/)
+  const sessionStore = code(read('src/stores/session.ts'))
+  assert.match(sessionStore, /const sessionByHash = computed\(\(\) => buildSessionHashIndex\(currentWorkflowSessions\.value\)\)/)
+  assert.match(sessionStore, /^\s+sessionByHash,$/m, 'store 要把 sessionByHash 导出')
+  const confirmStore = code(read('src/stores/confirms.ts'))
+  assert.match(confirmStore, /const timelineSeqIndex = computed\(\(\) => buildSeqIndex\(timelineItems\.value\)\)/)
+  assert.match(confirmStore, /^\s+timelineSeqIndex,$/m, 'store 要把 timelineSeqIndex 导出')
 })

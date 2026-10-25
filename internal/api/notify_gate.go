@@ -17,11 +17,11 @@ import (
 
 // 统一通知闸的接线层（#115，设计稿 07 §3）。
 //
-// 各个通知来源（MCP 的阻塞待答 / notice / async_ask、终端的运行结束 / 守护告警）只交出自己的事实，
+// 各个通知来源（MCP 的阻塞待答 / notice / async_ask、终端的运行结束 / 不再自动续跑）只交出自己的事实，
 // 这里把它们翻译成 notify.Event，交给闸按偏好决策；放行之后，浏览器通道由闸直接发 SSE notify，
 // ntfy 通道由这里的回调交给 ntfy.Notifier。notify 与 ntfy 两个包互不依赖，翻译与接线都在这一层。
 //
-// 老三类（阻塞待答 / 运行结束 / 守护告警）的 ntfy 通道仍然走它们原来的入口（NotifyRequest / NotifyRun / NotifyGuard），
+// 老三类（阻塞待答 / 运行结束 / 不再自动续跑）的 ntfy 通道仍然走它们原来的入口（NotifyRequest / NotifyRun / NotifyAutoResume），
 // 构造器、延迟与复核、去重与限流一个字没动；新来源（notice / async_ask）走 NotifyEvent。
 
 // 查名字（发送者标签、项目名）的数据库查询最多等这么久：它只是通知里的一个字段，不值得拖住工具调用。
@@ -156,39 +156,11 @@ func (g *gateNotifier) RunEndHook() func(terminal.RunEndEvent) {
 	}
 }
 
-// GuardHook 返回装到终端 Hub 上的「守护告警」挂钩：guard_alert，穿透类。
-func (g *gateNotifier) GuardHook() func(terminal.GuardAlert) {
-	return func(a terminal.GuardAlert) {
-		in := guardInfoFromAlert(a)
-		if in.Key == "" {
-			return
-		}
-		what := "疑似停摆"
-		if in.Crashed {
-			what = "意外结束"
-		}
-		reason := strings.TrimSpace(in.Reason)
-		preview := what
-		if reason != "" {
-			preview += "：" + reason
-		}
-		g.gate.Publish(notify.Event{
-			ID:           "grd:" + in.Key,
-			Kind:         notify.KindGuardAlert,
-			Conversation: conversationOf(in.WorkflowID),
-			WorkflowID:   in.WorkflowID,
-			Title:        strings.TrimSpace(in.Name),
-			Preview:      preview,
-			DeepLink:     "/exec",
-		}, func(notify.Event, notify.Decision) { g.ntfy.NotifyGuard(in) })
-	}
-}
-
 // AutoResumeHook 返回装到终端 Hub 上的「自动续跑放弃」挂钩（#151）：guard_alert，穿透类——预算用完、连续没有进展或没法提交时，
 // 系统不会再自己重试了，需要你出面。排期与开跑只写在聊天里，不推送（每次运行结束本来就有 run_end 推送）。
 func (g *gateNotifier) AutoResumeHook() func(terminal.AutoResumeEvent) {
 	return func(ev terminal.AutoResumeEvent) {
-		in := guardInfoFromAutoResume(ev)
+		in := autoResumeInfoFromEvent(ev)
 		if ev.PresetID == "" || ev.FromRun == "" {
 			return
 		}
@@ -201,7 +173,7 @@ func (g *gateNotifier) AutoResumeHook() func(terminal.AutoResumeEvent) {
 			Title:        strings.TrimSpace(ev.Name),
 			Preview:      preview,
 			DeepLink:     "/exec",
-		}, func(notify.Event, notify.Decision) { g.ntfy.NotifyGuard(in) })
+		}, func(notify.Event, notify.Decision) { g.ntfy.NotifyAutoResume(in) })
 	}
 }
 

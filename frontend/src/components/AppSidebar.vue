@@ -13,10 +13,11 @@ import { useTerminalStore } from '../stores/terminal'
 import { useWorkItemStore } from '../stores/workItems'
 import { useAgentStateStore } from '../stores/agentState'
 import { useChatStore } from '../stores/chat'
+import { useBranchStore } from '../stores/branches'
+import { arrangeBranchTree } from '../lib/branch'
 import SidebarSessions from './sidebar/SidebarSessions.vue'
 import SidebarGroups from './sidebar/SidebarGroups.vue'
 import SidebarProjects from './sidebar/SidebarProjects.vue'
-import { usePreviewView } from '../composables/usePreviewView'
 import { summarizeCounts } from '../lib/workItems'
 import { displayRounds } from '../lib/workflowRounds'
 import Button from './ui/button/Button.vue'
@@ -452,21 +453,29 @@ const filteredItems = computed(() => {
 
 // （条目的状态徽标与「我的状态」提示点由 SidebarItemCard 渲染，这里不再保留一份重复实现）
 
+// 分支会话（#236）：活动分支缩进收在主会话下面（只有一层）。只在「分支和它的主会话都在过滤后的列表里」时挂靠；
+// 主会话被过滤掉的分支按它自己的位置显示（仍带分支标记）；没有任何分支关系时列表一字不变。
+const branchStore = useBranchStore()
+const branchTree = computed(() => arrangeBranchTree(filteredItems.value, branchStore.index, branchStore.collapsed))
+const listItems = computed(() => branchTree.value.items)
+function isBranchItem(item: UnifiedItem): boolean {
+  return item.type === 'feedback' && !!item.workflow_id && branchStore.index.byBranch.has(item.workflow_id)
+}
+
 // 动态增量/分批加载 (优化大量会话/工单下的渲染性能)
 const visibleCount = ref(25)
 const displayedItems = computed(() => {
-  return filteredItems.value.slice(0, visibleCount.value)
+  return listItems.value.slice(0, visibleCount.value)
 })
 
 watch(() => [searchQuery.value, filterType.value], () => {
   visibleCount.value = 25
 })
 
-// 预览视图（#120 阶段 E-c2，#165 起默认开）开启时，侧栏要显示各会话的未读数：关注当前列表里能看到的工作流，由 conversation_updated 事件刷新。
+// 侧栏要显示各会话的未读数（#120 阶段 E-c2）：关注当前列表里能看到的工作流，由 conversation_updated 事件刷新。
 const chatStore = useChatStore()
-const previewView = usePreviewView()
 watch(
-  () => (previewView.enabled.value ? displayedItems.value.filter(i => i.type === 'feedback' && i.workflow_id).map(i => i.workflow_id as string).join('\n') : ''),
+  () => displayedItems.value.filter(i => i.type === 'feedback' && i.workflow_id).map(i => i.workflow_id as string).join('\n'),
   ids => chatStore.watchSummaries(ids ? ids.split('\n') : []),
   { immediate: true },
 )
@@ -475,8 +484,8 @@ function handleListScroll(e: Event) {
   const el = e.target as HTMLElement
   if (!el) return
   if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) {
-    if (visibleCount.value < filteredItems.value.length) {
-      visibleCount.value = Math.min(visibleCount.value + 20, filteredItems.value.length)
+    if (visibleCount.value < listItems.value.length) {
+      visibleCount.value = Math.min(visibleCount.value + 20, listItems.value.length)
     }
   }
 }
@@ -517,6 +526,8 @@ function isItemActive(item: UnifiedItem): boolean {
 onMounted(async () => {
   // 会话卡的会话级状态（#159）要用 Agent 状态（hook）：页头 / 工具栏没挂载的页面里也得有人去取一次；已取到过不会重复请求
   agentStateStore.ensureFresh()
+  // 分支关系（#236）：侧栏的分支树要用；整表一次取回，同时只有一个在途请求，之后靠实时流校准。取不到就当没有分支（列表照旧）
+  void branchStore.ensureLoaded()
   await Promise.all([
     // fresh:false：与布局 / 会话页同一时刻的挂载取数合并成一次请求（#177）
     sessionStore.fetchSessions(undefined, { fresh: false }),
@@ -672,8 +683,23 @@ onUnmounted(() => {
         class="flex-1 overflow-y-auto p-2 space-y-1 no-scrollbar scrollbar-none"
         @scroll="handleListScroll"
       >
+        <!-- 简略列表第一次取数还没结果：还不知道有没有会话，画几张占位卡而不是「暂无匹配」（#186 Q117 a 的延伸；取数失败也算有结果，回到空状态） -->
         <div
-          v-if="filteredItems.length === 0"
+          v-if="filteredItems.length === 0 && !sessionStore.sessionsListSettled"
+          data-testid="sidebar-skeleton"
+          role="status"
+          aria-busy="true"
+          aria-label="正在载入会话列表"
+          class="space-y-1 animate-pulse motion-reduce:animate-none"
+        >
+          <div v-for="n in 5" :key="n" class="rounded-md border border-border/40 bg-card/30 p-3 space-y-2">
+            <div class="h-3 w-2/3 rounded bg-muted/60"></div>
+            <div class="h-2.5 w-11/12 rounded bg-muted/40"></div>
+            <div class="h-2.5 w-1/3 rounded bg-muted/40"></div>
+          </div>
+        </div>
+        <div
+          v-else-if="filteredItems.length === 0"
           class="p-6 text-center text-xs text-muted-foreground font-mono"
         >
           暂无匹配 Workflow 或工单
@@ -685,21 +711,26 @@ onUnmounted(() => {
           :item="item"
           :is-active="isItemActive(item)"
           :is-pinned="isPinned(item.id)"
+          :nested="branchTree.nested.has(item.id)"
+          :is-branch="isBranchItem(item)"
+          :branch-count="branchTree.childCount.get(item.id)"
+          :branch-collapsed="!!item.workflow_id && branchStore.collapsed.has(item.workflow_id)"
           @select="emit('selectItem', item)"
           @contextmenu="openContextMenu"
           @cancel="id => sessionStore.cancelSession(id)"
+          @toggle-branches="branchStore.toggleCollapsed"
         />
 
         <!-- 动态加载指示 (当列表较长时展示) -->
         <div
-          v-if="filteredItems.length > 25"
+          v-if="listItems.length > 25"
           class="py-2.5 text-center text-[10px] font-mono text-muted-foreground"
         >
-          <span v-if="visibleCount < filteredItems.length">
-            正在动态加载更多 ({{ displayedItems.length }}/{{ filteredItems.length }})...
+          <span v-if="visibleCount < listItems.length">
+            正在动态加载更多 ({{ displayedItems.length }}/{{ listItems.length }})...
           </span>
           <span v-else class="opacity-60">
-            已加载全部 {{ filteredItems.length }} 条记录
+            已加载全部 {{ listItems.length }} 条记录
           </span>
         </div>
       </div>
@@ -802,6 +833,7 @@ onUnmounted(() => {
           size="sm"
           class="w-7 h-7 p-0 text-muted-foreground hover:text-foreground"
           title="设置"
+          data-prefetch="settings"
           @click="handleOpenSettings"
         >
           <Settings class="w-3.5 h-3.5" />
@@ -846,7 +878,7 @@ onUnmounted(() => {
             <VolumeX v-else class="w-3.5 h-3.5" />
           </Button>
 
-          <!-- 2.5 免打扰（#115）：一键拦下非紧急的提醒（浏览器与 ntfy 一起）；阻塞待答、@ 你、终端审批与守护告警不受影响。开关在服务端，各设备共享 -->
+          <!-- 2.5 免打扰（#115）：一键拦下非紧急的提醒（浏览器与 ntfy 一起）；阻塞待答、@ 你、终端审批与系统告警不受影响。开关在服务端，各设备共享 -->
           <Button
             variant="ghost"
             size="sm"
@@ -854,7 +886,7 @@ onUnmounted(() => {
             data-testid="sidebar-dnd"
             :aria-pressed="notifyPrefs.dnd"
             :title="notifyPrefs.dnd
-              ? '免打扰已开启：除阻塞待答、@ 你、终端审批与守护告警外，浏览器与手机推送都不再提醒（点击关闭）'
+              ? '免打扰已开启：除阻塞待答、@ 你、终端审批与系统告警外，浏览器与手机推送都不再提醒（点击关闭）'
               : '开启免打扰：拦下非紧急的提醒，阻塞待答与 @ 你仍会通知'"
             @click="notifyPrefs.toggleDnd"
           >

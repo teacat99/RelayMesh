@@ -6,8 +6,10 @@ import FlowPromptsTab from './settings/FlowPromptsTab.vue'
 import AsrSettings from './settings/AsrSettings.vue'
 import PresetSettings from './settings/PresetSettings.vue'
 import AuthProfileSettings from './settings/AuthProfileSettings.vue'
+import SessionPromptSettings from './settings/SessionPromptSettings.vue'
 import AppearanceSettings from './settings/AppearanceSettings.vue'
 import SecurityMcpTab from './settings/SecurityMcpTab.vue'
+import OAuthSettingsPanel from './settings/OAuthSettingsPanel.vue'
 import DataSettings from './settings/DataSettings.vue'
 import AboutSettings from './settings/AboutSettings.vue'
 import ExecTerminalPrefs from './settings/ExecTerminalPrefs.vue'
@@ -70,12 +72,14 @@ watch(
         <AsrSettings v-else-if="ui.category === 'speech'" />
         <PresetSettings v-else-if="ui.category === 'presets'" />
         <AuthProfileSettings v-else-if="ui.category === 'authProfiles'" />
+        <SessionPromptSettings v-else-if="ui.category === 'sessionPrompts'" />
         <DataSettings v-else-if="ui.category === 'sessionData'" scope="sessionData" />
         <ExecTerminalPrefs v-else-if="ui.category === 'termPrefs'" />
         <ExecAccessSettings v-else-if="ui.category === 'modelAccess'" />
         <ExecRetentionSettings v-else-if="ui.category === 'retention'" />
         <AppearanceSettings v-else-if="ui.category === 'appearance'" />
         <SecurityMcpTab v-else-if="ui.category === 'security'" />
+        <OAuthSettingsPanel v-else-if="ui.category === 'oauth'" />
         <DataSettings v-else-if="ui.category === 'backup'" scope="backup" />
         <AboutSettings v-else-if="ui.category === 'about'" />
       </div>

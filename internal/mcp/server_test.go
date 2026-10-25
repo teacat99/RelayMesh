@@ -67,9 +67,9 @@ func TestMCPServer_InitializeAndToolsList(t *testing.T) {
 	}
 	resMap := toolsResp.Result.(map[string]any)
 	toolsList := resMap["tools"].([]any)
-	// 14 个原有工具 + 只读使用手册 usage_guide
-	if len(toolsList) != 15 {
-		t.Fatalf("expected 15 tools, got %d", len(toolsList))
+	// 14 个原有工具 + 只读使用手册 usage_guide + 分支会话 branch（#236）+ 会话参数 session_params（#236 P3）
+	if len(toolsList) != 17 {
+		t.Fatalf("expected 17 tools, got %d", len(toolsList))
 	}
 
 	// 3. Configure token tools list

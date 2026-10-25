@@ -36,26 +36,29 @@ type Service struct {
 
 	dcrMu   sync.Mutex
 	dcrHits map[string][]time.Time
+	// dcrWin 是自动注册的「接入窗口」（#239）：只存内存，Hub 重启即关闭；见 dcr_window.go。
+	dcrWin dcrWindow
 
 	oauthRL *oauthRateLimiter
 
 	grantRefreshMu    sync.Mutex
 	grantRefreshLocks map[uint]*sync.Mutex
-
-	pendingIP map[string]string // reqID -> client IP（待决配额回收）
 }
 
 func NewService(cfg *config.Config, st *store.Store, audit AuditFn, revoke RevokeFn) *Service {
+	// 待决请求占的限流名额由 memoryStore 在请求离开待决状态时归还（#240），所以两者在这里接起来。
+	rl := newOAuthRateLimiter()
+	mem := newMemoryStore()
+	mem.release = rl.releasePending
 	return &Service{
 		cfg:               cfg,
 		store:             st,
-		mem:               newMemoryStore(),
+		mem:               mem,
 		audit:             audit,
 		revoke:            revoke,
 		dcrHits:           make(map[string][]time.Time),
-		oauthRL:           newOAuthRateLimiter(),
+		oauthRL:           rl,
 		grantRefreshLocks: make(map[uint]*sync.Mutex),
-		pendingIP:         make(map[string]string),
 	}
 }
 
@@ -216,7 +219,7 @@ func (s *Service) handleAuthorize(c *gin.Context) {
 		s.authClientError(c, "invalid_client", "client_id required")
 		return
 	}
-	clientName, redirectURIs, err := s.resolveClient(c.Request.Context(), clientID)
+	clientName, redirectURIs, registered, err := s.resolveClient(c.Request.Context(), clientID)
 	if err != nil {
 		s.authClientError(c, "invalid_client", "")
 		return
@@ -255,14 +258,12 @@ func (s *Service) handleAuthorize(c *gin.Context) {
 		resource = wantResource
 	}
 
+	// 先回收已过期的待决请求（及其占的名额），再申请新的名额：被放弃的请求过期后名额自动归还，
+	// 不会因为用户打开授权页又关掉、或客户端发起后不再回来而一直占着（#240）。
+	s.mem.sweep()
 	if !s.oauthRL.reservePending(ip, clientID) {
 		writeOAuthRateLimited(c, 120)
 		return
-	}
-
-	policy, _ := s.store.GetOAuthPolicy(c.Request.Context())
-	if _, warn := ClientHostAllowed(policy, clientID, redirectURI); warn {
-		_ = warn
 	}
 
 	id, err := randomID()
@@ -272,12 +273,11 @@ func (s *Service) handleAuthorize(c *gin.Context) {
 		return
 	}
 	s.mem.putPending(&pendingRequest{
-		ID: id, ClientID: clientID, ClientName: clientName, RedirectURI: redirectURI,
+		ID: id, ClientID: clientID, ClientName: clientName, Registered: registered, RedirectURI: redirectURI,
 		Resource: resource, Scope: scope, State: state,
 		CodeChallenge: codeChallenge, CodeChallengeMethod: codeChallengeMethod,
-		CreatedAt: s.now(),
+		CreatedAt: s.now(), IP: ip,
 	})
-	s.pendingIP[id] = ip
 	base, derived := s.issuerDerived(c.Request)
 	s.applyDerivedHeaders(c, derived)
 	c.Header("X-Frame-Options", "DENY")
@@ -285,19 +285,21 @@ func (s *Service) handleAuthorize(c *gin.Context) {
 	c.Redirect(http.StatusFound, base+"/oauth/consent?req="+url.QueryEscape(id))
 }
 
-func (s *Service) resolveClient(ctx context.Context, clientID string) (name string, redirects []string, err error) {
+// resolveClient 找到客户端的名字与登记的回调地址。registered 为真表示它是本服务登记的 DCR 客户端，
+// 为假表示是 CIMD（现取元数据）——批准页的陌生来源提示要按这个区分，见 WarnUntrustedClient。
+func (s *Service) resolveClient(ctx context.Context, clientID string) (name string, redirects []string, registered bool, err error) {
 	if cl, e := s.store.GetOAuthClient(ctx, clientID); e == nil && cl != nil {
-		return cl.ClientName, []string(cl.RedirectURIs), nil
+		return cl.ClientName, []string(cl.RedirectURIs), true, nil
 	}
 	// CIMD：client_id 必须等于元数据文档 URL
 	if strings.HasPrefix(strings.ToLower(clientID), "https://") {
 		doc, e := FetchCIMD(ctx, clientID)
 		if e != nil {
-			return "", nil, e
+			return "", nil, false, e
 		}
-		return doc.ClientName, doc.RedirectURIs, nil
+		return doc.ClientName, doc.RedirectURIs, false, nil
 	}
-	return "", nil, fmt.Errorf("invalid_client")
+	return "", nil, false, fmt.Errorf("invalid_client")
 }
 
 func randomID() (string, error) {
@@ -325,15 +327,12 @@ func (s *Service) GetPending(id string) (*PendingRequestView, bool) {
 	if !ok {
 		return nil, false
 	}
-	policy, _ := s.store.GetOAuthPolicy(context.Background())
-	allowed, warn := ClientHostAllowed(policy, p.ClientID, p.RedirectURI)
-	_ = allowed
 	return &PendingRequestView{
 		ID: id, ClientID: p.ClientID, ClientName: p.ClientName,
 		RedirectHost:  RedirectHost(p.RedirectURI),
 		Scopes:        ParseScopeString(p.Scope),
 		Resource:      p.Resource,
-		WarnUntrusted: warn,
+		WarnUntrusted: WarnUntrustedClient(p.ClientID, p.RedirectURI, p.Registered),
 		WarnLoopback:  IsLoopbackRedirect(p.RedirectURI),
 	}, true
 }
@@ -347,14 +346,11 @@ type ApproveDecision struct {
 }
 
 func (s *Service) Decide(ctx context.Context, reqID string, d ApproveDecision) (redirectURL string, err error) {
-	p, ok := s.mem.getPending(reqID)
+	// 原子地取走待决请求（同时归还它占的限流名额）：并发到达的多个决定里只有一个能取到。
+	p, ok := s.mem.takePending(reqID)
 	if !ok {
 		return "", fmt.Errorf("request expired")
 	}
-	ip := s.pendingIP[reqID]
-	delete(s.pendingIP, reqID)
-	s.oauthRL.releasePending(ip, p.ClientID)
-	defer s.mem.deletePending(reqID)
 	iss, _ := ResolvePublicBase(s.cfg, s.store, nil)
 
 	if !d.Approve {
@@ -636,8 +632,14 @@ func (s *Service) handleRegister(c *gin.Context) {
 		return
 	}
 	policy, _ := s.store.GetOAuthPolicy(c.Request.Context())
-	if !policy.AllowDCR {
-		c.JSON(http.StatusForbidden, gin.H{"error": "registration_disabled"})
+	if ok, reason := s.dcrAccepting(policy); !ok {
+		body := gin.H{"error": reason}
+		if reason == "registration_window_closed" {
+			// 客户端（ChatGPT / Claude 等）常把这句话原样显示给用户，所以写清楚去哪开；中英文各一句。
+			body["error_description"] = "自动注册当前没有开放：请 RelayMesh 管理员在「设置 → OAuth 授权」里开启接入窗口，然后重新添加连接器。" +
+				" Registration is closed: the RelayMesh administrator must open the registration window in Settings → OAuth, then add the connector again."
+		}
+		c.JSON(http.StatusForbidden, body)
 		return
 	}
 	if !s.allowDCR(c.ClientIP()) {
@@ -663,7 +665,7 @@ func (s *Service) handleRegister(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_metadata"})
 		return
 	}
-	_ = s.store.PurgeUnusedOAuthClients(c.Request.Context(), 24*time.Hour)
+	_ = s.store.PurgeUnusedOAuthClients(c.Request.Context(), UnusedClientMaxAge)
 	n, _ := s.store.CountOAuthClients(c.Request.Context())
 	if n >= store.OAuthClientMax {
 		if freed := s.store.RecycleOldestUnusedOAuthClient(c.Request.Context()); !freed {
@@ -677,14 +679,14 @@ func (s *Service) handleRegister(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
-	clientID := Issuer(s.cfg, s.store, c.Request) + "/oauth/clients/" + id
+	clientID := Issuer(s.cfg, s.store, c.Request) + clientRefPrefix + id
 	now := s.now()
 	cl := &model.OAuthClient{
 		ClientID: clientID, ClientName: body.ClientName,
 		RedirectURIs:  model.StringList(body.RedirectURIs),
 		GrantTypes:    model.StringList(coalesce(body.GrantTypes, []string{"authorization_code", "refresh_token"})),
 		ResponseTypes: model.StringList(coalesce(body.ResponseTypes, []string{"code"})),
-		TokenAuth:     "none", CreatedAt: now,
+		TokenAuth:     "none", CreatedAt: now, CreatedIP: c.ClientIP(),
 	}
 	if err := s.store.CreateOAuthClient(c.Request.Context(), cl); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
@@ -812,13 +814,74 @@ func (s *Service) SavePolicy(ctx context.Context, p model.OAuthPolicy) error {
 	if err := s.store.SaveOAuthPolicy(ctx, p); err != nil {
 		return err
 	}
+	// 接入窗口只在「授权服务器开着、自动注册是限时窗口」时才有意义：关掉总开关或改成别的方式，窗口一并关闭，
+	// 免得以后再切回来时冒出一个早就被忘记、却还开着的窗口。
+	if !p.Enabled || DCRModeOf(p) != DCRModeWindow {
+		s.dcrWin.close(s.now())
+	}
 	if s.audit != nil {
 		s.audit("oauth_policy_changed", "ok", fmt.Sprintf(
-			"enabled=%t dcr=%t chatgpt=%t claude=%t loopback=%t public_url_set=%t allowlist=%d",
-			p.Enabled, p.AllowDCR, p.AllowChatGPT, p.AllowClaude, p.AllowLoopback,
-			strings.TrimSpace(p.PublicURL) != "", len(p.ClientHostAllowlist)))
+			"enabled=%t dcr=%t dcr_always=%t public_url_set=%t",
+			p.Enabled, p.AllowDCR, p.DCRAlways, strings.TrimSpace(p.PublicURL) != ""))
 	}
 	return nil
+}
+
+// UnusedClientMaxAge：DCR 登记之后超过这么久还没走完授权，会在下一次有客户端登记时被清理。
+// 设置页「刚登记、还没授权」清单只列还没到期的，免得列出一条随时会被清掉的。
+const UnusedClientMaxAge = 24 * time.Hour
+
+// clientRefPrefix 是本服务签发的 DCR client_id 里随机段之前的固定路径：client_id = <对外地址> + clientRefPrefix + <随机段>。
+const clientRefPrefix = "/oauth/clients/"
+
+// ClientRef 取 DCR client_id 里的随机段（设置页用它指认一条登记，不把完整的 client_id 放进 URL）；不是本服务签发的返回空串。
+func ClientRef(clientID string) string {
+	i := strings.LastIndex(clientID, clientRefPrefix)
+	if i < 0 {
+		return ""
+	}
+	return clientID[i+len(clientRefPrefix):]
+}
+
+// ListUnusedClients 返回「刚登记、还没授权」的客户端：登记之后还没走完授权（没有签发过令牌）、也没过期的 DCR 登记，新的在前。
+// 已授权的应用在授权列表里；CIMD 客户端不登记，不会出现在这里。
+func (s *Service) ListUnusedClients(ctx context.Context) ([]model.OAuthClient, error) {
+	return s.store.ListUnusedOAuthClients(ctx, s.now().Add(-UnusedClientMaxAge))
+}
+
+// FindUnusedClientByRef 按 ClientRef 找一条还没授权过的登记（不看是否过期，过期没清的也能删）；找不到返回 nil。
+func (s *Service) FindUnusedClientByRef(ctx context.Context, ref string) (*model.OAuthClient, error) {
+	if ref == "" {
+		return nil, nil
+	}
+	list, err := s.store.ListUnusedOAuthClients(ctx, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if ClientRef(list[i].ClientID) == ref {
+			return &list[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// DeleteRegisteredClient 删除一条还没授权过的登记，返回是否真的删了（不存在或已经授权过的不删，返回 false）。
+// 删除之后这个 client_id 不能再发起授权；它正在进行中的授权请求（批准页还开着）和还没兑换的授权码一并作废，
+// 否则管理员刚删掉的登记仍能在批准页上被批准。
+func (s *Service) DeleteRegisteredClient(ctx context.Context, clientID string) (bool, error) {
+	ok, err := s.store.DeleteUnusedOAuthClient(ctx, clientID)
+	if err != nil || !ok {
+		return false, err
+	}
+	s.mem.dropClient(clientID)
+	// 批准了、但令牌还没兑换的授权（授权记录与隐藏凭据已经建好）也一并撤销，不留下任何还活着的授权。
+	if grants, e := s.store.ListLiveOAuthGrantsByClient(ctx, clientID); e == nil {
+		for _, g := range grants {
+			_ = s.RevokeGrant(ctx, g.ID)
+		}
+	}
+	return true, nil
 }
 
 func (s *Service) Config() *config.Config { return s.cfg }

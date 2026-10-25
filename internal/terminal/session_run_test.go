@@ -9,6 +9,7 @@ import (
 
 	"github.com/teacat99/RelayMesh/v2/internal/agentstate"
 	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/sessionprompt"
 	"github.com/teacat99/RelayMesh/v2/internal/store"
 	"github.com/teacat99/RelayMesh/v2/internal/termproto"
 )
@@ -101,7 +102,8 @@ func TestSessionRunPreviewResolvesTargetFromSession(t *testing.T) {
 	if pv.ConversationID != sessConv || pv.Host != f.a.code || pv.Dir != "/work/app" || pv.ClientKind != "cli" || pv.SessionHost != "exec-host" {
 		t.Fatalf("目标解析不对: %+v", pv)
 	}
-	want := "agent -p --resume chat-s1 --approve-mcps --trust --workspace '/work/app' --output-format stream-json '" + renderLauncherPrompt("", sessWF) + "'"
+	want := "agent -p --resume chat-s1 --approve-mcps --trust --workspace '/work/app' --output-format stream-json '" +
+		renderLauncherWake(context.Background(), f.env.store, launcherWake{Kind: sessionprompt.KindResume, WorkflowID: sessWF, Project: "/work/app", NoLimitNote: true}).Text + "'"
 	if pv.Command != want {
 		t.Fatalf("预览的命令不对：\n got %s\nwant %s", pv.Command, want)
 	}
@@ -463,14 +465,17 @@ func TestSessionRunRefusals(t *testing.T) {
 		_, err := f.runSession(sessionRunRequest{WorkflowID: sessWF, ConversationID: sessConv})
 		wantWakeCode(t, err, "host_offline")
 	})
-	t.Run("Windows 主机", func(t *testing.T) {
+	t.Run("Windows 主机：目录要写成 Windows 路径（#178 起支持 Windows 主机；运行与命令见 headless_winhost_test.go）", func(t *testing.T) {
 		f := newExecFixture(t)
 		meta := testMeta("win-box")
 		meta.OS = "windows"
 		win := f.env.enrollAgent(meta, "windows")
 		f.sessionEvent(t, "wf-win", "chat-w1", "win-box", "C:/work", "cli", agentstate.EvStop, time.Now())
-		pv := f.sessionPreview(sessionRunRequest{WorkflowID: "wf-win", ConversationID: "chat-w1", Host: win.code, Dir: "/c/work"})
-		wantIssue(t, pv, "unsupported_os")
+		wantIssue(t, f.sessionPreview(sessionRunRequest{WorkflowID: "wf-win", ConversationID: "chat-w1", Host: win.code, Dir: "/c/work"}), "bad_dir")
+		pv := f.sessionPreview(sessionRunRequest{WorkflowID: "wf-win", ConversationID: "chat-w1", Host: win.code})
+		if !pv.CanRun || pv.Dir != "C:/work" || !strings.HasPrefix(pv.Command, "& 'agent' -p --resume chat-w1 ") {
+			t.Fatalf("会话上报的是 Windows 路径时，Windows 主机应可运行且命令是 PowerShell 写法: %+v", pv)
+		}
 	})
 	t.Run("执行闸门拒绝：主机没开模型访问", func(t *testing.T) {
 		f := sessionFixture(t)

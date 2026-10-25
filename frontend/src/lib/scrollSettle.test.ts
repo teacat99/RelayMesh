@@ -17,6 +17,7 @@ import {
   SETTLE_QUIET_MS,
   SETTLE_TIMEOUT_MS,
   SETTLE_TOLERANCE_PX,
+  centerScrollTop,
   foreignScroll,
   holdBoundaryKeys,
   holdDelta,
@@ -73,6 +74,47 @@ describe('settleTarget：落地后该把容器放到哪', () => {
     assert.equal(jumpScrollTop(1000, M), 1000 - SETTLE_PADDING_PX)
     assert.ok(SETTLE_MAX_FIXES >= 1 && SETTLE_MAX_FIXES <= 5, '补的次数要有上限，防止来回震荡')
     assert.ok(SETTLE_QUIET_MS >= 50 && SETTLE_TIMEOUT_MS > SETTLE_QUIET_MS * SETTLE_MAX_FIXES)
+  })
+})
+
+describe('居中对齐：确认卡被点名时落在视口正中（#253）', () => {
+  // 视口 600 高，卡 200 高：卡顶该在视口顶下 200px 处，即 scrollTop = itemTop - 200
+  const CARD = { itemHeight: 200, ...M }
+
+  it('centerScrollTop：条目中线对准视口中线', () => {
+    assert.equal(centerScrollTop({ itemTop: 5000, scrollTop: 0, ...CARD }), 4800)
+    // 奇数差值保留半像素（scrollTop 会按设备像素取整，容差 2px 足够吃掉）
+    assert.equal(centerScrollTop({ itemTop: 5000, scrollTop: 0, itemHeight: 201, ...M }), 5000 - 199.5)
+  })
+
+  it('夹在可滚范围内：贴顶不为负，贴底不超过 scrollHeight - clientHeight', () => {
+    assert.equal(centerScrollTop({ itemTop: 50, scrollTop: 900, ...CARD }), 0)
+    assert.equal(centerScrollTop({ itemTop: 9_900, scrollTop: 0, ...CARD }), M.scrollHeight - M.clientHeight)
+  })
+
+  it('条目装不进视口（比视口减去上下 padding 还高）或高度未知：退回顶边对齐，不切掉它的头部', () => {
+    const tall = 600 - 2 * SETTLE_PADDING_PX + 1
+    assert.equal(centerScrollTop({ itemTop: 5000, scrollTop: 0, itemHeight: tall, ...M }), jumpScrollTop(5000, M))
+    assert.equal(centerScrollTop({ itemTop: 5000, scrollTop: 0, ...M }), jumpScrollTop(5000, M), '没给高度')
+    assert.equal(centerScrollTop({ itemTop: 5000, scrollTop: 0, itemHeight: 0, ...M }), jumpScrollTop(5000, M), '高度 0')
+    assert.equal(centerScrollTop({ itemTop: 5000, scrollTop: 0, itemHeight: NaN, ...M }), jumpScrollTop(5000, M), '高度 NaN')
+    // 刚好装得下：仍然居中
+    const fit = 600 - 2 * SETTLE_PADDING_PX
+    assert.equal(centerScrollTop({ itemTop: 5000, scrollTop: 0, itemHeight: fit, ...M }), 5000 - (600 - fit) / 2)
+  })
+
+  it('settleTarget(…, align=center)：已居中不动；平滑滚动途中总高变了、卡被推下去 → 补到新的居中位置', () => {
+    assert.equal(settleTarget({ itemTop: 5000, scrollTop: 4800, ...CARD }, SETTLE_PADDING_PX, SETTLE_TOLERANCE_PX, 'center'), null)
+    assert.equal(settleTarget({ itemTop: 5000, scrollTop: 4800 + SETTLE_TOLERANCE_PX, ...CARD }, SETTLE_PADDING_PX, SETTLE_TOLERANCE_PX, 'center'), null)
+    // 起跑时算的终点是 4800；途中上方占位变成真实高度，卡实际在 9330 之下：平滑滚动落在 4800，离卡还差 4530
+    assert.equal(settleTarget({ itemTop: 9330, scrollTop: 4800, ...CARD }, SETTLE_PADDING_PX, SETTLE_TOLERANCE_PX, 'center'), 9130)
+  })
+
+  it('默认对齐不变：不传 align 与传 start 都是顶边对齐（右侧轨 / 搜索 / 滚到某一轮的既有行为）', () => {
+    const m = { itemTop: 1000, scrollTop: 500, itemHeight: 200, ...M }
+    assert.equal(settleTarget(m), jumpScrollTop(1000, M))
+    assert.equal(settleTarget(m, SETTLE_PADDING_PX, SETTLE_TOLERANCE_PX, 'start'), jumpScrollTop(1000, M))
+    assert.notEqual(settleTarget(m, SETTLE_PADDING_PX, SETTLE_TOLERANCE_PX, 'center'), jumpScrollTop(1000, M))
   })
 })
 
@@ -454,19 +496,6 @@ describe('useScrollSettle 驱动（源码级防线）', () => {
     const rearm = load.slice(load.indexOf('function rearmTopObserver()'))
     const unobserveAt = rearm.indexOf('topObserver.unobserve(sentinel)')
     assert.ok(unobserveAt > 0 && rearm.indexOf('topObserver.observe(sentinel)') > unobserveAt, '重新观察 = 先 unobserve 再 observe：对已在观察的目标直接 observe 是空操作，不会补发当前状态的通知')
-  })
-
-  it('经典视图的向上载入同样如此（#195）：放开忙碌标志后重新观察顶部哨兵，先 unobserve 再 observe', () => {
-    const classic = readFileSync(join(srcDir(), 'components', 'feedback', 'FeedbackMessageList.vue'), 'utf8')
-    const load = classic.slice(classic.indexOf('function loadEarlierRounds()'), classic.indexOf('function setupTopObserver()'))
-    assert.ok(load.length > 300, '找不到经典视图的 loadEarlierRounds')
-    const releaseAt = load.indexOf('isLoadingEarlier.value = false', load.indexOf('setTimeout'))
-    const rearmAt = load.indexOf('rearmTopObserver()', releaseAt)
-    assert.ok(releaseAt > 0 && rearmAt > releaseAt, '放开忙碌标志之后要重新观察哨兵：忙碌期里丢掉的那次「进入范围」通知不会再来，列表会卡在这一批（e2e：classic-load-earlier.mjs）')
-    const rearm = load.slice(load.indexOf('function rearmTopObserver()'))
-    const unobserveAt = rearm.indexOf('topObserver.unobserve(sentinel)')
-    assert.ok(unobserveAt > 0 && rearm.indexOf('topObserver.observe(sentinel)') > unobserveAt, '重新观察 = 先 unobserve 再 observe')
-    assert.match(rearm, /if \(!topObserver \|\| !sentinel\) return/, '哨兵已经摘掉（全部载入）或组件已卸载时不能再碰观察器')
   })
 
   it('三处平滑跳转落地后都做校准：滚到某一轮、轨上点刻度、搜索命中落点', () => {

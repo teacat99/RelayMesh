@@ -169,11 +169,16 @@ type WorkItem struct {
 	// 承接者接取（或拒绝）、交付，派发者验收。这四个字段回答「现在由谁承接、谁派的、接没接」，
 	// 全部是加列、默认空串：空 AssigneeWorkflowID = 没有指派，行为与 B2 之前完全一致。
 	// AssignedByWorkflowID 为空而 AssigneeWorkflowID 非空 = 人在 Web 上派的（没有 Agent 派发者）。
-	AssigneeWorkflowID   string     `gorm:"size:128;not null;default:'';index" json:"assignee_workflow_id,omitempty"`
-	AssignedByWorkflowID string     `gorm:"size:128;not null;default:''" json:"assigned_by_workflow_id,omitempty"`
+	AssigneeWorkflowID string `gorm:"size:128;not null;default:'';index" json:"assignee_workflow_id,omitempty"`
+	// AssignedByWorkflowID 带索引（#180 B3a）：回执头的 board: 行每次回执都要按「谁派的」查派发者侧的待办（待验收 / 被拒绝 / 久无人接）。
+	AssignedByWorkflowID string     `gorm:"size:128;not null;default:'';index" json:"assigned_by_workflow_id,omitempty"`
 	ClaimState           string     `gorm:"size:16;not null;default:''" json:"claim_state,omitempty"`
 	AssignedAt           *time.Time `json:"assigned_at,omitempty"`
 	AcceptedAt           *time.Time `json:"accepted_at,omitempty"`
+	// OfferRemindedAt 是「指派久无人接」那条一次性提醒发出的时间（#180 B3d）：空 = 还没提醒过。
+	// 它只记「这一轮派出（AssignedAt 之后）已经提醒过」：重新派出（AssignedAt 变新）后重新有资格被提醒一次，所以改派 / 拒绝后再派不必清它。
+	// 只加一个可空列；旧版本二进制不认识它、直接忽略，回滚不受影响。不对外返回。
+	OfferRemindedAt *time.Time `json:"-"`
 
 	// 以下字段不落库，由查询按需填充。
 	Updates     []WorkItemUpdate  `gorm:"-" json:"updates,omitempty"`

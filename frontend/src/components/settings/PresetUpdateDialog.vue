@@ -52,14 +52,8 @@ function onOpenChange(v: boolean) {
   if (!v) settingsStore.postponePresetConflicts()
 }
 
-// 用户没改过的预设在后台自动换成了新版：告诉一声，旧版留在「版本留存」里
-watch(
-  () => settingsStore.presetUpgrade,
-  n => {
-    if (!n || mode.value !== 'relay') return
-    toast.info(`${n.count} 条快捷预设已更新为新版`, { description: '你没改过它们；旧版在「设置 → 快捷标签预设 → 版本留存」' })
-  },
-)
+// 「你没改过的预设在后台自动换成了新版」的那条提示在 App.vue 里：这个弹窗是懒加载块（#186），只在出现冲突时才挂载，
+// 没有冲突时也要提示的那条不能放在这里。
 </script>
 
 <template>

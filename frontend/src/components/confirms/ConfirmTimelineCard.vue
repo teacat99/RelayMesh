@@ -14,16 +14,16 @@ import EventStatus from '../feedback/EventStatus.vue'
 import type { ConfirmItem } from '../../api/confirms'
 import { useConfirmFocus } from '../../composables/useConfirmFocus'
 import { useConfirmStore } from '../../stores/confirms'
-import { KIND_LABEL, RISK_LABEL, RISK_SHORT, STATUS_LABEL, ageText, answerText, customAnswerOf, recallOptions, recallTimes, riskTone } from '../../lib/confirms'
+import { KIND_LABEL, RISK_LABEL, RISK_SHORT, STATUS_LABEL, ageText, answerLead, answerText, answeredByMain, customAnswerOf, escalationText, recallOptions, recallTimes, riskTone } from '../../lib/confirms'
 import { confirmRefToken } from '../../lib/replyRef'
 import { EVENT_BOX } from '../../lib/eventRow'
 import { CARD_CHIP_BASE, CARD_TONE_CLASS, CARD_TYPES, cardTimeText } from '../../lib/messageCard'
 import { STATUS_WORD } from '../../lib/statusWords'
 
 // compact（#120 预览视图，默认关）：已处理的卡折叠时是 32px 的事件行（阶段 C2：类型标签 · 编号 · 标题 · 结局 · 时间 · 状态，
-// 点一下原地展开）；展开后详情原地全部展开、高度不限（经典展开体里正文限高 max-h-72、框内滚动）。
-// 经典列表不传它，经典的标记一个字没动；还没答复的提问在经典里仍是完整的 ConfirmCard（预览列表不会把待答复的卡交给这里：
-// 阶段 C3 起它们是预览视图自己的统一消息卡，作答动作与聚焦高亮和这里共用 composables）。
+// 点一下原地展开）；展开后详情原地全部展开、高度不限（不传 compact 时展开体里正文限高 max-h-72、框内滚动）。
+// 会话页的预览列表一律传 compact；群聊页（GroupEventRow）不传它，那里的标记一个字没动，还没答复的提问在那里仍是完整的 ConfirmCard
+// （会话页的预览列表不会把待答复的卡交给这里：阶段 C3 起它们是预览视图自己的统一消息卡，作答动作与聚焦高亮和这里共用 composables）。
 const props = defineProps<{ item: ConfirmItem; compact?: boolean }>()
 
 const store = useConfirmStore()
@@ -31,6 +31,11 @@ const tone = computed(() => riskTone(props.item.risk))
 // 折叠行上的结局：自定义答复压成一行摘要（全文在展开后的「自定义答复」里，#183）
 const result = computed(() => (props.item.status === 'answered' ? answerText(props.item, 60) : ''))
 const pending = computed(() => props.item.status === 'pending')
+// 决策路由（#236 P2）：答复若是主会话的智能体代为定夺的，折叠行与回看里都写明「主会话代答」，不让它冒充用户本人的决定
+const byMain = computed(() => answeredByMain(props.item))
+const lead = computed(() => answerLead(props.item))
+// 这条请示曾被转交 / 升级给用户（主会话转的、超时、分支结束等）：回看里留一句，看得懂当时为什么轮到用户
+const escalation = computed(() => escalationText(props.item))
 
 // 回看：默认收起，只留一行结局；展开状态属于这张卡自己（时间线重新渲染不会丢）
 const expanded = ref(false)
@@ -46,7 +51,7 @@ const eventTone = computed(() => CARD_TONE_CLASS[CARD_TYPES[props.item.kind].ton
 const eventPreview = computed(() => {
   if (props.item.status !== 'answered') return ''
   const text = result.value || note.value
-  return text ? `已答复：${text}` : '已答复'
+  return text ? `${lead.value}：${text}` : lead.value
 })
 const eventStatus = computed(() => (props.item.status === 'answered' ? STATUS_WORD.done : STATUS_LABEL[props.item.status]))
 const eventAt = computed(() => props.item.answered_at || props.item.created_at)
@@ -137,7 +142,7 @@ watch(
               <span class="min-w-0 break-words text-[13px] font-medium leading-snug text-foreground">{{ item.title }}</span>
             </span>
             <span class="block text-[11px] text-muted-foreground" :data-testid="`confirm-tl-${item.ref}-state`">
-              <template v-if="item.status === 'answered'">已答复：<span class="text-foreground/80">{{ result }}</span></template>
+              <template v-if="item.status === 'answered'">{{ lead }}：<span class="text-foreground/80">{{ result }}</span></template>
               <template v-else>{{ STATUS_LABEL[item.status] }}</template>
               <span class="ml-1.5 opacity-70">· {{ ageText(item.answered_at || item.created_at) }}</span>
             </span>
@@ -154,6 +159,16 @@ watch(
         :data-testid="`confirm-tl-${item.ref}-detail`"
       >
         <p v-if="times" class="text-[11px] text-muted-foreground" :data-testid="`confirm-tl-${item.ref}-times`">{{ times }}</p>
+        <p
+          v-if="escalation"
+          class="whitespace-pre-wrap break-words rounded-xs border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-[11px] text-foreground/80"
+          :data-testid="`confirm-tl-${item.ref}-escalation`"
+        >{{ escalation }}</p>
+        <p
+          v-if="byMain"
+          class="rounded-xs border border-violet-500/30 bg-violet-500/5 px-2.5 py-1.5 text-[11px] text-foreground/80"
+          :data-testid="`confirm-tl-${item.ref}-by-main`"
+        >这是主会话的智能体代为定夺的，不是您本人的答复。</p>
 
         <ConfirmLinks :item="item" :workflow-id="store.workflowId" :testid="`confirm-tl-${item.ref}`" />
 
@@ -182,7 +197,7 @@ watch(
             />
             <span class="block min-w-0 flex-1">
               <span class="break-words" :class="o.chosen ? 'font-medium text-foreground' : 'text-foreground/80'">{{ o.label }}</span>
-              <span v-if="o.chosen" class="ml-1.5 text-[10px] text-emerald-700 dark:text-emerald-300">你选了这个</span>
+              <span v-if="o.chosen" class="ml-1.5 text-[10px] text-emerald-700 dark:text-emerald-300">{{ byMain ? '主会话选了这个' : '你选了这个' }}</span>
               <span v-if="o.recommended" class="ml-1.5 rounded-xs border border-border/60 px-1 text-[10px] text-muted-foreground">推荐</span>
               <span v-if="o.missing" class="ml-1.5 text-[10px] text-muted-foreground">已不在选项里</span>
               <span v-if="o.detail" class="mt-0.5 block whitespace-pre-wrap break-words text-[11px] text-muted-foreground">{{ o.detail }}</span>

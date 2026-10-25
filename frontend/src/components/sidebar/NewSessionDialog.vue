@@ -15,11 +15,13 @@ import DialogDescription from '../ui/dialog/DialogDescription.vue'
 import DialogTitle from '../ui/dialog/DialogTitle.vue'
 import Button from '../ui/button/Button.vue'
 import { useSessionStore } from '../../stores/session'
+import { useSettingsStore } from '../../stores/settings'
 import type { CreateWorkflowResult } from '../../api/client'
 import type { FeedbackSession } from '../../api/types'
 import {
   FIRST_MESSAGE_MAX,
   NEW_SESSION_PHASES,
+  NEW_SESSION_RESIDENTS,
   SESSION_NAME_MAX,
   WORKFLOW_ID_MAX,
   WORKFLOW_ID_MIN,
@@ -31,6 +33,7 @@ import {
   warningLines,
   type NewSessionDraft,
   type PhaseChoice,
+  type ResidentChoice,
 } from '../../lib/newSession'
 import { copyText } from '../../lib/terminal/clipboard'
 
@@ -42,6 +45,7 @@ const emit = defineEmits<{
 }>()
 
 const sessionStore = useSessionStore()
+const settingsStore = useSettingsStore()
 
 const draft = reactive<NewSessionDraft>(blankNewSessionDraft())
 const advancedOpen = ref(false)
@@ -53,7 +57,7 @@ const created = ref<CreateWorkflowResult | null>(null)
 const copied = ref(false)
 const inputRef = ref<HTMLInputElement | null>(null)
 
-const validation = computed(() => buildCreateRequest(draft))
+const validation = computed(() => buildCreateRequest(draft, settingsStore.settings.promptTemplates))
 const errors = computed(() => (validation.value.ok ? {} : validation.value.errors))
 // 名字：只在填了内容又不合规时提示（空着不吓人，按钮灰着就够了）；高级选项里的错误只要有就提示（空的本来就合规）
 const nameHint = computed(() => (draft.name.trim() ? (errors.value.name ?? '') : ''))
@@ -91,6 +95,10 @@ watch(
 
 function pickPhase(id: PhaseChoice) {
   draft.phase = draft.phase === id ? '' : id
+}
+
+function pickResident(id: ResidentChoice) {
+  draft.resident = draft.resident === id ? '' : id
 }
 
 async function submit() {
@@ -324,6 +332,30 @@ const labelClass = 'text-[11px] font-bold text-muted-foreground uppercase tracki
                 </div>
                 <p class="text-[10px] text-muted-foreground leading-normal">
                   讨论、方案阶段智能体只读不改文件；开发阶段才动手实现。不指定则沿用默认阶段。
+                </p>
+              </div>
+
+              <div class="space-y-1.5">
+                <span :class="labelClass" id="new-session-resident-label">常驻规则</span>
+                <div class="flex flex-wrap gap-1.5" role="radiogroup" aria-labelledby="new-session-resident-label">
+                  <button
+                    v-for="r in NEW_SESSION_RESIDENTS"
+                    :key="r.id || 'none'"
+                    type="button"
+                    role="radio"
+                    :aria-checked="draft.resident === r.id"
+                    :title="r.hint"
+                    class="rounded-sm border px-2.5 py-1 text-[11px] focus:outline-none focus-visible:ring-1 focus-visible:ring-primary/50"
+                    :class="draft.resident === r.id
+                      ? 'border-primary bg-primary/10 text-foreground font-bold'
+                      : 'border-border/80 bg-background text-muted-foreground hover:text-foreground'"
+                    :data-testid="`new-session-resident-${r.id || 'none'}`"
+                    :disabled="busy"
+                    @click="pickResident(r.id)"
+                  >{{ r.label }}</button>
+                </div>
+                <p class="text-[10px] text-muted-foreground leading-normal">
+                  把模板文字复制进新会话，作为它的常驻规则：智能体每次回执都会读到，不能放宽授权档位。模板文字可在「设置 → 会话提示词」里改；建好后随时能在会话输入区的「常驻」里调整。
                 </p>
               </div>
 

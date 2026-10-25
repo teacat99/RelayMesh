@@ -7,6 +7,7 @@ import { useThemeStore } from '../stores/theme'
 import { useSettingsStore } from '../stores/settings'
 import { useAuthStore } from '../stores/auth'
 import { registerUnauthorizedHandler } from '../api/client'
+import { startIdlePrefetch } from '../utils/lazyChunks'
 import SettingsDialog from '../components/SettingsDialog.vue'
 import LoginDialog from '../components/auth/LoginDialog.vue'
 import Button from '../components/ui/button/Button.vue'
@@ -43,12 +44,14 @@ onMounted(async () => {
     // fresh:false：侧栏 / 会话页挂载时也各取一遍，同一时刻只发一次（单飞加入），不再各发各的（#177）
     sessionStore.fetchCurrentSession({ fresh: false })
     sessionStore.fetchSessions(undefined, { fresh: false })
+    // 懒加载块（设置、任务清单、项目、文档、群聊……）等首屏的接口请求安静下来之后，在空闲时悄悄预取，点开时不用再等（#186）
+    void startIdlePrefetch()
   }
 })
 </script>
 
 <template>
-  <div class="h-full w-full h-[100dvh] flex bg-background text-foreground overflow-hidden selection:bg-primary/20">
+  <div class="h-full w-full h-[100dvh] flex bg-background text-foreground overflow-hidden">
     <!-- Main Full-Height App Canvas -->
     <slot />
 

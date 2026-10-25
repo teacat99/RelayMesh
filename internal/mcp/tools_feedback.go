@@ -417,6 +417,11 @@ func (s *Server) formatSessionHeaderWithContext(ctx context.Context, sess *model
 		}
 	}
 
+	// 会话常驻提示词（#232）：用户在 Web 里为这个会话写的规则；没配置过的工作流不输出，回执与以前逐字节一致。
+	if line := s.residentHeaderLine(ctx, wID); line != "" {
+		header += "\n" + line
+	}
+
 	if cp, _ := s.store.GetLatestCheckpoint(ctx, wID); cp != nil {
 		var content model.CheckpointContent
 		if json.Unmarshal([]byte(cp.ContentJSON), &content) == nil {
@@ -447,7 +452,13 @@ func (s *Server) formatSessionHeaderWithContext(ctx context.Context, sess *model
 		header += "\n" + line
 	}
 
-	if line := s.guardPermitHintHeader(ctx, wID); line != "" {
+	// 共享任务板上该你处理的协作待办（待接取 / 被退回 / 待验收 / 被拒绝 / 久无人接）；没有待办时不输出，回执逐字节不变。
+	if line := s.boardDigestHeader(ctx, wID); line != "" {
+		header += "\n" + line
+	}
+
+	// 分支会话关系（#236）：这个工作流是别人的分支、或有活动分支时，告诉它角色与怎么沟通；没有关系时不输出，回执逐字节不变。
+	if line := s.branchHeaderLine(ctx, wID); line != "" {
 		header += "\n" + line
 	}
 

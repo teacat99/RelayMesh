@@ -1,8 +1,10 @@
 import axios from 'axios'
 import type { CheckpointView } from '../lib/anchor'
+import type { BranchBrief } from './branches'
 import type { FeedbackSession, SessionBody, TaskSummary, TaskDetail, Report, Feedback, SessionImage, WorkflowDraft, TaskStage, Segment, WaitPolicy, WorkflowInbox, InboxConfig, InboxConfigView } from './types'
 import { perfRecordRequest } from '../utils/perf'
 import { sendWithDraftImages, type WireImages } from '../utils/draftImageWire'
+import { netIdle } from '../utils/netActivity'
 
 export const api = axios.create({
   baseURL: '/api/v1',
@@ -11,6 +13,22 @@ export const api = axios.create({
     'Content-Type': 'application/json'
   }
 })
+
+// 在途请求计数（#186）：首屏安静之后才开始预取懒加载块，免得慢网络上抢首屏数据的带宽。每个 begin 对应恰好一次 end（成功、失败、取消都会走响应拦截器）。
+api.interceptors.request.use(config => {
+  netIdle.begin()
+  return config
+})
+api.interceptors.response.use(
+  response => {
+    netIdle.end()
+    return response
+  },
+  error => {
+    netIdle.end()
+    return Promise.reject(error)
+  }
+)
 
 export function setAuthToken(token: string) {
   if (token) {
@@ -257,6 +275,17 @@ export interface CreateWorkflowRequest {
   phase?: 'discuss' | 'plan' | 'dev'
   project_directory?: string
   host_name?: string
+  /** 常驻规则（#232）：建好就是这个会话的常驻提示词，≤1200 字。 */
+  resident?: string
+  /**
+   * 分支会话（#236）：把新会话建成这个工作流的分支（深度只有一层；主会话必须已存在）。
+   * 分支是独立的会话，只多一条「属于哪个主会话」的关系；不带就是普通会话，与以前完全一样。
+   */
+  parent_workflow_id?: string
+  /** 向主会话开放的范围预设（仅 parent_workflow_id 存在时有效；默认 collab）。 */
+  expose_preset?: 'visible' | 'collab' | 'managed'
+  /** 用户在分支页里说的话是否抄送一行给主会话（仅 parent_workflow_id 存在时有效；默认开）。 */
+  copy_user_notes?: boolean
 }
 
 /** 服务端实际生效的高级选项（只写用户填了的那些项；一项也没填时整个字段不存在）。 */
@@ -265,6 +294,8 @@ export interface CreateWorkflowApplied {
   first_message?: boolean
   project_directory?: string
   host_name?: string
+  /** 常驻规则的字数（整理之后）。 */
+  resident?: number
 }
 
 /** 会话建好之后没做成的事（阶段 / 首条指令）：会话本身一定已经建好，原因在 error 里。 */
@@ -281,6 +312,13 @@ export interface CreateWorkflowResult {
   start_prompt: string
   applied?: CreateWorkflowApplied
   warnings?: CreateWorkflowWarning[]
+  /** 建的是分支会话（#236）时才有：刚建立的那条分支关系。 */
+  branch?: BranchBrief
+  /**
+   * 建分支（#236 P3）：协作 / 托管含「改参数」与「启动」，要终端解锁；终端不可用时服务端不拒绝，
+   * 而是把这两项压回关闭、其余照预设，并在这里列出被压回的项（params / launch）。没有压回时没有这个字段。
+   */
+  clamped?: Array<'params' | 'launch'>
 }
 
 export const workflowsApi = {
@@ -761,14 +799,64 @@ export interface OAuthGrantRow {
 export interface OAuthPolicy {
   enabled: boolean
   public_url: string
+  /** 是否允许客户端自动注册（DCR）。false = 关闭；true 时再看 dcr_always：false = 限时窗口（默认），true = 常开。 */
   allow_dcr: boolean
+  /** 自动注册常开（不用开接入窗口）。旧后端没有这个字段，读到时当作 false。 */
+  dcr_always?: boolean
   access_token_ttl_minutes: number
   refresh_idle_days: number
   refresh_absolute_days: number
-  client_host_allowlist: string[]
-  allow_chatgpt: boolean
-  allow_claude: boolean
-  allow_loopback: boolean
+}
+
+/** 自动注册的三种方式（由策略的 allow_dcr 与 dcr_always 决定）。 */
+export type OAuthDcrMode = 'off' | 'window' | 'always'
+
+/** 自动注册此刻的状态（服务端现算、只读）：接入窗口开没开、还剩多久。旧后端没有这个字段。 */
+export interface OAuthDcrStatus {
+  mode: OAuthDcrMode
+  /** 此刻客户端自动登记会不会被受理（授权服务器没在服务时一律 false） */
+  open: boolean
+  /** 窗口到期时间（仅限时窗口开着时有） */
+  until?: string
+  remaining_seconds: number
+  /** 窗口的默认时长与上限（分钟），页面据此写按钮与说明 */
+  default_minutes: number
+  max_minutes: number
+}
+
+/** 「刚登记、还没授权」的客户端（DCR 登记之后还没走完授权）。完整的 client_id 与回调地址不返回。 */
+export interface OAuthClientRow {
+  /** 删除时用的指认（client_id 末尾的随机段） */
+  id: string
+  client_name: string
+  /** 回调地址的主机（去重） */
+  redirect_hosts: string[]
+  /** 批准页会对它显示「不在默认信任列表中」的黄色提醒（陌生域名或本机回环） */
+  untrusted: boolean
+  /** 回调是本机回环地址（Claude Code 等本地工具） */
+  loopback: boolean
+  created_at: string
+  /** 登记时的来源地址；升级之前登记的没有 */
+  created_ip: string
+}
+
+/** OAuth 此刻「实际生效」的状态（服务端现算、只读；与可编辑的 OAuthPolicy 分开）。旧后端没有这个字段。 */
+export interface OAuthEffective {
+  /** 环境变量 RELAYMESH_OAUTH=off 把 OAuth 整个关了：策略里的开关改了也没用 */
+  env_off: boolean
+  /** 协议端点此刻真的在服务（总开关打开，且没被环境变量关掉） */
+  enabled: boolean
+  /** 此刻对外使用的根地址（无尾斜杠）与来源 */
+  public_base: string
+  public_base_source: 'env' | 'settings' | 'derived'
+  /** 环境变量设置了对外地址，而设置页里也填了不同的值：设置页的被盖掉了 */
+  settings_public_url_shadowed: boolean
+  /** 在 ChatGPT / Claude 里添加连接器时要粘贴的地址（对外地址 + /mcp） */
+  connector_url: string
+  resource_metadata_url: string
+  authorization_server_metadata_url: string
+  /** 自动注册此刻的状态（接入窗口）；旧后端没有这个字段，页面就不显示接入窗口卡片 */
+  dcr?: OAuthDcrStatus
 }
 
 export const oauthApi = {
@@ -789,9 +877,27 @@ export const oauthApi = {
   },
   async getPolicy() {
     const res = await api.get('/oauth/policy')
-    return res.data as { policy: OAuthPolicy }
+    return res.data as { policy: OAuthPolicy; effective?: OAuthEffective }
   },
   async savePolicy(policy: OAuthPolicy) {
     await api.put('/oauth/policy', { policy })
+  },
+  /** 开启接入窗口（extend=false：把剩余时间重置为 minutes）或续期（extend=true：在剩余时间上累加）。需要终端解锁。 */
+  async openWindow(minutes: number, extend = false) {
+    const res = await api.post('/oauth/window', { minutes, extend })
+    return res.data as { dcr: OAuthDcrStatus }
+  },
+  /** 立即关闭接入窗口（本来就关着也算成功）。需要终端解锁。 */
+  async closeWindow() {
+    const res = await api.delete('/oauth/window')
+    return res.data as { dcr: OAuthDcrStatus }
+  },
+  async listClients() {
+    const res = await api.get('/oauth/clients')
+    return res.data as { clients: OAuthClientRow[]; expire_hours: number }
+  },
+  /** 删除一条还没授权的登记（已授权的要在「已授权的应用」里撤销）。需要终端解锁。 */
+  async deleteClient(id: string) {
+    await api.delete(`/oauth/clients/${encodeURIComponent(id)}`)
   },
 }

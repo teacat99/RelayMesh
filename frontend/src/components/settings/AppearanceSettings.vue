@@ -5,6 +5,8 @@ import { useNotifyPrefsStore } from '@/stores/notifyPrefs'
 import { useFxStore } from '@/stores/fx'
 import ThemeAutoIcon from '../ThemeAutoIcon.vue'
 import NtfySettings from './NtfySettings.vue'
+import { boardStaleChoices, boardStaleSelected } from '@/lib/notifyPrefs'
+import { computed } from 'vue'
 import {
   Sun,
   Moon,
@@ -14,6 +16,7 @@ import {
   Bell,
   BellMinus,
   BellOff,
+  Hourglass,
   ArrowLeftRight,
   RotateCcw,
   Sparkles
@@ -29,6 +32,14 @@ function resetAppearanceSettings() {
   if (!notifyStore.soundEnabled) notifyStore.toggleSound()
   if (!notifyStore.desktopEnabled) notifyStore.toggleDesktop()
   fxStore.setModeSwitch(true)
+}
+
+// 指派久无人接（#180 B3d）：选项与默认值都来自服务端给出的偏好，界面不抄默认值；
+// 选「默认」那一项等于恢复默认（存 0），以后默认值调整时没改过的人跟着走。
+const staleChoices = computed(() => boardStaleChoices(notifyPrefs.prefs))
+const staleSelected = computed(() => boardStaleSelected(notifyPrefs.prefs))
+function onStaleChange(e: Event) {
+  void notifyPrefs.setBoardStaleMinutes(Number((e.target as HTMLSelectElement).value))
 }
 
 const themeOptions = [
@@ -132,7 +143,7 @@ const themeOptions = [
         </div>
       </button>
 
-      <!-- 免打扰：服务端开关，浏览器与手机推送一起拦；阻塞待答、@ 你、终端审批、守护告警不受影响 -->
+      <!-- 免打扰：服务端开关，浏览器与手机推送一起拦；阻塞待答、@ 你、终端审批、系统告警不受影响 -->
       <button
         type="button"
         data-testid="settings-dnd"
@@ -149,7 +160,7 @@ const themeOptions = [
             <span>免打扰</span>
           </div>
           <div class="text-[10px] text-muted-foreground">
-            开启后，浏览器与手机推送都只保留紧急的：阻塞待答、@ 你、终端审批、守护告警；其余消息只在网页里看
+            开启后，浏览器与手机推送都只保留紧急的：阻塞待答、@ 你、终端审批、系统告警；其余消息只在网页里看
           </div>
         </div>
         <div
@@ -210,6 +221,55 @@ const themeOptions = [
     >
       这个浏览器不支持系统通知：提醒会以页面内的提示和提示音呈现。
     </p>
+
+    <!-- 指派久无人接（#180 B3d）：共享任务板上有指派派出后一直没人接，提醒你一次。时长另外决定任务行上「已等」什么时候标红、
+         以及智能体回执里 board 行的口径；开关只管提醒。 -->
+    <div
+      data-testid="settings-board-stale"
+      class="p-3 rounded-xs border font-mono flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-4 transition-colors"
+      :class="notifyPrefs.boardStaleOff
+        ? 'border-border/70 bg-card/60 text-muted-foreground'
+        : 'border-primary/40 bg-primary/10 text-foreground'"
+    >
+      <button
+        type="button"
+        data-testid="settings-board-stale-toggle"
+        :aria-pressed="!notifyPrefs.boardStaleOff"
+        class="min-w-0 flex-1 text-left cursor-pointer flex items-center justify-between gap-3"
+        @click="notifyPrefs.setBoardStaleOff(!notifyPrefs.boardStaleOff)"
+      >
+        <div class="space-y-0.5">
+          <div class="text-xs font-semibold flex items-center gap-1.5">
+            <Hourglass class="w-3.5 h-3.5 text-primary" />
+            <span>指派久无人接的提醒</span>
+          </div>
+          <div class="text-[10px] text-muted-foreground leading-relaxed">
+            共享任务板上有指派派出后，超过设定的时长还没人接，就提醒你一次（同一个承接者的合成一条）。这个时长同时决定任务页里「已等」什么时候标红、智能体回执里的 board 行怎么算「久无人接」，开关只管提醒。手机推送默认不发，要的话在下面「各类消息的优先级」里打开
+          </div>
+        </div>
+        <div
+          class="w-8 h-4.5 rounded-full transition-colors flex items-center p-0.5 shrink-0"
+          :class="notifyPrefs.boardStaleOff ? 'bg-muted-foreground/30' : 'bg-primary'"
+        >
+          <div
+            class="w-3.5 h-3.5 rounded-full bg-white transition-transform"
+            :class="notifyPrefs.boardStaleOff ? 'translate-x-0' : 'translate-x-3.5'"
+          ></div>
+        </div>
+      </button>
+      <label class="flex shrink-0 flex-col gap-1 text-[10px] text-muted-foreground sm:w-44">
+        <span>超过多久算「久无人接」</span>
+        <select
+          data-testid="settings-board-stale-after"
+          :value="staleSelected"
+          :disabled="notifyPrefs.saving"
+          class="w-full h-8 px-2.5 text-xs font-mono bg-background border border-border/80 rounded-xs focus:outline-none focus:border-primary text-foreground disabled:opacity-60 cursor-pointer"
+          @change="onStaleChange"
+        >
+          <option v-for="c in staleChoices" :key="c.value" :value="c.value">{{ c.label }}</option>
+        </select>
+      </label>
+    </div>
 
     <!-- 服务端推送（ntfy）：不依赖网页是否打开 -->
     <NtfySettings />

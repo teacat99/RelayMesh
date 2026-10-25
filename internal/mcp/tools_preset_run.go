@@ -41,6 +41,8 @@ type PresetRunOutcome struct {
 	WorkflowID string
 	RunID      string
 	State      string
+	// Branch 为真表示这次唤醒的是调用方自己的分支（#236 P4）；项目审计里据此多记一个标记。
+	Branch bool
 }
 
 // PresetRunner 是 MCP 运行预设所需的终端 Hub 能力。错误可以实现 ErrorCode() string 以带上稳定的拒绝码。
@@ -238,8 +240,12 @@ func (s *Server) handlePresetRun(ctx context.Context, credCtx *CredentialContext
 		}
 		return presetRunFail(err)
 	}
-	s.presetRunAudit(ctx, pc, model.AuditAllow, "preset:"+out.Preset, map[string]any{
+	allow := map[string]any{
 		"preset": out.Preset, "name": out.Name, "workflow_id": out.WorkflowID, "run_id": out.RunID, "state": out.State,
-	})
+	}
+	if out.Branch {
+		allow["branch"] = true
+	}
+	s.presetRunAudit(ctx, pc, model.AuditAllow, "preset:"+out.Preset, allow)
 	return out.Result, false, nil
 }

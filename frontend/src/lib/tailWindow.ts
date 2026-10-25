@@ -12,11 +12,19 @@
 // 所以新消息进来时窗口只会变长，不会滑动（滑动会把最旧的那块从 DOM 里拆掉）。
 // 起点在第一次看到末尾时「钉住」；之后只会往前（补齐、被点名要看某一块）、不会往后。
 //
-// 滚动：补齐发生在已渲染的第一块之前。用户停在底部（或已渲染部分里面）时，插入点在视口顶边之上，
-// 要把已渲染的第一块钉在原位（useScrollSettle.hold），视口里的内容才纹丝不动；用户正在看插入点上面（轮次）时不用钉。
+// 滚动：补齐发生在已渲染的第一块之前。用户在已渲染部分里面（插入点在视口顶边之上）时，要把已渲染的第一块钉在原位
+// （useScrollSettle.hold），视口里的内容才纹丝不动；用户正在看插入点上面（轮次）时不用钉；
+// 用户停在底部时也不钉锚点，改走「贴底」（#252，理由见 tailHoldMode）。
 
-/** 末尾先渲染的最新块数（块 = 单条条目或一摞卡片，见 lib/timeline 的 groupBlocks）。 */
-export const TAIL_INITIAL_BLOCKS = 30
+import { PIN_TOLERANCE_PX } from './stickBottom'
+
+/**
+ * 末尾先渲染的最新块数（块 = 单条条目或一摞卡片，见 lib/timeline 的 groupBlocks）。
+ * 30 → 12（#186 C2b-1）：一屏加缓冲够了，更早的由空闲补齐 / 用户向上够到时立刻补。生产形状夹具（154 轮 + 203 条通知）上与
+ * 预览视图的首批轮次数 4（PreviewMessageList 的 INITIAL_VISIBLE_ROUNDS）一起成对对照：打开后头 6 秒的长任务合计中位数 −30%、
+ * 阻塞帧合计 −34%（数据与限度见 .cursor/planning/2026-10-23-186-C-open-phase-plan.md §10）。
+ */
+export const TAIL_INITIAL_BLOCKS = 12
 /** 每次空闲补齐的块数：一批约 700～800 个元素，主线程占用控制在百毫秒以内。 */
 export const TAIL_BATCH_BLOCKS = 12
 /** 被点名要看某一块时，起点比目标再往前留几块，免得目标贴在窗口边缘又被下一批补齐挤动。 */
@@ -62,4 +70,25 @@ export function shouldFillNow(firstTop: number, probePx: number = TAIL_PROBE_PX)
 /** 同一个位置 → 补齐时要不要把第一块钉在原位：它在视口顶边或更上面 = 视口整个在插入点之下，不钉的话内容会被推走。 */
 export function shouldHoldFirst(firstTop: number): boolean {
   return firstTop <= 0
+}
+
+/** 视口底边离内容底边不超过这么多 px 就算「停在底部」（与 lib/stickBottom.PIN_TOLERANCE_PX 同值：scrollTop 按设备像素取整，留一点余量）。 */
+export const TAIL_BOTTOM_PX = PIN_TOLERANCE_PX
+
+/** 补齐一批时用什么保住视口（#252）。 */
+export type TailHoldMode = 'bottom' | 'anchor' | 'none'
+
+/**
+ * 补齐一批时用什么保住视口：
+ *   - 'bottom'：用户停在底部（视口底边离内容底边不超过 TAIL_BOTTOM_PX）。不钉锚点，交给「贴底」（lib/stickBottom + followBottom）——
+ *     停在底部时不变的是「底部」，不是某一张卡在屏幕上的位置。钉锚点只认后者：补齐的那几百毫秒里，锚点下方的内容会变
+ *     （占位高度换成真实高度、时间线末尾晚到的卡片与新通知），贴底与钉锚点先后写 scrollTop，钉锚点写得最晚，页面就停在底部上方
+ *     几百到几千 px 处，而且 pinnedAtBottom 随之作废、之后没有谁再贴回去（生产长会话冷开实测离底 296～4400px，#252）；
+ *   - 'anchor'：没贴底，但视口在已渲染的第一块或它下面（用户正在看已渲染的通知）：钉住第一块，视口里的内容纹丝不动；
+ *   - 'none'：用户正在看插入点上面（轮次）：不钉，免得把视口推走。
+ * bottomGap：视口底边离内容底边的距离；调用方在「用户刚表达过向上看」时传 Infinity（他正要离开底部，别再按贴底算）。
+ */
+export function tailHoldMode(firstTop: number, bottomGap: number, bottomPx: number = TAIL_BOTTOM_PX): TailHoldMode {
+  if (bottomGap <= bottomPx) return 'bottom'
+  return shouldHoldFirst(firstTop) ? 'anchor' : 'none'
 }

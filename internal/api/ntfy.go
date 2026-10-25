@@ -41,10 +41,12 @@ func (g *ntfyGuard) allowTest(now time.Time) bool {
 	return true
 }
 
-// ntfyView 是 GET / PUT 的响应。
+// ntfyView 是 GET / PUT 的响应。Kinds 是「各类消息的优先级」表的目录（名字、说明、内置默认），
+// 界面按它渲染每一行——默认值只在服务端存一份，界面不另存，免得两边悄悄漂移。
 type ntfyView struct {
 	Config ntfy.PublicConfig `json:"config"`
 	Status ntfy.Status       `json:"status"`
+	Kinds  []ntfy.KindInfo   `json:"kinds"`
 }
 
 // SetNtfy 接入 ntfy 推送器；启动时调用一次。
@@ -98,13 +100,15 @@ func (h *APIHandler) UpdateNtfy(c *gin.Context) {
 }
 
 // TestNtfy 立刻发一条测试推送。请求体里的 draft（可选）是尚未保存的表单，叠加在已保存的配置上试发；
-// 没有 draft 就用已保存的配置。不论推送成败，接口本身都返回 200，结果在 ok / error 里。
+// 没有 draft 就用已保存的配置。kind（可选）是「各类消息的优先级」表里的类型：带上就按这一类此刻的优先级试发，
+// 返回里的 priority 是实际用的级别；不带就是普通测试推送。不论推送成败，接口本身都返回 200，结果在 ok / error 里。
 func (h *APIHandler) TestNtfy(c *gin.Context) {
 	if h.ntfyUnavailable(c) {
 		return
 	}
 	var req struct {
 		Draft *ntfy.Update `json:"draft"`
+		Kind  string       `json:"kind"`
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, ntfyMaxBody))
 	if err != nil {
@@ -117,6 +121,11 @@ func (h *APIHandler) TestNtfy(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "请求内容不是有效的 JSON"})
 			return
 		}
+	}
+
+	if req.Kind != "" && !ntfy.KnownKind(req.Kind) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不认识的消息类型"})
+		return
 	}
 
 	cur, err := h.store.GetNtfyConfig(c.Request.Context())
@@ -137,13 +146,17 @@ func (h *APIHandler) TestNtfy(c *gin.Context) {
 		return
 	}
 
-	res, sendErr := h.ntfy.SendTest(c.Request.Context(), cfg)
+	res, priority, sendErr := h.ntfy.SendKindTest(c.Request.Context(), cfg, req.Kind)
 	out := gin.H{
 		"ok":          sendErr == nil,
 		"attempts":    res.Attempts,
 		"took_ms":     res.Took.Milliseconds(),
 		"http_status": res.Status,
+		"priority":    priority,
 		"status":      h.ntfy.Status(),
+	}
+	if req.Kind != "" {
+		out["kind"] = req.Kind
 	}
 	if sendErr != nil {
 		out["error"] = sendErr.Error()
@@ -152,7 +165,7 @@ func (h *APIHandler) TestNtfy(c *gin.Context) {
 }
 
 func (h *APIHandler) ntfyViewOf(cfg ntfy.Config) ntfyView {
-	return ntfyView{Config: cfg.Public(h.cfg.NtfyToken), Status: h.ntfy.Status()}
+	return ntfyView{Config: cfg.Public(h.cfg.NtfyToken), Status: h.ntfy.Status(), Kinds: ntfy.Kinds()}
 }
 
 // ntfyHost 只取主机名用于日志。

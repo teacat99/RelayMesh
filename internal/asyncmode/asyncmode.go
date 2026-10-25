@@ -100,7 +100,7 @@ const Contract = `async: 异步对话已生效，工作时不要为了问话而�
 (3) 用户的追加与答复由 hook 在工具调用之间送达；回执出现 inbox: 行或想主动确认时，调用 workflow_context(action:"inbox") 读取。
 (4) 部署、推送远端、删除数据、改动凭据、不可逆迁移（L2）：用 async_ask（risk:"L2"）发确认卡，不要停下来等，先做别的；批准前绝不执行，没有答复就是不批准，相关任务置「暂缓」并写明在等 Q<N>；auth: 行已授权的推私有库、热更生产除外。
 (5) 无需切换阶段（phase 可不传），只按 auth: 行的授权做事：先读收件箱，进度用 notice 汇报，做完发总结。
-(6) 收尾：不用等用户答复的任务（待办/进行中/验证中）先做完并置完成；要等用户拍板才能继续的置「暂缓」并写明在等什么，不挡收尾。之后按 window: 行等窗口走完，收件箱为空才收尾。
+(6) 收尾：不用等用户答复的任务（待办/进行中/验证中）先做完并置完成；要等用户拍板才能继续的，先发确认卡（async_ask）再置「暂缓」，进展里写 Q<N>，不挡收尾。之后按 window: 行等窗口走完，收件箱为空才收尾。
 (7) 长耗时命令（构建、测试、e2e、部署）默认后台启动，等待时先做不依赖结果的事；等待只用计时器分片（每片 ≤2 分钟），片间读收件箱。`
 
 // AuthLineMax 是 auth: 行的字数上限（含前缀、档位名与等级）。
@@ -212,14 +212,125 @@ func FormatClock(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d", sec/60, sec%60)
 }
 
+// ---- 严格收尾门（#232 D2）----
+//
+// 「做完所有非搁置任务再结束会话」：开着收尾门的会话，回复窗口只要本会话名下还有未完成（待办 / 进行中 / 验证中）
+// 的任务就不走，也不能收尾；做不下去、要等用户拍板或等证据的，置「暂缓」并写明在等什么，它们不挡收尾。
+// 谁的任务算「本会话名下」由存储层按指派关系判定（见 store.gateTasks），这里只管文案与数据形状。
+
+// GateListMax 是回执里最多逐个点名的未完成任务数；更多的只给总数，避免一个积压很多的会话把每条回执撑得很长。
+const GateListMax = 8
+
+// GateViewMax 是 Web 界面里最多列出的未完成任务数（界面可以比回执长得多）。
+const GateViewMax = 20
+
+// GateTask 是挡着收尾的一个任务。
+type GateTask struct {
+	// ID 是任务的全局主键（REST 用，Web 上的「暂缓」快捷按钮要它）；回执里只用 Seq（#12）。
+	ID    uint   `json:"id"`
+	Seq   int    `json:"seq"`
+	State string `json:"state"`
+	Title string `json:"title"`
+}
+
+// GateNames 把挡着收尾的任务写成「#12 #15 #18 等共 11 个」：最多点名 GateListMax 个，其余只给总数。
+// total 是未完成任务总数（≥ len(tasks)）；tasks 为空时返回空串。
+func GateNames(tasks []GateTask, total int) string {
+	n := len(tasks)
+	if n > GateListMax {
+		n = GateListMax
+	}
+	if n == 0 {
+		return ""
+	}
+	parts := make([]string, 0, n)
+	for _, t := range tasks[:n] {
+		parts = append(parts, fmt.Sprintf("#%d", t.Seq))
+	}
+	out := strings.Join(parts, " ")
+	if total > n {
+		out += fmt.Sprintf(" 等共 %d 个", total)
+	}
+	return out
+}
+
+// GateMarker 是回执 tasks: 行末尾的收尾门提示。没有挡着的任务（或门没开 / 已放行）时返回空串。
+// 它与 window: 行互补：窗口为空（从没起算或已用完）时没有 window: 行，这条仍然告诉智能体「现在还不能收尾」。
+func GateMarker(tasks []GateTask, total int) string {
+	if total <= 0 || len(tasks) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" ｜ 收尾门：%d 个未完成任务挡着收尾（%s），做完置完成，要等用户拍板的先发确认卡再置暂缓", total, GateNames(tasks, total))
+}
+
+// ShelveNote 是「暂缓要写明缘由」的软提醒正文（不含任务编号）：回执 tasks: 行与 task_board overview 共用同一句话。
+const ShelveNote = "等用户拍板的先发确认卡（async_ask），进展里写 Q<N>；等别的条件写明等什么、预计何时"
+
+// ShelveMarker 是回执 tasks: 行末尾的软提醒：刚置「暂缓」、进展里却没写在等哪张确认卡 / 等什么的任务。
+// 没有这样的任务时返回空串。
+func ShelveMarker(tasks []GateTask, total int) string {
+	if total <= 0 || len(tasks) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" ｜ 暂缓未写缘由 %s（%s）", GateNames(tasks, total), ShelveNote)
+}
+
+// AnsweredTask 是「反向」软提醒里的一项：确认卡已经答复，挂着它的任务却还在暂缓、答复之后没人动过它。
+type AnsweredTask struct {
+	Seq   int    `json:"seq"`   // 任务编号（#12）
+	Title string `json:"title"` // 任务标题
+	Ref   string `json:"ref"`   // 已答复的确认卡（Q89）
+}
+
+// AnsweredNote 是「确认卡已答复、任务还在暂缓」的软提醒正文（不含编号）：回执 tasks: 行与 task_board overview 共用。
+const AnsweredNote = "答复已在收件箱 / 确认项里：按答复接着做并置进行中，或在进展里写明为什么仍要暂缓"
+
+// AnsweredNames 把这类任务写成「Q89→#164 Q90→#170 等共 5 个」：最多点名 GateListMax 个，其余只给总数。
+func AnsweredNames(items []AnsweredTask, total int) string {
+	n := len(items)
+	if n > GateListMax {
+		n = GateListMax
+	}
+	if n == 0 {
+		return ""
+	}
+	parts := make([]string, 0, n)
+	for _, it := range items[:n] {
+		parts = append(parts, fmt.Sprintf("%s→#%d", it.Ref, it.Seq))
+	}
+	out := strings.Join(parts, " ")
+	if total > n {
+		out += fmt.Sprintf(" 等共 %d 个", total)
+	}
+	return out
+}
+
+// AnsweredMarker 是回执 tasks: 行末尾的反向软提醒：用户已经答复了确认卡，挂着它的任务却还停在「暂缓」。
+// 它防的是答复被漏处理（上下文被压缩、收件箱已读已确认却没接着做）；没有这样的任务时返回空串。
+func AnsweredMarker(items []AnsweredTask, total int) string {
+	if total <= 0 || len(items) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" ｜ 确认卡已答复、任务还在暂缓 %s（%s）", AnsweredNames(items, total), AnsweredNote)
+}
+
 // WindowState 是回复窗口此刻的全部事实。
 type WindowState struct {
 	// Until 是走动中的窗口截止时间；暂停（有任务）或没有窗口时为 nil。
 	Until *time.Time
 	// BankSec 是暂停时攒着的剩余秒数。
 	BankSec int
-	// ActiveTasks 是进行中 + 验证中的任务数：> 0 时窗口不走。
+	// ActiveTasks 是挡着窗口的任务数：> 0 时窗口不走。收尾门开着时是门口径的未完成任务数（待办 / 进行中 / 验证中，
+	// 不按时间截断）；门关着时是老口径（进行中 / 验证中、且 3 小时内有更新）。被「本次放行」后为 0。
 	ActiveTasks int
+	// Strict 表示这个会话的收尾门开着（用户没有关掉）。
+	Strict bool
+	// Released 表示用户点了「本次放行」：窗口不再被任务挡住、照常倒计时。
+	Released bool
+	// Gate 是挡着收尾的任务（Strict 时有值，至多 GateViewMax 个、按编号升序）；GateTotal 是总数（≥ len(Gate)）。
+	// 放行后这两项仍如实给出（界面要显示「放行中，仍有 N 个未完成」），只是不再让窗口暂停。
+	Gate      []GateTask
+	GateTotal int
 }
 
 // Paused 窗口里还攒着时间、但因为有任务在做而没有在走。
@@ -234,6 +345,14 @@ func (w WindowState) Empty() bool { return w.Until == nil && w.BankSec <= 0 }
 //   - 窗口还剩时间：手头没别的事就用计时器等 min(剩余, slice)，到点重读收件箱；仍无消息且未到期再按剩余等；
 //   - 窗口已到期：最后读一轮收件箱，仍为空即可收尾。
 func WindowLine(w WindowState, now time.Time, slice time.Duration) string {
+	if w.Paused() && w.Strict {
+		// 收尾门开着：点名挡着的任务，并把「怎样才算放下」说清楚（做完置完成；等拍板先发卡再置暂缓）。
+		names := GateNames(w.Gate, w.GateTotal)
+		if names == "" {
+			names = fmt.Sprintf("%d 个", w.ActiveTasks)
+		}
+		return fmt.Sprintf("window: 回复窗口已暂停——收尾门开着，本会话还有 %d 个未完成任务挡着（%s），它们清零前窗口不走、也不能收尾。继续做完并置完成，不要为了等回复而停下来；必须等用户拍板或等外部证据的，先发确认卡（async_ask）再置「暂缓」并写明在等什么（Q<N> 或证据），暂缓的不挡窗口也不挡收尾；清零后窗口从剩余 %s 接着走。", w.ActiveTasks, names, FormatClock(time.Duration(w.BankSec)*time.Second))
+	}
 	if w.Paused() {
 		return fmt.Sprintf("window: 回复窗口已暂停（还有 %d 个进行中 / 验证中的任务，窗口只在手头没有任务时才走）。继续把任务做完，不要为了等回复而停下来；做不下去、必须等用户拍板的任务置「暂缓」并写明在等什么，它们不挡窗口也不挡收尾；任务清零后窗口从剩余 %s 接着走。", w.ActiveTasks, FormatClock(time.Duration(w.BankSec)*time.Second))
 	}
@@ -252,5 +371,10 @@ func WindowLine(w WindowState, now time.Time, slice time.Duration) string {
 		wait = slice
 	}
 	ms := int(wait / time.Millisecond)
-	return fmt.Sprintf("window: 回复窗口剩余 %s。手头没有别的事时，用计时器等待 %s（AwaitShell({ block_until_ms: %d })，禁止 shell sleep），到点后读收件箱；仍无消息且窗口未到期，就按新的剩余时间再等一次；窗口到期仍无消息则走收尾。用户一回复窗口就清零，收到消息直接处理，不用再等。", FormatClock(left), FormatClock(wait), ms)
+	line := fmt.Sprintf("window: 回复窗口剩余 %s。手头没有别的事时，用计时器等待 %s（AwaitShell({ block_until_ms: %d })，禁止 shell sleep），到点后读收件箱；仍无消息且窗口未到期，就按新的剩余时间再等一次；窗口到期仍无消息则走收尾。用户一回复窗口就清零，收到消息直接处理，不用再等。", FormatClock(left), FormatClock(wait), ms)
+	if w.Released && w.GateTotal > 0 {
+		// 用户明确放行：窗口照常倒计时，智能体要知道这是用户的决定，而不是自己的任务清零了。
+		line += fmt.Sprintf("（用户已「本次放行」收尾门：虽然还有 %d 个未完成任务，窗口照常倒计时；能做完的仍请做完，其余置「暂缓」。）", w.GateTotal)
+	}
+	return line
 }

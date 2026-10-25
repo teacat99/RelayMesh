@@ -1,29 +1,31 @@
 // 运行：pnpm --dir frontend run test:unit
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import type { HostView, SessionInfo, TerminalLauncher } from '../../api/terminal'
+import type { HostView, TerminalLauncher } from '../../api/terminal'
 import {
   AUTO_RESUME_OK_DEFAULT_MINUTES,
   AUTO_RESUME_OK_MAX_MINUTES,
-  CURSOR_CLI_COMMAND,
   CURSOR_CLI_RESUME_NAME,
   LAUNCHER_DEFAULT_LIMITS,
-  READY_MAX_WAIT_MS,
-  READY_QUIET_MS,
-  blankDraft,
+  LEGACY_PRESET_BADGE,
+  LEGACY_PRESET_HINT,
   blankRunDraft,
   charCount,
   collapseSpaces,
-  cursorCliDraft,
   dirAdvice,
   dirPlaceholder,
   draftOf,
+  draftSource,
+  effectiveAfterNew,
+  effectiveSource,
   hasErrors,
   headlessDraft,
   isHeadlessPreset,
+  isLegacyPreset,
   hostPlatformOf,
   hostReadiness,
   isMacHost,
+  isWindowsAbsPath,
   isWindowsHost,
   launcherHosts,
   launcherLimits,
@@ -32,19 +34,13 @@ import {
   normalizeName,
   parseAutoResumeOk,
   parseMaxRun,
-  psQuote,
-  quoteDir,
-  readyToType,
-  runningSessionsOf,
-  sessionCwd,
-  shQuote,
-  shellKindOf,
-  startLine,
-  supportsExitEndsSession,
   toLauncher,
+  toRun,
   validateDraft,
+  validHeadlessBin,
+  validWindowsBin,
   validateRunOptions,
-  windowsDir,
+  windowsPathProblem,
   type RunDraft,
 } from './launcher'
 
@@ -69,18 +65,15 @@ function host(over: Partial<HostView> = {}): HostView {
   } as HostView
 }
 
-function sess(sid: string, name: string, over: Partial<SessionInfo> = {}): SessionInfo {
-  return { sid, name, rows: 24, cols: 80, base: 0, end: 0, state: 'running', attached: 0, ...over }
-}
-
+/** 旧版交互式预设（已停用，#245）：kind 缺省、带命令。 */
 const ok = (over: Partial<TerminalLauncher> = {}): TerminalLauncher => ({ id: 'l-1', name: 'Cursor CLI', host: HOST, dir: '/srv/app', command: 'agent', ...over })
 
 describe('启动器取值范围', () => {
   it('服务端没给就用默认值，给了就用服务端的', () => {
     assert.deepEqual(launcherLimits(undefined), LAUNCHER_DEFAULT_LIMITS)
     assert.deepEqual(launcherLimits(null), LAUNCHER_DEFAULT_LIMITS)
-    assert.deepEqual(launcherLimits({ launcher_max: 5, launcher_name_max: 10, launcher_dir_max: 100, launcher_command_max: 200 }), {
-      ...LAUNCHER_DEFAULT_LIMITS, max: 5, name: 10, dir: 100, command: 200,
+    assert.deepEqual(launcherLimits({ launcher_max: 5, launcher_name_max: 10, launcher_dir_max: 100 }), {
+      ...LAUNCHER_DEFAULT_LIMITS, max: 5, name: 10, dir: 100,
     })
   })
   it('服务端给了不合理的值（0、负数、NaN）回落到默认', () => {
@@ -115,78 +108,44 @@ describe('草稿', () => {
     assert.equal(ids.size, 50)
     for (const id of ids) assert.match(id, /^[A-Za-z0-9_-]{1,40}$/)
   })
-  it('空白草稿与 Cursor CLI 模板', () => {
-    const b = blankDraft(HOST)
-    assert.deepEqual({ ...b, id: '' }, { id: '', name: '', host: HOST, dir: '', command: '' })
-    const c = cursorCliDraft(HOST)
-    assert.equal(c.name, 'Cursor CLI')
-    assert.equal(c.command, CURSOR_CLI_COMMAND)
-    assert.equal(c.host, HOST)
-    assert.notEqual(c.id, b.id)
+  it('续聊模板：名字是「Cursor CLI 续聊」，主机带上，每次都是新编号', () => {
+    const a = headlessDraft(HOST)
+    const b = headlessDraft(HOST)
+    assert.equal(a.name, CURSOR_CLI_RESUME_NAME)
+    assert.equal(a.host, HOST)
+    assert.deepEqual({ ...a, id: '' }, { id: '', name: CURSOR_CLI_RESUME_NAME, host: HOST, dir: '', run: blankRunDraft() })
+    assert.notEqual(a.id, b.id)
   })
   it('预设与草稿互转，缺省字段变成空串；提交时规整空白', () => {
-    assert.deepEqual(draftOf({ id: 'a', name: 'x', host: HOST }), { id: 'a', name: 'x', host: HOST, dir: '', command: '' })
-    assert.deepEqual(toLauncher({ id: 'a', name: '  Cursor \t CLI\n', host: ` ${HOST} `, dir: ' /srv ', command: '  FOO="a  b" agent  ' }), {
+    assert.deepEqual(draftOf({ id: 'a', name: 'x', host: HOST, kind: 'headless' }), { id: 'a', name: 'x', host: HOST, dir: '', run: blankRunDraft() })
+    assert.deepEqual(toLauncher({ id: 'a', name: '  Cursor \t 续聊\n', host: ` ${HOST} `, dir: ' /srv ', run: { ...blankRunDraft(), workflow: 'wf' } }), {
       id: 'a',
-      name: 'Cursor CLI',
+      name: 'Cursor 续聊',
       host: HOST,
       dir: '/srv',
-      command: 'FOO="a  b" agent',
+      kind: 'headless',
+      run: { posture: 'allowlist', source: 'resume', workflow_id: 'wf' },
     })
     assert.equal(normalizeName('  a   b\tc  '), 'a b c')
   })
 })
 
-describe('草稿校验', () => {
-  const draft = (over: Partial<TerminalLauncher> = {}) => draftOf(ok(over))
-  const check = (d = draft(), others: TerminalLauncher[] = []) => validateDraft(d, { limits, others })
+describe('旧版（已停用）的交互式预设（#245）', () => {
+  const headless: TerminalLauncher = { id: 'r-1', name: '续聊', host: HOST, dir: '/srv/app', kind: 'headless', run: { posture: 'allowlist', workflow_id: 'wf-1' } }
 
-  it('合法的草稿没有错误；目录与命令可以留空', () => {
-    assert.deepEqual(check(), {})
-    assert.deepEqual(check(draft({ dir: '', command: '' })), {})
-    assert.ok(!hasErrors(check()))
+  it('不是「非交互续聊」的预设都算旧版（缺省的 kind 就是交互式；服务端把 terminal 规整成缺省）', () => {
+    assert.equal(isLegacyPreset(ok()), true)
+    assert.equal(isLegacyPreset(ok({ command: '' })), true, '只开终端、不输入命令的也是')
+    assert.equal(isLegacyPreset(headless), false)
+    // 与「是不是续聊」互补：任何一条预设恰好是其中一种，清单里的行不会既有「运行」又被标成旧版。
+    for (const l of [ok(), ok({ command: '' }), headless]) assert.notEqual(isLegacyPreset(l), isHeadlessPreset(l))
   })
 
-  it('名字：必填、不超长、不重名（不分大小写，且不算它自己）', () => {
-    assert.equal(check(draft({ name: '   ' })).name, '请给预设起个名字')
-    assert.match(check(draft({ name: '字'.repeat(41) })).name ?? '', /名字最长 40 个字，现在是 41 个字/)
-    assert.equal(check(draft({ name: '字'.repeat(40) })).name, undefined)
-    assert.match(check(draft({ name: 'a\x1bb' })).name ?? '', /控制字符/)
-    const other = ok({ id: 'l-2', name: 'cursor cli' })
-    assert.match(check(draft(), [other]).name ?? '', /已经有一个叫「cursor cli」的预设/)
-    assert.equal(check(draft({ id: 'l-2' }), [other]).name, undefined, '改的就是这一条自己，不算重名')
-    // 空白折叠之后才比较：「Cursor   CLI」与「Cursor CLI」是同一个名字。
-    assert.match(check(draft({ name: 'CURSOR   CLI' }), [ok({ id: 'l-2' })]).name ?? '', /已经有一个叫/)
-  })
-
-  it('主机必填', () => {
-    assert.equal(check(draft({ host: '' })).host, '请选择一台主机')
-  })
-
-  it('目录：必须是完整路径；换行 / 超长被拒绝', () => {
-    for (const dir of ['/', '/srv/应用', '~', '~/work', 'C:\\work', 'D:/work', '\\\\nas\\share']) {
-      assert.equal(check(draft({ dir })).dir, undefined, `${dir} 应合法`)
-    }
-    for (const dir of ['projects/app', './app', '../app', 'app']) {
-      assert.match(check(draft({ dir })).dir ?? '', /完整路径/, `${dir} 应被拒绝`)
-    }
-    assert.match(check(draft({ dir: '/a\nb' })).dir ?? '', /换行或控制字符/)
-    assert.match(check(draft({ dir: '/' + 'd'.repeat(512) })).dir ?? '', /目录最长 512/)
-  })
-
-  it('命令：只能是一行；制表符与控制字符也不行；超长被拒绝；中间的空白原样保留', () => {
-    for (const command of ['a\nb', 'a\rb', 'a\tb', 'a\x1bb', 'a\x7fb']) {
-      assert.match(check(draft({ command })).command ?? '', /只能是一行/, JSON.stringify(command))
-    }
-    assert.match(check(draft({ command: 'x'.repeat(1001) })).command ?? '', /命令最长 1000/)
-    assert.equal(check(draft({ command: 'x'.repeat(1000) })).command, undefined)
-    assert.equal(check(draft({ command: 'FOO="a  b"   agent' })).command, undefined)
-  })
-
-  it('用服务端给的范围校验', () => {
-    const tight = { ...LAUNCHER_DEFAULT_LIMITS, max: 3, name: 5, dir: 10, command: 8 }
-    const e = validateDraft(draftOf(ok({ name: '123456', dir: '/12345678901', command: '123456789' })), { limits: tight, others: [] })
-    assert.deepEqual(Object.keys(e).sort(), ['command', 'dir', 'name'])
+  it('标记与说明：写明已停用、只能删除、去哪里开终端', () => {
+    assert.match(LEGACY_PRESET_BADGE, /已停用/)
+    assert.match(LEGACY_PRESET_HINT, /已停用/)
+    assert.match(LEGACY_PRESET_HINT, /只能删除/)
+    assert.match(LEGACY_PRESET_HINT, /ExecMesh/)
   })
 })
 
@@ -197,28 +156,21 @@ describe('非交互续聊预设的草稿与校验（#126）', () => {
   const draft = (over: Partial<TerminalLauncher> = {}, run: Partial<NonNullable<TerminalLauncher['run']>> = {}) => draftOf({ ...runOk(run), ...over })
   const check = (d = draft(), others: TerminalLauncher[] = []) => validateDraft(d, { limits, others })
 
-  it('模板与互转：终端预设没有 run 字段，续聊预设转回去不带命令与守护', () => {
-    const h = headlessDraft(HOST)
-    assert.equal(h.name, CURSOR_CLI_RESUME_NAME)
-    assert.equal(h.host, HOST)
-    assert.deepEqual(h.run, blankRunDraft())
-    assert.equal('run' in blankDraft(HOST), false, '终端草稿不带 run')
-    assert.equal('run' in draftOf(ok()), false)
+  it('互转：续聊预设转草稿再转回去，选项原样回来，不带命令与守护', () => {
     assert.equal(isHeadlessPreset(ok()), false)
     assert.equal(isHeadlessPreset(runOk()), true)
 
     const d = draftOf(runOk({ bin: 'cursor-agent', model: 'claude-sonnet-5-5-max', posture: 'force', conversation_id: 'chat-9', prompt: '继续' }))
-    assert.deepEqual(d.run, { bin: 'cursor-agent', model: 'claude-sonnet-5-5-max', posture: 'force', workflow: 'wf-1', conversation: 'chat-9', prompt: '继续', maxRun: '', maxRunUnit: 'hour', autoResume: false, autoResumeOk: '', newConversation: false, origin: '' })
-    assert.equal(d.command, '')
+    assert.deepEqual(d.run, { bin: 'cursor-agent', model: 'claude-sonnet-5-5-max', posture: 'force', workflow: 'wf-1', conversation: 'chat-9', prompt: '继续', maxRun: '', maxRunUnit: 'hour', autoResume: false, autoResumeOk: '', source: 'resume', afterNew: 'remember', origin: '' })
     assert.deepEqual(toLauncher(d), {
       id: 'r-1', name: '续聊', host: HOST, dir: '/srv/app', kind: 'headless',
-      run: { posture: 'force', bin: 'cursor-agent', model: 'claude-sonnet-5-5-max', workflow_id: 'wf-1', conversation_id: 'chat-9', prompt: '继续' },
+      run: { posture: 'force', source: 'resume', bin: 'cursor-agent', model: 'claude-sonnet-5-5-max', workflow_id: 'wf-1', conversation_id: 'chat-9', prompt: '继续' },
     })
   })
 
   it('提交时规整：空字段不带，提示词里的空白（含换行）折成一个空格', () => {
-    const t = toLauncher({ ...blankDraft(HOST), id: 'r-2', name: '  续聊 ', dir: ' /w ', run: { ...blankRunDraft(), workflow: ' wf ', model: '  ', prompt: '  继续\n  做完   %workflow  ' } })
-    assert.deepEqual(t, { id: 'r-2', name: '续聊', host: HOST, dir: '/w', kind: 'headless', run: { posture: 'allowlist', workflow_id: 'wf', prompt: '继续 做完 %workflow' } })
+    const t = toLauncher({ ...headlessDraft(HOST), id: 'r-2', name: '  续聊 ', dir: ' /w ', run: { ...blankRunDraft(), workflow: ' wf ', model: '  ', prompt: '  继续\n  做完   %workflow  ' } })
+    assert.deepEqual(t, { id: 'r-2', name: '续聊', host: HOST, dir: '/w', kind: 'headless', run: { posture: 'allowlist', source: 'resume', workflow_id: 'wf', prompt: '继续 做完 %workflow' } })
     assert.equal(collapseSpaces('  a \t b\n\nc '), 'a b c')
     assert.equal(draftOf({ ...runOk(), run: undefined, kind: 'headless' }).run?.posture, 'allowlist', '缺运行配置时给空的草稿而不是崩')
   })
@@ -229,13 +181,29 @@ describe('非交互续聊预设的草稿与校验（#126）', () => {
     assert.deepEqual(check(draft({}, { bin: '~/.local/bin/agent', model: 'vendor/model:tag-1.5', posture: 'force', prompt: '继续 %workflow' })), {})
   })
 
-  it('目录必填且必须是 / 开头的绝对路径（与终端预设不同：~ 与盘符都不行）', () => {
+  it('目录必填且必须是绝对路径：/ 开头，或 Windows 的盘符 / UNC 路径（#178）；~ 与相对写法不行', () => {
     assert.match(check(draft({ dir: '' })).dir ?? '', /请填写目录/)
-    for (const dir of ['~/work', 'C:\\work', 'app', './app']) {
+    for (const dir of ['~/work', 'app', './app', 'C:work', 'C:', '\\\\srv']) {
       assert.ok(check(draft({ dir })).dir, `${dir} 应被拒绝`)
     }
     assert.match(check(draft({ dir: '~/work' })).dir ?? '', /绝对路径/)
     assert.equal(check(draft({ dir: '/srv/应用' })).dir, undefined)
+    for (const dir of ['C:\\work', 'D:/项目/app', 'C:\\Program Files\\应用 一', '\\\\srv\\share\\app']) {
+      assert.equal(check(draft({ dir })).dir, undefined, `${dir} 应合法`)
+    }
+  })
+
+  it('Windows 路径的目录里有 cmd 语法字符、控制字符或多余的冒号：拒绝并说明是哪个字符（#178）', () => {
+    for (const [dir, want] of [
+      ['C:\\R&D', /「&」/], ['C:\\a"b', /「"」/], ['C:\\100%', /「%」/], ['C:\\a^b', /「\^」/], ['C:\\a|b', /「\|」/],
+      ['C:\\a<b', /「<」/], ['C:\\a>b', /「>」/], ['C:\\hello!', /「!」/], ['C:\\*.txt', /「\*」/], ['C:\\a?b', /「\?」/],
+      ['C:\\a:b', /冒号/],
+    ] as const) {
+      assert.match(check(draft({ dir })).dir ?? '', want, `${dir}`)
+      assert.match(check(draft({ dir })).dir ?? '', /^目录/, `${dir}：原因要接在「目录」后面`)
+    }
+    // POSIX 路径不受这些规则影响（它们在 shell 里是被单引号包住的）
+    for (const dir of ['/srv/R&D', '/srv/a b', '/srv/100%', "/srv/it's"]) assert.equal(check(draft({ dir })).dir, undefined, `${dir}`)
   })
 
   it('工作流编号与对话编号至少填一个；各自的格式', () => {
@@ -258,6 +226,15 @@ describe('非交互续聊预设的草稿与校验（#126）', () => {
     assert.match(check(draft({}, { bin: 'a'.repeat(129) })).bin ?? '', /最长 128/)
   })
 
+  it('可执行文件（#178）：Windows 的命令名与盘符 / UNC 路径合法；cmd、powershell 这类 shell 与带 cmd 语法字符的路径不行', () => {
+    for (const bin of ['agent.cmd', 'C:\\Users\\张三\\AppData\\Local\\cursor-agent\\agent.cmd', 'C:\\Program Files\\Cursor Agent\\agent.exe', 'C:/tools/agent.cmd', '\\\\srv\\share\\bin\\agent.cmd', '/bin/bash', '/usr/bin/zsh']) {
+      assert.equal(check(draft({}, { bin })).bin, undefined, `${bin} 应合法`)
+    }
+    for (const bin of ['cmd', 'CMD', 'cmd.exe', 'powershell', 'PowerShell.exe', 'pwsh', 'wsl', 'C:\\Windows\\System32\\cmd.exe', 'C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\R&D\\agent.cmd', 'C:\\a"b\\agent.cmd', 'C:\\bin\\', 'bin\\agent.cmd', 'C:agent.cmd']) {
+      assert.ok(check(draft({}, { bin })).bin, `${bin} 应被拒绝`)
+    }
+  })
+
   it('模型名：字母数字开头，可含 . _ : / + -', () => {
     for (const model of ['claude-sonnet-5-5-max', 'gpt-5.2', 'vendor/model:tag', 'm1']) {
       assert.equal(check(draft({}, { model })).model, undefined, `${model} 应合法`)
@@ -269,25 +246,38 @@ describe('非交互续聊预设的草稿与校验（#126）', () => {
   })
 
   it('提示词：按折叠空白之后的字数算上限，控制字符不行', () => {
-    assert.equal(check(draft({}, { prompt: '字'.repeat(600) })).prompt, undefined)
-    assert.match(check(draft({}, { prompt: '字'.repeat(601) })).prompt ?? '', /最长 600 个字，现在是 601 个字/)
-    assert.equal(check(draft({}, { prompt: '字 '.repeat(300) })).prompt, undefined, '折叠后 599 个字，没超')
+    assert.equal(check(draft({}, { prompt: '字'.repeat(1500) })).prompt, undefined)
+    assert.match(check(draft({}, { prompt: '字'.repeat(1501) })).prompt ?? '', /最长 1500 个字，现在是 1501 个字/)
+    assert.equal(check(draft({}, { prompt: '字 '.repeat(750) })).prompt, undefined, '折叠后 1499 个字，没超')
     assert.match(check(draft({}, { prompt: 'a\x1bb' })).prompt ?? '', /控制字符/)
   })
 
-  it('续聊预设不校验命令；名字与主机仍然校验', () => {
-    const d = draft()
-    d.command = 'x'.repeat(5000)
-    assert.deepEqual(check(d), {}, '命令不属于续聊预设')
-    assert.equal(check(draft({ name: ' ' })).name, '请给预设起个名字')
+  it('名字：必填、不超长、不重名（不分大小写、空白折叠后比较，且不算它自己）', () => {
+    assert.equal(check(draft({ name: '   ' })).name, '请给预设起个名字')
+    assert.match(check(draft({ name: '字'.repeat(41) })).name ?? '', /名字最长 40 个字，现在是 41 个字/)
+    assert.equal(check(draft({ name: '字'.repeat(40) })).name, undefined)
+    assert.match(check(draft({ name: 'a\x1bb' })).name ?? '', /控制字符/)
+    const other = { ...runOk(), id: 'r-2', name: 'cursor resume' }
+    assert.match(check(draft({ name: 'Cursor Resume' }), [other]).name ?? '', /已经有一个叫「cursor resume」的预设/)
+    assert.equal(check(draft({ id: 'r-2', name: 'Cursor Resume' }), [other]).name, undefined, '改的就是这一条自己，不算重名')
+    assert.match(check(draft({ name: 'CURSOR   RESUME' }), [other]).name ?? '', /已经有一个叫/)
+  })
+
+  it('主机必填', () => {
     assert.equal(check(draft({ host: '' })).host, '请选择一台主机')
-    assert.match(check(draft(), [{ ...runOk(), id: 'r-9' }]).name ?? '', /已经有一个叫/)
+  })
+
+  it('目录：换行 / 控制字符与超长被拒绝', () => {
+    assert.match(check(draft({ dir: '/a\nb' })).dir ?? '', /换行或控制字符/)
+    assert.match(check(draft({ dir: '/' + 'd'.repeat(512) })).dir ?? '', /目录最长 512/)
   })
 
   it('用服务端给的范围校验', () => {
     const tight = { ...LAUNCHER_DEFAULT_LIMITS, runPrompt: 5, runModel: 4, runBin: 3 }
     const e = validateDraft(draft({}, { prompt: '123456', model: 'abcde', bin: 'abcd' }), { limits: tight, others: [] })
     assert.deepEqual(Object.keys(e).sort(), ['bin', 'model', 'prompt'])
+    const small = { ...LAUNCHER_DEFAULT_LIMITS, name: 5, dir: 10 }
+    assert.deepEqual(Object.keys(validateDraft(draft({ name: '123456', dir: '/12345678901' }), { limits: small, others: [] })).sort(), ['dir', 'name'])
   })
 })
 
@@ -398,114 +388,17 @@ describe('可选的主机与主机状态', () => {
   })
 })
 
-describe('认出已经在运行的会话', () => {
-  const h = host({
-    sessions: [
-      sess('s-old', 'Cursor CLI', { created: 100 }),
-      sess('s-new', 'Cursor CLI', { created: 300 }),
-      sess('s-mid', 'Cursor   CLI', { created: 200 }),
-      sess('s-exited', 'Cursor CLI', { created: 400, state: 'exited' }),
-      sess('s-other', '别的会话', { created: 500 }),
-      sess('s-noname', '', { created: 600 }),
-    ],
-  })
-
-  it('同名且在运行的会话，新的在前；已结束的和别的名字不算', () => {
-    assert.deepEqual(runningSessionsOf(ok(), h).map(s => s.sid), ['s-new', 's-mid', 's-old'])
-  })
-  it('名字里空白不同也认得出（终端子系统会折叠会话名里的空白）', () => {
-    assert.deepEqual(runningSessionsOf(ok({ name: 'Cursor   CLI' }), h).map(s => s.sid), ['s-new', 's-mid', 's-old'])
-  })
-  it('主机不在、或没有同名会话时是空的', () => {
-    assert.deepEqual(runningSessionsOf(ok(), undefined), [])
-    assert.deepEqual(runningSessionsOf(ok({ name: '没有这个' }), h), [])
-  })
-  it('没有创建时间的会话排在最后，不会让排序出错', () => {
-    const h2 = host({ sessions: [sess('s-a', 'x'), sess('s-b', 'x', { created: 5 })] })
-    assert.deepEqual(runningSessionsOf(ok({ name: 'x' }), h2).map(s => s.sid), ['s-b', 's-a'])
-  })
-})
-
-describe('自动输入的那一行', () => {
-  it('shell 字面量：单引号包起来，里面的单引号转义', () => {
-    assert.equal(shQuote('/srv/app'), `'/srv/app'`)
-    assert.equal(shQuote(`/srv/a'b`), `'/srv/a'\\''b'`)
-    assert.equal(shQuote('a b'), `'a b'`)
-    assert.equal(shQuote(''), `''`)
-  })
-
-  it('cd 的目录写法：~ 让 shell 自己展开，其余部分加引号', () => {
-    assert.equal(quoteDir('/home/user/RelayMesh'), `'/home/user/RelayMesh'`)
-    assert.equal(quoteDir('/'), `'/'`)
-    assert.equal(quoteDir('~'), '~')
-    assert.equal(quoteDir('~/'), '~/')
-    assert.equal(quoteDir('~/work'), `~/'work'`)
-    assert.equal(quoteDir('~/my work'), `~/'my work'`)
-    assert.equal(quoteDir('~bob/x'), `~bob/'x'`)
-    assert.equal(quoteDir(`~/o'neil`), `~/'o'\\''neil'`)
-    assert.equal(quoteDir('/srv/$HOME `x`'), `'/srv/$HOME \`x\`'`, '特殊字符不被 shell 解释')
-  })
-
-  it('没有命令就什么也不输入（只开终端）', () => {
-    assert.equal(startLine({ dir: '/srv', command: '' }, 'linux'), '')
-    assert.equal(startLine({ dir: '/srv', command: '   ' }, 'linux'), '')
-    assert.equal(startLine({}, 'linux'), '')
-  })
-
-  it('有目录就先 cd，目录不对时命令不会运行', () => {
-    assert.equal(startLine({ dir: '/home/user/RelayMesh', command: 'agent' }, 'linux'), `cd -- '/home/user/RelayMesh' && agent`)
-    assert.equal(startLine({ dir: '~/work', command: 'agent --resume' }, 'darwin'), `cd -- ~/'work' && agent --resume`)
-    assert.equal(startLine({ dir: '/srv', command: '  agent  ' }, undefined), `cd -- '/srv' && agent`)
-  })
-
-  it('没有目录就只输入命令；Windows 主机但不知道 shell 种类（旧版守护进程）时不拼目录', () => {
-    assert.equal(startLine({ dir: '', command: 'agent' }, 'linux'), 'agent')
-    assert.equal(startLine({ dir: 'C:\\work', command: 'agent' }, 'windows'), 'agent')
-    assert.equal(startLine({ dir: 'C:\\work', command: 'agent' }, 'Windows 11'), 'agent')
-  })
-
-  it('命令原样输入，不被改写', () => {
-    assert.equal(startLine({ dir: '', command: `FOO='a  b' agent --x "y"` }, 'linux'), `FOO='a  b' agent --x "y"`)
-  })
-
-  it('开启 exit_ends_session 时用 exec 包装', () => {
-    assert.equal(
-      startLine({ dir: '/srv', command: 'agent --trust', guard: { enabled: true, exit_ends_session: true } }, 'linux'),
-      `cd -- '/srv' && exec agent --trust`,
-    )
-    assert.equal(
-      startLine({ dir: '', command: 'A=1 agent', guard: { enabled: true, exit_ends_session: true } }, 'linux'),
-      'exec env A=1 agent',
-    )
-  })
-
-  it('传给新建会话的目录：~ 开头的主机不展开，不传', () => {
-    assert.equal(sessionCwd('/srv/app'), '/srv/app')
-    assert.equal(sessionCwd(' /srv/app '), '/srv/app')
-    assert.equal(sessionCwd('~/work'), undefined)
-    assert.equal(sessionCwd('~'), undefined)
-    assert.equal(sessionCwd(''), undefined)
-    assert.equal(sessionCwd(undefined), undefined)
-    assert.equal(sessionCwd('C:\\work'), 'C:\\work')
-  })
-})
-
 // ---------- Windows / macOS 主机（#163） ----------
-// 没有真实的 Windows / macOS 主机可用：这里按守护进程会上报的样子构造平台信息；PowerShell 7 上的真实行为另有实测（见 D-298）。
-const WIN_PS = { os: 'windows', shell: 'pwsh', home: 'C:\\Users\\me', sep: '\\' }
-const WIN_PS5 = { os: 'windows', shell: 'powershell', home: 'C:\\Users\\me', sep: '\\' }
-const WIN_CMD = { os: 'windows', shell: 'cmd', home: 'C:\\Users\\me', sep: '\\' }
-const WIN_OLD = { os: 'windows' } // 旧版守护进程：不上报 shell / 家目录
-const MAC = { os: 'macOS 14.5', shell: 'zsh', home: '/Users/me', sep: '/' }
-const LINUX = { os: 'Debian GNU/Linux 13 (trixie)', shell: 'bash', home: '/root', sep: '/' }
-const EXIT_ENDS = { enabled: true, exit_ends_session: true }
+// 没有真实的 Windows / macOS 主机可用：这里只按 Agent 握手时自报的系统名构造平台信息。
+const WIN = { os: 'windows' }
+const MAC = { os: 'macOS 14.5' }
+const LINUX = { os: 'Debian GNU/Linux 13 (trixie)' }
 
 describe('主机平台（#163）', () => {
-  it('从主机信息取平台：系统名来自 Agent，shell / 家目录 / 分隔符来自守护进程', () => {
-    const h = host({ os: 'windows', holder: { exec: { shell: 'pwsh', home: 'C:\\Users\\me', sep: '\\' } } as unknown as HostView['holder'] })
-    assert.deepEqual(hostPlatformOf(h), WIN_PS)
-    assert.deepEqual(hostPlatformOf(host({ os: 'windows' })), { os: 'windows', shell: undefined, home: undefined, sep: undefined })
-    assert.deepEqual(hostPlatformOf(undefined), { os: undefined, shell: undefined, home: undefined, sep: undefined })
+  it('从主机信息取平台：系统名来自 Agent 握手时的自报', () => {
+    assert.deepEqual(hostPlatformOf(host({ os: 'windows' })), WIN)
+    assert.deepEqual(hostPlatformOf(host({ os: 'macOS 14.5' })), MAC)
+    assert.deepEqual(hostPlatformOf(undefined), { os: undefined })
   })
 
   it('认出 Windows / macOS', () => {
@@ -519,168 +412,13 @@ describe('主机平台（#163）', () => {
     assert.equal(isMacHost('windows'), false)
     assert.equal(isMacHost('Debian GNU/Linux 13 (trixie)'), false)
   })
-
-  it('shell 的语法族：非 Windows 一律 posix；Windows 看上报的 shell', () => {
-    for (const p of [undefined, 'linux', LINUX, MAC, 'macOS 14.5', {}]) assert.equal(shellKindOf(p), 'posix')
-    for (const sh of ['pwsh', 'powershell', 'PowerShell.exe', 'pwsh.exe', ' pwsh ']) assert.equal(shellKindOf({ os: 'windows', shell: sh }), 'powershell', sh)
-    for (const sh of ['cmd', 'cmd.exe', 'CMD.EXE']) assert.equal(shellKindOf({ os: 'windows', shell: sh }), 'cmd', sh)
-    assert.equal(shellKindOf(WIN_OLD), 'windows', '旧版守护进程没上报 shell')
-    assert.equal(shellKindOf('windows'), 'windows', '老写法：只传系统名')
-    assert.equal(shellKindOf({ os: 'windows', shell: 'bash' }), 'windows', '不认识的 shell 不猜')
-  })
-
-  it('「命令退出即结束会话」只有 POSIX shell 能做（靠 exec）', () => {
-    assert.equal(supportsExitEndsSession(LINUX), true)
-    assert.equal(supportsExitEndsSession(MAC), true)
-    assert.equal(supportsExitEndsSession(undefined), true)
-    for (const p of [WIN_PS, WIN_PS5, WIN_CMD, WIN_OLD]) assert.equal(supportsExitEndsSession(p), false)
-  })
-})
-
-describe('PowerShell 的字面量与 Windows 目录（#163）', () => {
-  it('psQuote：单引号翻倍，其余字符原样', () => {
-    assert.equal(psQuote('C:\\work'), `'C:\\work'`)
-    assert.equal(psQuote('C:\\Program Files\\x'), `'C:\\Program Files\\x'`)
-    assert.equal(psQuote(`C:\\o'neil`), `'C:\\o''neil'`)
-    assert.equal(psQuote('C:\\[a] $b `c`'), `'C:\\[a] $b \`c\`'`, '方括号、$、反引号在单引号里都是普通字符')
-    assert.equal(psQuote('C:\\项目 一'), `'C:\\项目 一'`)
-    assert.equal(psQuote(''), `''`)
-  })
-
-  it('psQuote：PowerShell 把弯引号也当单引号，四种都要翻倍（只翻倍 ASCII 的会让字符串提前结束）', () => {
-    assert.equal(psQuote('C:\\J\u2019s Files'), `'C:\\J\u2019\u2019s Files'`)
-    assert.equal(psQuote('\u2018x\u2019'), `'\u2018\u2018x\u2019\u2019'`)
-    assert.equal(psQuote('a\u201ab\u201bc'), `'a\u201a\u201ab\u201b\u201bc'`)
-  })
-
-  it('windowsDir：盘符与 UNC 路径原样，~ 用上报的家目录展开', () => {
-    assert.equal(windowsDir('C:\\work', WIN_PS), 'C:\\work')
-    assert.equal(windowsDir('d:/work/app', WIN_PS), 'd:/work/app')
-    assert.equal(windowsDir('\\\\srv\\share\\x', WIN_PS), '\\\\srv\\share\\x')
-    assert.equal(windowsDir('~', WIN_PS), 'C:\\Users\\me')
-    assert.equal(windowsDir('~\\work', WIN_PS), 'C:\\Users\\me\\work')
-    assert.equal(windowsDir('~/work/app', WIN_PS), 'C:\\Users\\me\\work\\app', '~/ 里的 / 换成 \\')
-    assert.equal(windowsDir('~/', WIN_PS), 'C:\\Users\\me')
-    assert.equal(windowsDir('~/x', { ...WIN_PS, home: 'C:\\Users\\me\\' }), 'C:\\Users\\me\\x', '家目录末尾有 \\ 不重复')
-  })
-
-  it('windowsDir：没有确定含义的写法返回空串（调用方就不拼进入目录的那一句）', () => {
-    assert.equal(windowsDir('/srv/app', WIN_PS), '', '/ 开头在 Windows 上没有确定含义')
-    assert.equal(windowsDir('~bob/x', WIN_PS), '', '~用户名')
-    assert.equal(windowsDir('~', WIN_OLD), '', '没上报家目录')
-    assert.equal(windowsDir('~/x', { os: 'windows', home: '  ' }), '')
-    assert.equal(windowsDir('work', WIN_PS), '')
-  })
-})
-
-describe('Windows 主机的启动那一句（#163）', () => {
-  it('PowerShell：Set-Location -LiteralPath … -ErrorAction Stop; 命令（5.1 与 7 都没有的 && 不用）', () => {
-    for (const p of [WIN_PS, WIN_PS5]) {
-      assert.equal(startLine({ dir: 'C:\\work\\app', command: 'agent --resume' }, p), `Set-Location -LiteralPath 'C:\\work\\app' -ErrorAction Stop; agent --resume`)
-    }
-    assert.equal(startLine({ dir: 'D:/work', command: 'agent' }, WIN_PS), `Set-Location -LiteralPath 'D:/work' -ErrorAction Stop; agent`)
-    assert.equal(startLine({ dir: '\\\\srv\\share\\x', command: 'agent' }, WIN_PS), `Set-Location -LiteralPath '\\\\srv\\share\\x' -ErrorAction Stop; agent`)
-  })
-
-  it('PowerShell：路径里的空格、引号、弯引号、$ 和方括号都安全', () => {
-    assert.equal(startLine({ dir: 'C:\\Program Files\\My App', command: 'agent' }, WIN_PS), `Set-Location -LiteralPath 'C:\\Program Files\\My App' -ErrorAction Stop; agent`)
-    assert.equal(startLine({ dir: `C:\\o'neil`, command: 'agent' }, WIN_PS), `Set-Location -LiteralPath 'C:\\o''neil' -ErrorAction Stop; agent`)
-    assert.equal(startLine({ dir: 'C:\\J\u2019s Files', command: 'agent' }, WIN_PS), `Set-Location -LiteralPath 'C:\\J\u2019\u2019s Files' -ErrorAction Stop; agent`)
-    assert.equal(startLine({ dir: 'C:\\[a] $b', command: 'agent' }, WIN_PS), `Set-Location -LiteralPath 'C:\\[a] $b' -ErrorAction Stop; agent`)
-  })
-
-  it('PowerShell：~ 先展开成家目录', () => {
-    assert.equal(startLine({ dir: '~\\work', command: 'agent' }, WIN_PS), `Set-Location -LiteralPath 'C:\\Users\\me\\work' -ErrorAction Stop; agent`)
-    assert.equal(startLine({ dir: '~', command: 'agent' }, WIN_PS), `Set-Location -LiteralPath 'C:\\Users\\me' -ErrorAction Stop; agent`)
-  })
-
-  it('PowerShell：目录写法在 Windows 上没有含义（/ 开头、~用户名、没上报家目录）就不拼进入目录，命令照原样输入', () => {
-    assert.equal(startLine({ dir: '/srv/app', command: 'agent' }, WIN_PS), 'agent')
-    assert.equal(startLine({ dir: '~bob/x', command: 'agent' }, WIN_PS), 'agent')
-    assert.equal(startLine({ dir: '~/x', command: 'agent' }, { os: 'windows', shell: 'pwsh' }), 'agent')
-  })
-
-  it('PowerShell：没有目录只输入命令；没有命令什么也不输入', () => {
-    assert.equal(startLine({ dir: '', command: 'agent' }, WIN_PS), 'agent')
-    assert.equal(startLine({ dir: 'C:\\work', command: '  ' }, WIN_PS), '')
-  })
-
-  it('cmd：cd /d "目录" && 命令', () => {
-    assert.equal(startLine({ dir: 'C:\\work\\app', command: 'agent' }, WIN_CMD), `cd /d "C:\\work\\app" && agent`)
-    assert.equal(startLine({ dir: 'C:\\Program Files\\x', command: 'agent' }, WIN_CMD), `cd /d "C:\\Program Files\\x" && agent`)
-    assert.equal(startLine({ dir: '~\\work', command: 'agent' }, WIN_CMD), `cd /d "C:\\Users\\me\\work" && agent`)
-  })
-
-  it('cmd：目录含 % " ^ ! 或是 UNC 路径时不拼（cmd 会改写它们 / cd 不支持 UNC）', () => {
-    for (const d of ['C:\\100%\\x', 'C:\\a"b', 'C:\\a^b', 'C:\\hi!', '\\\\srv\\share']) {
-      assert.equal(startLine({ dir: d, command: 'agent' }, WIN_CMD), 'agent', d)
-    }
-  })
-
-  it('Windows 但不知道 shell（旧版守护进程）：什么都不拼，和以前一样', () => {
-    assert.equal(startLine({ dir: 'C:\\work', command: 'agent' }, WIN_OLD), 'agent')
-    assert.equal(startLine({ dir: 'C:\\work', command: 'agent' }, 'windows'), 'agent')
-    assert.equal(startLine({ dir: '~/x', command: 'agent' }, WIN_OLD), 'agent')
-  })
-
-  it('Windows 主机上 exit_ends_session 不包 exec（PowerShell / cmd 里没有 exec，包了命令根本不会运行）', () => {
-    for (const p of [WIN_PS, WIN_PS5, WIN_CMD, WIN_OLD]) {
-      assert.ok(!/\bexec\b/.test(startLine({ dir: '', command: 'agent --trust', guard: EXIT_ENDS }, p)), JSON.stringify(p))
-    }
-    assert.equal(startLine({ dir: 'C:\\work', command: 'agent --trust', guard: EXIT_ENDS }, WIN_PS), `Set-Location -LiteralPath 'C:\\work' -ErrorAction Stop; agent --trust`)
-  })
-})
-
-describe('macOS / Linux 主机的启动那一句（#163）', () => {
-  it('macOS：与 Linux 相同的 cd -- … && 写法，~ 交给 zsh / bash 展开', () => {
-    assert.equal(startLine({ dir: '/Users/me/projects/RelayMesh', command: 'agent' }, MAC), `cd -- '/Users/me/projects/RelayMesh' && agent`)
-    assert.equal(startLine({ dir: '~/projects', command: 'agent' }, MAC), `cd -- ~/'projects' && agent`)
-    assert.equal(startLine({ dir: '~', command: 'agent' }, MAC), `cd -- ~ && agent`)
-    assert.equal(startLine({ dir: '/Users/me/My Projects/J\u2019s', command: 'agent' }, MAC), `cd -- '/Users/me/My Projects/J\u2019s' && agent`)
-    assert.equal(startLine({ dir: `/Users/me/o'neil`, command: 'agent' }, MAC), `cd -- '/Users/me/o'\\''neil' && agent`)
-  })
-
-  it('macOS / Linux：exit_ends_session 照常用 exec 包装', () => {
-    for (const p of [MAC, LINUX, 'macOS 14.5', 'linux', undefined]) {
-      assert.equal(startLine({ dir: '/srv', command: 'agent --trust', guard: EXIT_ENDS }, p), `cd -- '/srv' && exec agent --trust`, JSON.stringify(p))
-    }
-  })
-
-  it('只传系统名的老写法与传平台对象结果一致', () => {
-    assert.equal(startLine({ dir: '/srv', command: 'agent' }, 'linux'), startLine({ dir: '/srv', command: 'agent' }, LINUX))
-    assert.equal(startLine({ dir: '/srv', command: 'agent' }, 'macOS 14.5'), startLine({ dir: '/srv', command: 'agent' }, MAC))
-  })
-})
-
-describe('传给新建会话的目录（#163）', () => {
-  it('POSIX 主机：~ 开头不传（由 cd 让 shell 展开），其余原样', () => {
-    for (const p of [undefined, 'linux', LINUX, MAC]) {
-      assert.equal(sessionCwd('~/work', p), undefined)
-      assert.equal(sessionCwd('~', p), undefined)
-      assert.equal(sessionCwd('/srv/app', p), '/srv/app')
-    }
-  })
-
-  it('Windows 主机：~ 用上报的家目录换成绝对路径；没上报或写法没含义就不传', () => {
-    assert.equal(sessionCwd('~', WIN_PS), 'C:\\Users\\me')
-    assert.equal(sessionCwd('~\\work', WIN_PS), 'C:\\Users\\me\\work')
-    assert.equal(sessionCwd('~/work', WIN_CMD), 'C:\\Users\\me\\work')
-    assert.equal(sessionCwd('~/work', WIN_OLD), undefined, '旧版守护进程没上报家目录')
-    assert.equal(sessionCwd('~bob/x', WIN_PS), undefined)
-  })
-
-  it('Windows 主机：盘符路径原样传', () => {
-    assert.equal(sessionCwd('C:\\work', WIN_PS), 'C:\\work')
-    assert.equal(sessionCwd(' C:\\work ', 'windows'), 'C:\\work')
-    assert.equal(sessionCwd('', WIN_PS), undefined)
-  })
 })
 
 describe('目录写法的提醒（#163）', () => {
   it('不知道主机系统（没选主机、旧数据）或目录为空：不说话', () => {
     assert.equal(dirAdvice('C:\\work', undefined), '')
     assert.equal(dirAdvice('C:\\work', {}), '')
-    assert.equal(dirAdvice('', WIN_PS), '')
+    assert.equal(dirAdvice('', WIN), '')
     assert.equal(dirAdvice('   ', LINUX), '')
   })
 
@@ -693,55 +431,29 @@ describe('目录写法的提醒（#163）', () => {
   })
 
   it('Windows 主机上写了 / 开头的路径：提醒写盘符路径', () => {
-    for (const p of [WIN_PS, WIN_CMD, WIN_OLD]) assert.match(dirAdvice('/srv/app', p), /盘符/)
+    assert.match(dirAdvice('/srv/app', WIN), /盘符/)
+    assert.match(dirAdvice('/srv/app', 'windows'), /盘符/, '老写法：只传系统名')
   })
 
-  it('Windows 主机上的 ~：能展开不提醒；没上报家目录、或是 ~用户名 时说明原因', () => {
-    assert.equal(dirAdvice('~', WIN_PS), '')
-    assert.equal(dirAdvice('~\\work', WIN_PS), '')
-    assert.match(dirAdvice('~/work', WIN_OLD), /家目录/)
-    assert.match(dirAdvice('~bob/x', WIN_PS), /~用户名/)
+  it('Windows 主机 + 盘符路径、非 Windows 主机 + / 开头的路径：不提醒；~ 本来就是错误，由校验报，这里不说话（#178）', () => {
+    assert.equal(dirAdvice('C:\\work', WIN), '')
+    assert.equal(dirAdvice('C:\\work', 'windows'), '')
+    assert.equal(dirAdvice('/srv/app', LINUX), '')
+    assert.equal(dirAdvice('~/work', WIN), '')
+    assert.equal(dirAdvice('~/work', LINUX), '')
   })
 
-  it('Windows 主机 + 盘符路径：知道 shell 不提醒；旧版守护进程说明「不存在时悄悄回落」', () => {
-    assert.equal(dirAdvice('C:\\work', WIN_PS), '')
-    assert.equal(dirAdvice('C:\\work', WIN_CMD), '')
-    assert.match(dirAdvice('C:\\work', WIN_OLD), /较旧/)
-    assert.match(dirAdvice('C:\\work', 'windows'), /悄悄回落/)
+  it('提醒的内容：非 Windows 要以 / 开头（不提 ~），Windows 要写盘符路径', () => {
+    assert.match(dirAdvice('C:\\work', LINUX), /以 \/ 开头。/)
+    assert.doesNotMatch(dirAdvice('C:\\work', LINUX), /~/)
   })
 
   it('目录输入框的示例跟着主机系统走', () => {
-    assert.equal(dirPlaceholder(WIN_PS), 'C:\\work\\RelayMesh')
+    assert.equal(dirPlaceholder(WIN), 'C:\\work\\RelayMesh')
     assert.equal(dirPlaceholder('windows'), 'C:\\work\\RelayMesh')
     assert.equal(dirPlaceholder(MAC), '/Users/你/projects/RelayMesh')
     assert.equal(dirPlaceholder(LINUX), '/home/user/RelayMesh')
     assert.equal(dirPlaceholder(undefined), '/home/user/RelayMesh')
-  })
-})
-
-describe('什么时候可以输入', () => {
-  it('还没连上就不输入', () => {
-    assert.equal(readyToType({ liveAt: null, lastOutputAt: null, now: 99999 }), false)
-    assert.equal(readyToType({ liveAt: null, lastOutputAt: 100, now: 99999 }), false)
-  })
-  it('连上之后输出还在继续就等，安静够久就输入', () => {
-    const liveAt = 1000
-    assert.equal(readyToType({ liveAt, lastOutputAt: 1100, now: 1100 + READY_QUIET_MS - 1 }), false)
-    assert.equal(readyToType({ liveAt, lastOutputAt: 1100, now: 1100 + READY_QUIET_MS }), true)
-    // 输出又来了一段：重新计时。
-    assert.equal(readyToType({ liveAt, lastOutputAt: 1300, now: 1100 + READY_QUIET_MS }), false)
-  })
-  it('连上之后一直没有输出，等到上限就输入', () => {
-    const liveAt = 1000
-    assert.equal(readyToType({ liveAt, lastOutputAt: null, now: liveAt + READY_MAX_WAIT_MS - 1 }), false)
-    assert.equal(readyToType({ liveAt, lastOutputAt: null, now: liveAt + READY_MAX_WAIT_MS }), true)
-  })
-  it('输出持续不断也不会无限等：到上限就输入', () => {
-    const liveAt = 0
-    assert.equal(readyToType({ liveAt, lastOutputAt: READY_MAX_WAIT_MS, now: READY_MAX_WAIT_MS }), true)
-  })
-  it('输出在「已连接」之前就收完了（回放很快）：连上时已经安静，立刻输入', () => {
-    assert.equal(readyToType({ liveAt: 1000, lastOutputAt: 500, now: 1000 }), true)
   })
 })
 
@@ -778,7 +490,7 @@ describe('预设的异常退出自动续跑开关（#151）', () => {
   })
 })
 
-describe('预设的「第一次运行时新开对话」与来源标记（#176 第三期）', () => {
+describe('预设的对话来源：新会话 / 最近会话 / 指定会话（#191，沿用 #176 第三期的「新开对话」）', () => {
   const base: TerminalLauncher = { id: 'ea-1', name: '启用 Agent · x', host: HOST, dir: '/srv/app', kind: 'headless', run: { posture: 'force', workflow_id: 'wf-1' } }
   const lim = { ...LAUNCHER_DEFAULT_LIMITS, runSupported: true, runNewPromptDefault: '新开提示词' }
   const errorsOf = (run: Partial<RunDraft>) => {
@@ -786,47 +498,100 @@ describe('预设的「第一次运行时新开对话」与来源标记（#176 �
     d.run = { ...blankRunDraft(), ...d.run, workflow: 'wf-1', ...run }
     return validateDraft(d, { limits: lim, others: [] })
   }
+  const runOf = (run: Partial<RunDraft>) => toRun({ ...blankRunDraft(), workflow: 'wf-1', ...run })
 
-  it('默认关闭：新草稿与旧预设都是关的，提交时不带字段（不改动已存的预设）', () => {
-    assert.equal(blankRunDraft().newConversation, false)
+  it('默认是指定会话：新草稿与存量预设都是 resume，选「运行之后」的默认是记下编号', () => {
+    assert.equal(blankRunDraft().source, 'resume')
+    assert.equal(blankRunDraft().afterNew, 'remember')
     assert.equal(blankRunDraft().origin, '')
-    assert.equal(headlessDraft(HOST).run?.newConversation, false)
-    assert.equal(draftOf(base).run?.newConversation, false)
+    assert.equal(headlessDraft(HOST).run?.source, 'resume')
+    assert.equal(draftOf(base).run?.source, 'resume')
+    assert.equal(draftOf(base).run?.afterNew, 'remember')
     const out = toLauncher(draftOf(base)).run ?? {}
-    assert.equal('new_conversation' in out, false)
+    assert.equal(out.source, 'resume', '提交时总是带明确的来源（存量预设保存一次之后就不再靠旧字段推导）')
+    assert.equal('after_new' in out, false, '只有新会话才带「运行之后」')
+    assert.equal('new_conversation' in out, false, '旧字段不再提交（服务端自己维护镜像）')
     assert.equal('origin' in out, false)
   })
 
-  it('打开后提交 new_conversation: true，再转成草稿原样回来；只认明确的 true', () => {
-    const on = toLauncher(draftOf({ ...base, run: { ...base.run, new_conversation: true } }))
-    assert.equal(on.run?.new_conversation, true)
-    assert.equal(draftOf(on).run?.newConversation, true)
-    for (const v of [false, undefined, null, 0, 1, 'true'] as unknown[]) {
-      assert.equal(draftOf({ ...base, run: { ...base.run, new_conversation: v as boolean } }).run?.newConversation, false, String(v))
+  it('存量预设按旧字段推导：只认明确的 true 才是新会话；设了 source 就用 source', () => {
+    const legacy = (v: unknown) => draftOf({ ...base, run: { ...base.run, new_conversation: v as boolean } }).run
+    assert.equal(legacy(true)?.source, 'new')
+    assert.equal(legacy(true)?.afterNew, 'remember')
+    for (const v of [false, undefined, null, 0, 1, 'true'] as unknown[]) assert.equal(legacy(v)?.source, 'resume', String(v))
+    // 旧字段是 true 但已经明确设了别的来源：以 source 为准
+    assert.equal(draftOf({ ...base, run: { ...base.run, new_conversation: true, source: 'continue' } }).run?.source, 'continue')
+    assert.equal(effectiveSource({ source: 'continue', new_conversation: false }), 'continue')
+    assert.equal(effectiveSource({ source: 'bogus' as never, new_conversation: true }), 'new', '不认识的 source 当作没设')
+    assert.equal(effectiveSource(undefined), 'resume')
+  })
+
+  it('「运行之后」：只在新会话下有意义，默认记下编号，stay / continue 原样往返', () => {
+    assert.equal(effectiveAfterNew({ source: 'resume' }), '')
+    assert.equal(effectiveAfterNew({ source: 'continue', after_new: 'stay' }), '', '最近会话没有「运行之后」')
+    assert.equal(effectiveAfterNew({ source: 'new' }), 'remember')
+    assert.equal(effectiveAfterNew({ new_conversation: true }), 'remember')
+    assert.equal(effectiveAfterNew({ source: 'new', after_new: 'bogus' as never }), 'remember')
+    for (const a of ['stay', 'continue'] as const) {
+      const saved = toLauncher(draftOf({ ...base, run: { ...base.run, source: 'new', after_new: a } }))
+      assert.equal(saved.run?.source, 'new')
+      assert.equal(saved.run?.after_new, a)
+      assert.equal(draftOf(saved).run?.afterNew, a)
     }
+    assert.equal(runOf({ source: 'new', afterNew: undefined }).after_new, 'remember')
+  })
+
+  it('提交：对话编号只在指定会话时带，另外两种来源下藏着的输入不会悄悄生效', () => {
+    assert.equal(runOf({ source: 'resume', conversation: ' chat-1 ' }).conversation_id, 'chat-1')
+    for (const source of ['new', 'continue'] as const) {
+      const out = runOf({ source, conversation: 'chat-1' })
+      assert.equal(out.source, source)
+      assert.equal('conversation_id' in out, false, source)
+    }
+    assert.equal('after_new' in runOf({ source: 'continue', afterNew: 'stay' }), false)
+    // 草稿里没有 source（会话页「运行」）= 指定会话
+    assert.equal(draftSource({}), 'resume')
+    assert.equal(draftSource({ source: 'bogus' as never }), 'resume')
+    assert.equal(draftSource({ source: 'continue' }), 'continue')
   })
 
   it('来源标记不是表单的选项，但编辑保存时必须原样带回去（否则编辑一次「启用 Agent」创建的预设就丢了标记）', () => {
     const enabled: TerminalLauncher = { ...base, run: { ...base.run, new_conversation: true, origin: 'enable_agent' } }
     const d = draftOf(enabled)
     assert.equal(d.run?.origin, 'enable_agent')
+    assert.equal(d.run?.source, 'new')
     d.name = '改了个名字'
     const saved = toLauncher(d)
     assert.equal(saved.run?.origin, 'enable_agent')
-    assert.equal(saved.run?.new_conversation, true)
+    assert.equal(saved.run?.source, 'new')
+    assert.equal(saved.run?.after_new, 'remember')
     // 手工建的没有标记：不凭空带
     assert.equal('origin' in (toLauncher(draftOf(base)).run ?? {}), false)
   })
 
-  it('校验：新开对话要填工作流编号、不能同时固定对话编号（与服务端一致）', () => {
-    assert.equal(hasErrors(errorsOf({ newConversation: true })), false)
-    assert.match(errorsOf({ newConversation: true, conversation: 'chat-1' }).conversation ?? '', /不能再固定对话编号/)
-    assert.match(errorsOf({ newConversation: true, workflow: '' }).workflow ?? '', /工作流编号/)
-    // 没选新开对话：固定对话编号照常合法
-    assert.equal(errorsOf({ conversation: 'chat-1' }).conversation, undefined)
+  it('校验：新会话与最近会话都要填工作流编号；指定会话要工作流编号或对话编号（与服务端一致）', () => {
+    assert.equal(hasErrors(errorsOf({ source: 'new' })), false)
+    assert.equal(hasErrors(errorsOf({ source: 'continue' })), false)
+    assert.match(errorsOf({ source: 'new', workflow: '' }).workflow ?? '', /「新会话」要填工作流编号/)
+    assert.match(errorsOf({ source: 'continue', workflow: '' }).workflow ?? '', /「最近会话」要填工作流编号/)
+    // 最近会话不能靠固定对话编号蒙混过关：藏着的编号不提交，所以只填编号也算缺工作流
+    assert.match(errorsOf({ source: 'continue', workflow: '', conversation: 'chat-1' }).workflow ?? '', /「最近会话」要填工作流编号/)
+    assert.match(errorsOf({ source: 'resume', workflow: '' }).workflow ?? '', /请填工作流编号/)
+    assert.equal(errorsOf({ source: 'resume', workflow: '', conversation: 'chat-1' }).workflow, undefined, '指定会话只固定编号也行')
+    assert.equal(errorsOf({ source: 'resume', conversation: 'chat-1' }).conversation, undefined)
+    assert.match(errorsOf({ source: 'resume', conversation: 'a b' }).conversation ?? '', /对话编号只能含/)
+    // 选了新会话 / 最近会话后，之前填的指定会话编号即使不合法也不再挡保存（它不会被提交）
+    assert.equal(errorsOf({ source: 'new', conversation: 'a b' }).conversation, undefined)
+    assert.equal(errorsOf({ source: 'continue', conversation: 'a b' }).conversation, undefined)
   })
 
-  it('旧版 Hub 不返回新开对话的默认提示词时：limits 里是空串（表单不提供这个选项）', () => {
+  it('会话页「运行」的草稿没有来源：按指定会话校验与提交（不带 source 之外的新字段）', () => {
+    const e = validateRunOptions({ bin: '', model: '', posture: 'allowlist', workflow: '', conversation: '', prompt: '' }, lim)
+    assert.match(e.workflow ?? '', /请填工作流编号/)
+    assert.equal(validateRunOptions({ bin: '', model: '', posture: 'allowlist', workflow: 'wf-1', conversation: '', prompt: '' }, lim).workflow, undefined)
+  })
+
+  it('旧版 Hub 不返回新会话的默认提示词时：limits 里是空串（表单不提供三选一，除非预设本来就不是指定会话）', () => {
     assert.equal(LAUNCHER_DEFAULT_LIMITS.runNewPromptDefault, '')
     assert.equal(launcherLimits({ launcher_run_prompt_max: 600 }).runNewPromptDefault, '')
     assert.equal(launcherLimits({ launcher_run_new_prompt_default: '默认 %workflow' }).runNewPromptDefault, '默认 %workflow')
@@ -903,5 +668,60 @@ describe('续跑成功的判定时长（#172）', () => {
     d.run = { bin: '', model: '', posture: 'allowlist', workflow: 'wf-1', conversation: '', prompt: '' }
     assert.equal('auto_resume_ok_minutes' in (toLauncher(d).run ?? {}), false)
     assert.equal(validateRunOptions(d.run, lim).autoResumeOk, undefined)
+  })
+})
+
+// 与服务端 internal/store/headless_paths_test.go 逐条对齐的表：前后端对「什么写法合法」必须给出同一个答案，
+// 否则要么前端放行、服务端拒绝（用户点保存才看到错误），要么前端拦住了服务端本来接受的写法。
+describe('Windows 路径与可执行文件的写法（#178，与服务端同一套规则）', () => {
+  it('isWindowsAbsPath：盘符或 UNC 才算绝对路径', () => {
+    const table: Array<[string, boolean]> = [
+      ['C:\\work', true], ['c:\\work\\项目', true], ['C:/work', true], ['C:\\', true], ['D:\\Program Files (x86)\\x', true],
+      ['\\\\srv\\share', true], ['\\\\srv\\share\\dir', true], ['\\\\srv/share', true],
+      ['\\\\srv', false], ['\\\\\\share', false], ['C:work', false], ['C:', false], ['/home/me', false], ['~/work', false],
+      ['work\\sub', false], ['', false], ['1:\\x', false], ['CC:\\x', false],
+    ]
+    for (const [p, want] of table) assert.equal(isWindowsAbsPath(p), want, JSON.stringify(p))
+  })
+
+  it('windowsPathProblem：没问题返回空串，有问题的指出字符', () => {
+    for (const p of ['C:\\work', 'C:\\Program Files (x86)\\Cursor', "C:\\Users\\O'Brien\\proj", 'C:\\用户\\项目 一', '\\\\srv\\share\\a b',
+      'C:\\a.b\\c-d_e+f', 'C:\\路径\\‘弯引号’', 'D:\\#hash\\@at\\[br]\\{cb}', 'C:\\a,b;c=d', 'C:\\$HOME\\x', 'C:\\back`tick']) {
+      assert.equal(windowsPathProblem(p), '', JSON.stringify(p))
+    }
+    const bad: Array<[string, string]> = [
+      ['C:\\a"b', '「"」'], ['C:\\100%', '「%」'], ['C:\\a^b', '「^」'], ['C:\\R&D', '「&」'], ['C:\\a|b', '「|」'], ['C:\\a<b', '「<」'],
+      ['C:\\a>b', '「>」'], ['C:\\hello!', '「!」'], ['C:\\*.txt', '「*」'], ['C:\\a?b', '「?」'],
+      ['C:\\a\nb', '控制字符'], ['C:\\a\u0000b', '控制字符'], ['C:\\a\tb', '控制字符'], ['C:\\a:b', '冒号'], ['\\\\srv\\sh:re', '冒号'],
+    ]
+    for (const [p, want] of bad) assert.ok(windowsPathProblem(p).includes(want), `${JSON.stringify(p)} 应报含 ${want}，得到 ${windowsPathProblem(p)}`)
+  })
+
+  it('validHeadlessBin：预设保存时不知道主机系统，POSIX 与 Windows 两种写法都接受', () => {
+    const valid = [
+      'agent', 'cursor-agent', '~/.local/bin/agent', '/usr/local/bin/agent', './agent', 'a.b_c+d-e', 'agent.cmd', '/bin/bash', '/usr/bin/zsh',
+      'C:\\Users\\张三\\AppData\\Local\\cursor-agent\\agent.cmd', 'C:\\Program Files\\Cursor Agent\\agent.exe', 'C:/tools/agent.cmd',
+      '\\\\srv\\share\\bin\\agent.cmd', 'D:\\agent',
+    ]
+    for (const b of valid) assert.equal(validHeadlessBin(b), true, `${b} 应合法`)
+    const invalid = [
+      '', ' ', 'agent --x', 'agent;rm', 'agent&x', 'a b', '$(x)', '`x`', 'agent\n', "'agent'", '"agent"',
+      'cd', 'env', 'sudo', 'bash', 'sh', 'exec', 'time', 'nohup',
+      'cmd', 'CMD', 'cmd.exe', 'powershell', 'PowerShell.exe', 'pwsh', 'pwsh.exe', 'wsl', 'wsl.exe',
+      'C:\\Windows\\System32\\cmd.exe', 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+      'C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\tools\\sh.exe',
+      'C:\\R&D\\agent.cmd', 'C:\\a"b\\agent.cmd', 'C:\\100%\\agent.cmd', 'C:\\a^b\\agent.cmd', 'C:\\a|b\\agent.cmd', 'C:\\hello!\\agent.cmd',
+      'C:\\bin\\', 'C:/bin/', ' C:\\bin\\agent.cmd', 'C:\\bin\\agent.cmd ', 'bin\\agent.cmd', 'C:agent.cmd', '\\\\srv',
+    ]
+    for (const b of invalid) assert.equal(validHeadlessBin(b), false, `${JSON.stringify(b)} 应不合法`)
+  })
+
+  it('validWindowsBin：Windows 主机上只认命令名与盘符 / UNC 路径，POSIX 写法不能用', () => {
+    for (const b of ['agent', 'agent.cmd', 'cursor-agent', 'C:\\x\\agent.cmd', 'C:\\Program Files\\x y\\agent.cmd', '\\\\h\\s\\agent.cmd']) {
+      assert.equal(validWindowsBin(b), true, `${b} 应合法`)
+    }
+    for (const b of ['~/.local/bin/agent', '/usr/bin/agent', './agent', '../agent', 'a/b', 'a\\b', '', 'cmd', 'time', 'cd', 'set']) {
+      assert.equal(validWindowsBin(b), false, `${JSON.stringify(b)} 应不合法`)
+    }
   })
 })

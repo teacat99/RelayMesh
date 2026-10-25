@@ -5,7 +5,7 @@ import { useConversationNotify } from '../../composables/useConversationNotify'
 import ConversationNotifyItems from './ConversationNotifyItems.vue'
 
 // 这个会话（工作流）的提醒策略：全部提醒，或静音一段时间 / 一直静音。
-// 静音只拦下智能体发来的文字与待确认卡片；阻塞待答（智能体在等你回复）、@ 你、终端审批、守护告警不受静音影响。
+// 静音只拦下智能体发来的文字与待确认卡片；阻塞待答（智能体在等你回复）、@ 你、终端审批、系统告警不受静音影响。
 // 偏好存在服务端，浏览器与手机推送一起生效。
 // 条目本身在 ConversationNotifyItems（手机页头的「⋯」菜单里复用同一份）；这里只管 PC 页头的触发按钮与菜单外壳。
 const props = defineProps<{ workflowId: string }>()

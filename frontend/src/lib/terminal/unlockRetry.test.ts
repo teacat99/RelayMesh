@@ -185,8 +185,36 @@ test('哪些请求路径会带上解锁令牌', () => {
   assert.equal(carriesUnlock('/credentials/12/regenerate'), true)
   assert.equal(carriesUnlock('/oauth/requests/abc/decision'), true)
   assert.equal(carriesUnlock('/oauth/policy'), true)
+  // #239：接入窗口的开 / 续 / 关与删除一条登记都要解锁；漏掉前缀会让页面反复弹出密码框
+  assert.equal(carriesUnlock('/oauth/window'), true)
+  assert.equal(carriesUnlock('/oauth/clients'), true)
+  assert.equal(carriesUnlock('/oauth/clients/ab12cd34'), true)
   assert.equal(carriesUnlock('/oauth/grants'), false)
   assert.equal(carriesUnlock('/sessions'), false)
   assert.equal(carriesUnlock('/settings'), false)
   assert.equal(carriesUnlock(undefined), false)
+})
+
+test('分支的两个放宽入口按「方法 + 精确路径」带解锁令牌，/workflows/ 下其它请求不带（#236 P3）', () => {
+  // 建会话（带 parent_workflow_id 就是建分支）与改分支的开放范围
+  assert.equal(carriesUnlock('/workflows', 'post'), true)
+  assert.equal(carriesUnlock('/workflows', 'POST'), true, '方法大小写不敏感')
+  assert.equal(carriesUnlock('/workflows/wf-web-1/branch', 'put'), true)
+  assert.equal(carriesUnlock('/workflows/wf-web-1/branch?x=1', 'PUT'), true, '查询串不参与判断')
+  // 同一路径换方法不带；没给方法时精确接口不带（只按前缀）
+  assert.equal(carriesUnlock('/workflows', 'get'), false)
+  assert.equal(carriesUnlock('/workflows/wf-web-1/branch', 'get'), false)
+  assert.equal(carriesUnlock('/workflows/wf-web-1/branch', 'post'), false)
+  assert.equal(carriesUnlock('/workflows', undefined), false)
+  assert.equal(carriesUnlock('/workflows/wf-web-1/branch'), false)
+  // 撤销与读列表只要登录，不带令牌；别的 /workflows/ 请求更不带
+  assert.equal(carriesUnlock('/workflows/wf-web-1/branch/params-events', 'get'), false)
+  assert.equal(carriesUnlock('/workflows/wf-web-1/branch/params-events/3/revert', 'post'), false)
+  assert.equal(carriesUnlock('/workflows/wf-web-1/branch/close', 'post'), false)
+  assert.equal(carriesUnlock('/workflows/wf-web-1/sessions', 'get'), false)
+  assert.equal(carriesUnlock('/workflows/wf-web-1/prompts', 'put'), false)
+  assert.equal(carriesUnlock('/workflows/a/b/branch', 'put'), false, '路径里只能有一段工作流编号')
+  // 原有前缀不受 method 影响
+  assert.equal(carriesUnlock('/terminal/hosts', 'get'), true)
+  assert.equal(carriesUnlock('/credentials/12', 'delete'), true)
 })

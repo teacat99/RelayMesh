@@ -11,42 +11,15 @@ import (
 	"github.com/teacat99/RelayMesh/v2/internal/model"
 )
 
-// 会话守护（D-214）的持久状态：每个预设「上一次推送了哪次事件」「唤醒过几次」。
-// 它只记次数与时间，不记任何内容。单独一个键，不与预设本身混在一起：预设是人配的，这份是机器记的。
+// 预设的持久运行状态：非交互运行异常退出后自动续跑的登记（#151）。
+// 它只记运行编号、次数与时间，不记任何内容。单独一个键，不与预设本身混在一起：预设是人配的，这份是机器记的。
+//
+// 它原先也记会话守护（D-214）的「上一次推送了哪次事件」「唤醒过几次」「唤醒许可」；守护在 #245 第二期下线，这些字段不再读写，
+// 旧文档里残留的字段在下一次写入时就被丢掉（JSON 解码忽略不认识的字段，所以回滚到旧版本也读得出）。
+// 类型与存储键里的「Guard」是历史命名：存储键 terminal_guard_state 不能改（数据在库里）。
 
 // TerminalGuardStateKey 是守护状态在 system_settings 表里的键，值是 JSON（见 GuardStateDoc）。
 const TerminalGuardStateKey = "terminal_guard_state"
-
-const (
-	// 唤醒记录最多保留这么久、这么多条：它用来算「今天唤醒了几次」和「上次唤醒有没有进展」，不是审计日志。
-	GuardWakeKeep    = 7 * 24 * time.Hour
-	GuardWakeKeepMax = 20
-)
-
-// 一次唤醒之后智能体有没有动静（GuardWakeRecord.Progress）。空 = 还没结论（观察窗口没过完）。
-const (
-	GuardProgressYes  = "progress" // 唤醒之后智能体有了新的活动
-	GuardProgressNone = "none"     // 观察窗口过完了，仍然没有任何新的活动
-)
-
-// GuardWakeRecord 是一次唤醒的登记。
-type GuardWakeRecord struct {
-	At      time.Time `json:"at"`
-	Mode    string    `json:"mode"`              // type（输入到存活的会话）| relaunch（会话已结束，重新拉起）
-	Reason  string    `json:"reason"`            // 出错中断 / 长时间无活动 / 会话意外结束 / 手动唤醒……
-	Episode string    `json:"episode,omitempty"` // 唤醒时判断的事件标识
-	// Progress 由守护的周期判断补上：这次唤醒之后智能体有没有新的动静。连续几次「没有」说明唤醒在白费力气。
-	Progress string `json:"progress,omitempty"`
-}
-
-// GuardWakePermitState 是唤醒许可的持久化（默认 1；标记为 0 表示任务全部完成、结束时不唤醒）。
-type GuardWakePermitState struct {
-	Permit            int       `json:"permit,omitempty"` // 0 = 已标记；缺省或 1 = 正常守护
-	SetAt             time.Time `json:"set_at,omitempty"`
-	SetBy             string    `json:"set_by,omitempty"` // agent | human
-	Note              string    `json:"note,omitempty"`   // 可选备注，审计不含
-	SuppressedEpisode string    `json:"suppressed_episode,omitempty"`
-}
 
 // 非交互运行异常退出后自动续跑（#151，D-260）的登记状态（AutoResumeRecord.State）。
 const (
@@ -96,24 +69,14 @@ type AutoResumeRecord struct {
 	Settled bool `json:"settled,omitempty"`
 }
 
-// GuardPresetState 是一个预设的守护状态。
+// GuardPresetState 是一个预设的持久运行状态。
 type GuardPresetState struct {
-	// NotifiedEpisode 是最近一次推送过的事件标识：同一次事件不重复推送。
-	NotifiedEpisode string                `json:"notified_episode,omitempty"`
-	NotifiedAt      time.Time             `json:"notified_at,omitempty"`
-	Reminders       int                   `json:"reminders,omitempty"` // 同一次事件已经补发过几次提醒
-	Wakes           []GuardWakeRecord     `json:"wakes,omitempty"`
-	Permit          *GuardWakePermitState `json:"permit,omitempty"`
 	// AutoResumes 是「非交互运行异常退出后自动续跑」的登记（按登记先后，新的在后）。
 	AutoResumes []AutoResumeRecord `json:"auto_resumes,omitempty"`
 }
 
 func (p *GuardPresetState) empty() bool {
-	if p == nil {
-		return true
-	}
-	permitEmpty := p.Permit == nil || (p.Permit.Permit == 0 && p.Permit.SetAt.IsZero() && p.Permit.SetBy == "" && p.Permit.Note == "" && p.Permit.SuppressedEpisode == "")
-	return p.NotifiedEpisode == "" && p.NotifiedAt.IsZero() && p.Reminders == 0 && len(p.Wakes) == 0 && len(p.AutoResumes) == 0 && permitEmpty
+	return p == nil || len(p.AutoResumes) == 0
 }
 
 // AutoResumeStartedSince 返回 since 之后已经开跑的自动续跑次数（滚动窗口里的预算用量）。
@@ -228,44 +191,7 @@ func (p *GuardPresetState) AutoResumeTrailingQuick() int {
 	return n
 }
 
-// WakesSince 返回 since 之后的唤醒次数。
-func (p *GuardPresetState) WakesSince(since time.Time) int {
-	if p == nil {
-		return 0
-	}
-	n := 0
-	for _, w := range p.Wakes {
-		if w.At.After(since) {
-			n++
-		}
-	}
-	return n
-}
-
-// LastWake 返回最近一次唤醒；没有时 ok 为 false。
-func (p *GuardPresetState) LastWake() (GuardWakeRecord, bool) {
-	if p == nil || len(p.Wakes) == 0 {
-		return GuardWakeRecord{}, false
-	}
-	return p.Wakes[len(p.Wakes)-1], true
-}
-
-// TrailingNoProgress 返回最近连续有几次唤醒「过了观察窗口仍没有动静」（遇到有动静的、或还没结论的就停）。
-func (p *GuardPresetState) TrailingNoProgress() int {
-	if p == nil {
-		return 0
-	}
-	n := 0
-	for i := len(p.Wakes) - 1; i >= 0; i-- {
-		if p.Wakes[i].Progress != GuardProgressNone {
-			break
-		}
-		n++
-	}
-	return n
-}
-
-// GuardStateDoc 是整份守护状态：预设编号 → 状态。
+// GuardStateDoc 是整份预设运行状态：预设编号 → 状态。
 type GuardStateDoc struct {
 	Presets map[string]*GuardPresetState `json:"presets"`
 }
@@ -283,7 +209,7 @@ func (d *GuardStateDoc) Preset(id string) *GuardPresetState {
 	return p
 }
 
-// normalize 清理过期与超量的唤醒记录，丢掉空条目：文档始终只有「正在用的预设」那么大。
+// normalize 清理过期与超量的自动续跑登记，丢掉空条目：文档始终只有「正在用的预设」那么大。
 func (d *GuardStateDoc) normalize(now time.Time) {
 	if d.Presets == nil {
 		d.Presets = map[string]*GuardPresetState{}
@@ -294,16 +220,6 @@ func (d *GuardStateDoc) normalize(now time.Time) {
 			delete(d.Presets, id)
 			continue
 		}
-		kept := p.Wakes[:0]
-		for _, w := range p.Wakes {
-			if now.Sub(w.At) <= GuardWakeKeep {
-				kept = append(kept, w)
-			}
-		}
-		if len(kept) > GuardWakeKeepMax {
-			kept = kept[len(kept)-GuardWakeKeepMax:]
-		}
-		p.Wakes = kept
 		p.AutoResumes = pruneAutoResumes(p.AutoResumes, now)
 		if p.empty() {
 			delete(d.Presets, id)
@@ -342,7 +258,7 @@ func decodeGuardState(raw string) GuardStateDoc {
 	return doc
 }
 
-// GetTerminalGuardState 读取守护状态；从未保存过或存档损坏时返回空文档（不是 nil）。
+// GetTerminalGuardState 读取预设运行状态；从未保存过或存档损坏时返回空文档（不是 nil）。
 func (s *Store) GetTerminalGuardState(ctx context.Context) (GuardStateDoc, error) {
 	var rec model.SystemSetting
 	err := s.db.WithContext(ctx).Where("key = ?", TerminalGuardStateKey).First(&rec).Error
@@ -355,7 +271,7 @@ func (s *Store) GetTerminalGuardState(ctx context.Context) (GuardStateDoc, error
 	return decodeGuardState(rec.Value), nil
 }
 
-// UpdateTerminalGuardState 在一个事务里「读—改—写」守护状态，并清理过期记录；返回写入后的文档。
+// UpdateTerminalGuardState 在一个事务里「读—改—写」预设运行状态，并清理过期记录；返回写入后的文档。
 func (s *Store) UpdateTerminalGuardState(ctx context.Context, now time.Time, mutate func(*GuardStateDoc)) (GuardStateDoc, error) {
 	var out GuardStateDoc
 	err := s.WithTx(ctx, func(tx *gorm.DB) error {

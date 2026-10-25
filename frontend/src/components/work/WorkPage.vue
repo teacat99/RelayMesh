@@ -23,6 +23,8 @@ import {
   WORK_FILTER_ORDER,
   WORK_KINDS,
   WORK_KIND_META,
+  WORK_QUICK_KEYS,
+  WORK_QUICK_META,
   WORK_STATE_META,
   assigneeOptions,
   boardChipText,
@@ -30,6 +32,9 @@ import {
   buildWorkflowOptions,
   countActiveWorkFilters,
   displayModulePath,
+  isWorkQuick,
+  parseSeqQuery,
+  quickCounts,
   summarizeCounts,
   workRef,
   type TaskRow,
@@ -88,6 +93,20 @@ const boardChip = computed(() => boardChipText(store.currentStat))
 const boardOpen = ref(false)
 /** 承接者过滤的选项（#175 B2）：清单里一条指派都没有时为空——没有协作就不出现这个过滤，单工作流的界面不变。 */
 const assigneeOpts = computed(() => assigneeOptions(store.items, knownWorkflows.value))
+/**
+ * 协作快捷筛选（#180 B3b）：指派给我 / 我派出的 / 待接取。「我」= 正在看的这个工作流；和承接者过滤一样，清单里没有指派时不出现。
+ * 数字是还没结束的任务里各有几个（已结束的是历史）。
+ */
+const quickChips = computed(() => {
+  if (!assigneeOpts.value.length) return []
+  const counts = quickCounts(store.items, store.filter.workflowId)
+  return WORK_QUICK_KEYS.map(key => ({ key, ...WORK_QUICK_META[key], count: counts[key] }))
+})
+// 选中的快捷项已经没有任务了（待接取的都处理完了）：回到「全部」，免得芯片消失、列表却是空的
+watch(quickChips, chips => {
+  const sel = store.filter.quick
+  if (sel && !chips.some(c => c.key === sel && c.count > 0)) store.setQuick('')
+})
 // 选中的承接者已经不在清单里了（任务都做完 / 撤销了）：回到「全部」，免得过滤框消失、列表却还被它筛着
 watch(assigneeOpts, opts => {
   const sel = store.filter.assignee
@@ -127,8 +146,8 @@ watch(routeWorkflow, id => {
 })
 
 /**
- * 从会话页「本轮任务」点进来：/work/<项目>?task=<编号> 直接打开这个任务的详情，
- * 随后把参数从地址栏去掉（刷新时不再重复打开）。
+ * 从会话页「本轮任务」、收尾门清单、「指派久无人接」的提醒点进来：/work/<项目>?task=<数据库编号> 直接打开这个任务的详情，
+ * 随后把参数从地址栏去掉（刷新时不再重复打开）。注意是任务的数据库编号（API 里的 id），不是界面上写的 #N（板内序号，见下面的 ?seq=，#242）。
  *
  * 顺序不能反：必须先把 ?task= 从地址栏和这一条历史记录里换掉，再打开详情。详情抽屉打开时会往浏览器历史里压一条哨兵记录
  * （见 useDialogBackGesture），关闭时再用 history.back() 弹掉；如果还没来得及换掉地址就先开抽屉，带着 ?task= 的记录会留在哨兵下面，
@@ -145,14 +164,83 @@ async function consumeTaskQuery() {
 }
 watch(() => route.query.task, consumeTaskQuery)
 
+/**
+ * 从正文里的 #N 链接（新标签页打开 / 复制链接）点进来：/work/<项目>?seq=<板内序号> 打开这个序号对应的任务详情（#242）。
+ *
+ * #N 是板内序号，不是上面 ?task= 认的数据库编号（两个数不同：把 #N 当 ?task= 会打开别的任务）；
+ * 所以由服务端按这个项目的任务板把序号解析成任务，不依赖页面已加载的清单——新标签页刚打开时清单还没取到，
+ * 已暂缓 / 已结束 / 很早以前的任务本来也不在默认清单里。
+ * 与 consumeTaskQuery 同一个理由：先把参数从地址栏和这一条历史记录里换掉、再打开详情，其他参数原样保留。
+ * 序号不是正整数：只把参数去掉；这张板上没有这个序号：提示一句、不弹详情。
+ */
+async function consumeSeqQuery() {
+  const raw = route.query.seq
+  if (raw === undefined) return // 先判断再换地址：换掉之后这个监听会再触发一次，那一次什么都不用做
+  const { seq: _consumed, ...rest } = route.query
+  const seq = parseSeqQuery(raw)
+  const target = routeWorkflow.value
+  await router.replace({ name: 'work', params: { ...route.params }, query: rest })
+  if (!seq || !target) return // 没带项目（稍后会选默认项目）或序号不合法：只把参数去掉
+  if (!(await store.openByBoardSeq(target, seq))) toast.info(`找不到任务 #${seq}，它可能已被删除`)
+}
+watch(() => route.query.seq, consumeSeqQuery)
+
+/**
+ * 从「指派久无人接」的提醒点进来：/work/<项目>?quick=offered 直接套上对应的协作快捷筛选（#180 B3d）。
+ *
+ * 套筛选必须等这个项目的清单取到之后：快捷项由清单里的指派算出来，先套的话会被上面的 watch(quickChips) 当作「没有任务」立刻取消；
+ * 换项目时 store.setWorkflow 也会把它清掉。所以用一个一次性的监听等「清单就绪」再套，套上（或判断没有可套的）就停。
+ * 地址栏里的 ?quick= 先换掉再套（与 consumeTaskQuery 同一个理由：不在历史记录里留下带参数的地址），其他参数原样保留。
+ * 套之前先清掉别的筛选（搜索词 / 类型 / 承接者 / 模块）：提醒承诺的是「这些待接取的指派」，被旧筛选藏住就成了空头链接。
+ */
+let stopQuickWait: (() => void) | null = null
+function cancelQuickWait() {
+  stopQuickWait?.()
+  stopQuickWait = null
+}
+async function consumeQuickQuery() {
+  const raw = route.query.quick
+  const v = Array.isArray(raw) ? raw[0] : raw
+  if (!v) return // 先判断再取消：下面换掉地址后这个监听会再触发一次，那一次不能取消正在等的那个
+  cancelQuickWait()
+  const { quick: _consumed, ...rest } = route.query
+  await router.replace({ name: 'work', params: { ...route.params }, query: rest })
+  const target = routeWorkflow.value
+  if (!target || !isWorkQuick(v)) return // 没带项目（稍后会选默认项目）或不认识的取值：只把参数去掉
+  const ready = () => store.loaded && !store.loading && store.filter.workflowId === target && routeWorkflow.value === target
+  const apply = () => {
+    // 清单里已经没有这类任务了（到点之后被人接走了）：不套，免得列表是空的
+    if (!quickChips.value.some(c => c.key === v && c.count > 0)) return
+    clearFilters()
+    store.setQuick(v)
+  }
+  if (ready()) {
+    apply()
+    return
+  }
+  const stop = watch(ready, ok => {
+    if (!ok) return
+    stop()
+    if (stopQuickWait === stop) stopQuickWait = null
+    apply()
+  })
+  stopQuickWait = stop
+}
+watch(() => route.query.quick, consumeQuickQuery)
+// 换了项目：还在等的深链属于上一个项目，作废
+watch(routeWorkflow, cancelQuickWait)
+
 onMounted(() => {
   if (routeWorkflow.value) enter(routeWorkflow.value)
   else void chooseDefaultProject()
   void consumeTaskQuery()
+  void consumeSeqQuery()
+  void consumeQuickQuery()
 })
 
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
+  cancelQuickWait()
   store.closeDetail()
 })
 
@@ -166,7 +254,9 @@ function goBack() {
 const summary = computed(() => summarizeCounts(store.counts))
 const hasAnyTask = computed(() => store.items.length > 0)
 const isProjectEmpty = computed(() => store.loaded && !store.loading && !hasAnyTask.value && !store.hasPlan)
-const hasFilter = computed(() => !!store.filter.kind || !!store.filter.query.trim() || store.filter.assignee !== ASSIGNEE_ALL)
+const hasFilter = computed(
+  () => !!store.filter.kind || !!store.filter.query.trim() || store.filter.assignee !== ASSIGNEE_ALL || !!store.filter.quick
+)
 const showClosedWindow = computed(() => store.filter.states.includes('done') || store.filter.states.includes('shelved'))
 
 const selectionLabel = computed(() => {
@@ -187,6 +277,7 @@ const activeFilters = computed(() =>
     {
       kind: store.filter.kind,
       assignee: store.filter.assignee,
+      quick: store.filter.quick,
       sort: store.filter.sort,
       closedDays: store.filter.closedDays,
       showClosedWindow: showClosedWindow.value,
@@ -222,6 +313,7 @@ function clearFilters() {
   store.filter.query = ''
   store.setKind('')
   store.setAssignee(ASSIGNEE_ALL)
+  store.setQuick('')
   store.select(MODULE_ALL)
 }
 
@@ -421,6 +513,24 @@ function stateChipClass(s: WorkState): string {
           <option value="">全部类型</option>
           <option v-for="k in WORK_KINDS" :key="k" :value="k">{{ WORK_KIND_META[k].label }}</option>
         </select>
+
+        <!-- 协作快捷项（共享任务板）：指派给我 / 我派出的 / 待接取；再点一次取消，数字是还没结束的任务数 -->
+        <div v-if="quickChips.length" class="inline-flex items-center gap-1" role="group" aria-label="协作快捷筛选" data-testid="work-quick">
+          <button
+            v-for="c in quickChips"
+            :key="c.key"
+            type="button"
+            class="inline-flex h-7 cursor-pointer items-center gap-1 rounded-xs border px-1.5 text-[11px] transition-colors"
+            :class="store.filter.quick === c.key ? 'border-primary/50 bg-primary/10 font-medium text-primary' : 'border-border/70 text-muted-foreground hover:bg-muted'"
+            :aria-pressed="store.filter.quick === c.key"
+            :title="c.hint"
+            :data-testid="`work-quick-${c.key}`"
+            @click="store.setQuick(c.key)"
+          >
+            {{ c.label }}
+            <span class="font-mono text-[10px] tabular-nums opacity-80" :data-testid="`work-quick-count-${c.key}`">{{ c.count }}</span>
+          </button>
+        </div>
 
         <!-- 承接者（共享任务板）：只有清单里出现了指派才有；选项后面的数字是这个承接者手上的任务数 -->
         <select

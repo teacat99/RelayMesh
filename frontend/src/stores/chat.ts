@@ -149,14 +149,6 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  /** 搜索：返回命中的消息（新的在后），不改动当前列表。 */
-  async function search(q: string): Promise<ChatMessage[]> {
-    const query = q.trim()
-    if (!workflowId.value || !query) return []
-    const page = await conversationsApi.list(conversationId.value, { limit: 30, q: query })
-    return page.items
-  }
-
   /** 跳到某条消息（搜索结果）：列表换成以它为中心的一窗，之后可以向两侧翻页。 */
   async function jumpTo(cursor: string) {
     if (!workflowId.value) return
@@ -323,7 +315,6 @@ export const useChatStore = defineStore('chat', () => {
     refresh,
     loadOlder,
     loadNewer,
-    search,
     jumpTo,
     backToLatest,
     send,

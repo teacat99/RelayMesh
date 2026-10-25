@@ -305,3 +305,135 @@ func TestWindowLinePausedWhileTasksActive(t *testing.T) {
 		t.Fatalf("没有窗口时即使有任务也不该有行: %s", got)
 	}
 }
+
+// ---- 严格收尾门（#232 D2）----
+
+func gateTasksN(seqs ...int) []GateTask {
+	out := make([]GateTask, 0, len(seqs))
+	for _, s := range seqs {
+		out = append(out, GateTask{Seq: s, State: "todo", Title: "任务"})
+	}
+	return out
+}
+
+func TestGateNames(t *testing.T) {
+	if got := GateNames(nil, 0); got != "" {
+		t.Fatalf("没有任务应为空串: %q", got)
+	}
+	if got := GateNames(gateTasksN(3, 5), 2); got != "#3 #5" {
+		t.Fatalf("总数等于点名数时不加「等共」: %q", got)
+	}
+	many := gateTasksN(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+	got := GateNames(many, 14)
+	if got != "#1 #2 #3 #4 #5 #6 #7 #8 等共 14 个" {
+		t.Fatalf("最多点名 %d 个其余只给总数: %q", GateListMax, got)
+	}
+}
+
+func TestGateMarker(t *testing.T) {
+	if GateMarker(nil, 0) != "" || GateMarker(gateTasksN(1), 0) != "" || GateMarker(nil, 3) != "" {
+		t.Fatal("没有任务时不该有提示")
+	}
+	m := GateMarker(gateTasksN(4, 9), 2)
+	for _, want := range []string{" ｜ 收尾门：2 个未完成任务挡着收尾（#4 #9）", "做完置完成", "确认卡", "暂缓"} {
+		if !strings.Contains(m, want) {
+			t.Fatalf("缺少 %q: %s", want, m)
+		}
+	}
+	if !strings.HasPrefix(m, " ｜ ") || strings.Contains(m, "\n") {
+		t.Fatalf("要能直接接在 tasks: 行后面，且不换行: %q", m)
+	}
+}
+
+func TestShelveMarker(t *testing.T) {
+	if ShelveMarker(nil, 0) != "" {
+		t.Fatal("没有未写缘由的暂缓就不该提醒")
+	}
+	m := ShelveMarker(gateTasksN(7), 1)
+	for _, want := range []string{"暂缓未写缘由 #7", "async_ask", "Q<N>"} {
+		if !strings.Contains(m, want) {
+			t.Fatalf("缺少 %q: %s", want, m)
+		}
+	}
+}
+
+// 收尾门开着、窗口因任务暂停：点名挡着的任务、说清楚两条出路；门关着的老文案一字不改（INV：旧会话回执不变）。
+func TestWindowLineStrictPausedNamesTheGate(t *testing.T) {
+	now := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
+	w := WindowState{BankSec: 300, ActiveTasks: 3, Strict: true, Gate: gateTasksN(2, 5, 8), GateTotal: 3}
+	line := WindowLine(w, now, 0)
+	for _, want := range []string{"已暂停", "收尾门开着", "3 个未完成任务挡着（#2 #5 #8）", "也不能收尾", "置完成", "确认卡（async_ask）", "「暂缓」", "Q<N>", "不挡窗口也不挡收尾", "05:00", "不要为了等回复而停下来"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("缺少 %q: %s", want, line)
+		}
+	}
+	if strings.Contains(line, "AwaitShell") {
+		t.Fatalf("暂停时不该让智能体去等: %s", line)
+	}
+	// 积压很多时只点名前 8 个
+	many := WindowState{BankSec: 60, ActiveTasks: 12, Strict: true, Gate: gateTasksN(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12), GateTotal: 12}
+	if l := WindowLine(many, now, 0); !strings.Contains(l, "#8 等共 12 个") || strings.Contains(l, "#9") {
+		t.Fatalf("应只点名前 %d 个: %s", GateListMax, l)
+	}
+	// 没有名单（查名单失败）时退回只报个数，不能出现空括号
+	if l := WindowLine(WindowState{BankSec: 60, ActiveTasks: 2, Strict: true}, now, 0); !strings.Contains(l, "挡着（2 个）") {
+		t.Fatalf("名单为空时只报个数: %s", l)
+	}
+	// 门关着：保持老文案
+	legacy := WindowLine(WindowState{BankSec: 300, ActiveTasks: 2}, now, 0)
+	if strings.Contains(legacy, "收尾门") || !strings.Contains(legacy, "还有 2 个进行中 / 验证中的任务") {
+		t.Fatalf("门关着时必须是老文案: %s", legacy)
+	}
+}
+
+// 用户放行后窗口照常倒计时：回执要让智能体知道这是用户的决定（而不是任务清零了）。
+func TestWindowLineReleasedExplainsWhy(t *testing.T) {
+	now := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
+	u := now.Add(4 * time.Minute)
+	line := WindowLine(WindowState{Until: &u, Strict: true, Released: true, GateTotal: 3, Gate: gateTasksN(1, 2, 3)}, now, 10*time.Minute)
+	for _, want := range []string{"剩余 04:00", "用户已「本次放行」收尾门", "还有 3 个未完成任务", "其余置「暂缓」"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("缺少 %q: %s", want, line)
+		}
+	}
+	// 没有放行、或放行了但已经没有未完成任务：不加说明
+	if l := WindowLine(WindowState{Until: &u, Strict: true, GateTotal: 3}, now, 10*time.Minute); strings.Contains(l, "放行") {
+		t.Fatalf("没放行不该提放行: %s", l)
+	}
+	if l := WindowLine(WindowState{Until: &u, Strict: true, Released: true}, now, 10*time.Minute); strings.Contains(l, "放行") {
+		t.Fatalf("任务已清零就不必再提放行: %s", l)
+	}
+}
+
+func TestAnsweredNames(t *testing.T) {
+	if got := AnsweredNames(nil, 0); got != "" {
+		t.Fatalf("空列表应返回空串：%q", got)
+	}
+	items := []AnsweredTask{{Seq: 164, Ref: "Q89"}, {Seq: 170, Ref: "Q90"}}
+	if got := AnsweredNames(items, 2); got != "Q89→#164 Q90→#170" {
+		t.Fatalf("got %q", got)
+	}
+	if got := AnsweredNames(items, 5); got != "Q89→#164 Q90→#170 等共 5 个" {
+		t.Fatalf("总数多于点名数时应补「等共」：%q", got)
+	}
+	many := make([]AnsweredTask, 12)
+	for i := range many {
+		many[i] = AnsweredTask{Seq: i + 1, Ref: "Q1"}
+	}
+	got := AnsweredNames(many, 12)
+	if strings.Count(got, "→") != GateListMax || !strings.HasSuffix(got, "等共 12 个") {
+		t.Fatalf("最多点名 %d 个：%q", GateListMax, got)
+	}
+}
+
+func TestAnsweredMarker(t *testing.T) {
+	if AnsweredMarker(nil, 0) != "" || AnsweredMarker([]AnsweredTask{{Seq: 1, Ref: "Q1"}}, 0) != "" {
+		t.Fatal("没有这类任务时应返回空串，回执保持原样")
+	}
+	got := AnsweredMarker([]AnsweredTask{{Seq: 7, Ref: "Q3"}}, 1)
+	for _, want := range []string{" ｜ 确认卡已答复、任务还在暂缓 Q3→#7", AnsweredNote} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("缺少 %q：%s", want, got)
+		}
+	}
+}

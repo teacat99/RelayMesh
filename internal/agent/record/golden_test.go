@@ -39,8 +39,11 @@ func TestGoldenEventsMatchFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("缺少对照文件 %s（用 UPDATE_GOLDEN=1 生成）: %v", path, err)
 	}
-	if string(want) != got {
-		t.Fatalf("事件编码与对照文件不一致：格式被改动了吗？如果是有意的，请同步前端解码器并用 UPDATE_GOLDEN=1 重新生成。\nwant %s\n got %s", want, got)
+	// 对照文件是文本：Windows 上 git 默认把检出的文本文件换成 CRLF（core.autocrlf=true，GitHub 的 Windows runner 就是这样），
+	// 内容并没有变，所以比较前把行尾统一成 LF；真正的差异（十六进制内容不同）仍会被抓到。
+	wantText := strings.ReplaceAll(string(want), "\r\n", "\n")
+	if wantText != got {
+		t.Fatalf("事件编码与对照文件不一致：格式被改动了吗？如果是有意的，请同步前端解码器并用 UPDATE_GOLDEN=1 重新生成。\nwant %s\n got %s", wantText, got)
 	}
 
 	// 解码回来要得到同一个序列。

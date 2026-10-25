@@ -329,6 +329,10 @@ type QueuedFeedback struct {
 	MessageID      uint   `json:"message_id,omitempty"`
 	SenderRef      string `gorm:"size:128" json:"sender_ref,omitempty"`
 
+	// 发言者（#236 分支会话）：kind = branch 的行记下是谁说的——主会话 Agent、分支 Agent，或用户在另一个会话页里的发言被抄送过来。
+	// 紧凑 JSON（见 MsgActor）；空 = 用户 / 本会话 Agent，与以前一样，所以不是分支消息的行响应里没有这个字段。可空的只增列。
+	Actor string `gorm:"size:200" json:"actor,omitempty"`
+
 	// ---- 追加指令收件箱（D-210）----
 	// 每条追加独立一行，各有各的状态：queued（已排队）→ delivered（Agent 读到了全文）→ acked（已确认）。
 	// 旁支：revoked（Agent 完全不知道时被撤回）、retracted（Agent 读到、或被 hook / 提示行提醒过之后被撤回）、expired（超过保留期）。
@@ -496,7 +500,7 @@ func (p Permissions) AllowsTool(toolName string) bool {
 		return p.Configure
 	case "report_progress":
 		return p.Execute
-	case "workflow_context", "task_board", "project_docs", "async_ask", "chat":
+	case "workflow_context", "task_board", "project_docs", "async_ask", "chat", "branch", "session_params":
 		return p.Feedback || p.Sessions
 	case "usage_guide":
 		// 内置使用手册（#181）：只读；与上面几个治理工具同一档，ExecMesh 档（只能执行命令）的令牌看不到它。

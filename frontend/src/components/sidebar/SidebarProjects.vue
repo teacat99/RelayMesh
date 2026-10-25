@@ -25,6 +25,7 @@ function open() {
       :aria-current="active ? 'page' : undefined"
       title="项目：把同一产品的多个目录和文档合成一个知识库"
       data-testid="sidebar-project-entry"
+      data-prefetch="projects"
       @click="open"
     >
       <FolderGit2 class="size-3.5 shrink-0" />

@@ -152,6 +152,9 @@ func (s *Store) RevokeQueuedFeedback(ctx context.Context, queuedID uint) (*Revok
 		if inboxMessageKind(q.Kind) == model.InboxKindChatMention {
 			return NewConflictError("群聊里的提醒不能在这里撤回", 0)
 		}
+		if inboxMessageKind(q.Kind) == model.InboxKindBranch {
+			return NewConflictError("分支会话之间的消息不能撤回", 0)
+		}
 
 		now := time.Now()
 		known := agentKnows(q)
@@ -343,6 +346,7 @@ type InboxSummary struct {
 	Unread         int        `json:"unread"`                     // 排队中、智能体还没读到的条数
 	UnreadMentions int        `json:"unread_mentions,omitempty"`  // 其中是群聊 @ 提醒（kind=chat_mention）的条数
 	UnreadAnswers  int        `json:"unread_answers,omitempty"`   // 其中是确认项答复（kind=answer）的条数；提示行据此换措辞
+	UnreadBranch   int        `json:"unread_branch,omitempty"`    // 其中是分支会话之间的消息（kind=branch，#236）的条数；提示行单独说
 	Delivered      int        `json:"delivered"`                  // 已读取、尚未确认的条数
 	RetractNotices int        `json:"retract_notices"`            // 智能体读过或被提醒过、之后被撤回、还没告诉它的条数（#199）
 	OldestUnreadAt *time.Time `json:"oldest_unread_at,omitempty"` // 最早一条未读的时间
@@ -374,13 +378,24 @@ func (s *Store) InboxSummary(ctx context.Context, workflowID string, now time.Ti
 			sum.UnreadAnswers++
 		case model.InboxKindChatMention:
 			sum.UnreadMentions++
+		case model.InboxKindBranch:
+			sum.UnreadBranch++
 		}
 	}
 	if len(unread) > 0 {
 		oldest, latest := unread[0], unread[len(unread)-1]
 		sum.OldestUnreadAt = &oldest.CreatedAt
 		sum.LatestUnreadAt = &latest.CreatedAt
-		sum.LatestPreview = previewOf(latest.ResponseText, latest.UserMessages, latest.ImageCount)
+		// 预览取最新一条「不是分支消息」的未读：提示行把预览写成「用户的话」，同伴 Agent 的分支消息（#236）不该占这个位置；
+		// 全是分支消息时才用它自己（提示行那一边会把预览清掉）。
+		preview := latest
+		for i := len(unread) - 1; i >= 0; i-- {
+			if inboxMessageKind(unread[i].Kind) != model.InboxKindBranch {
+				preview = unread[i]
+				break
+			}
+		}
+		sum.LatestPreview = previewOf(preview.ResponseText, preview.UserMessages, preview.ImageCount)
 	}
 
 	var delivered, retracted int64
@@ -639,7 +654,7 @@ func consumeInboxTx(tx *gorm.DB, workflowID, sessionID string, now time.Time) (i
 		q := &rows[i]
 		// 确认项答复只经 inbox / hook / 回执提示行送达，不并进 interactive_feedback 的秒回
 		// （它不是「对当前这次汇报的回复」）；已经读过的那些，照旧随这次交互一并确认。
-		if k := inboxMessageKind(q.Kind); (k == model.InboxKindAnswer || k == model.InboxKindChatMention) && q.DeliveredAt == nil {
+		if k := inboxMessageKind(q.Kind); (k == model.InboxKindAnswer || k == model.InboxKindChatMention || k == model.InboxKindBranch) && q.DeliveredAt == nil {
 			continue
 		}
 		updates := map[string]any{"status": "consumed", "acked_at": now, "updated_at": now}

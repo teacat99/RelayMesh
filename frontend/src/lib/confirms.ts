@@ -1,7 +1,7 @@
 // 确认项（Q12）的纯逻辑：作答校验、推荐采用、分组、时间线落点、文档决策卡汇总、答复文案。
 // 与 internal/confirm 里的规则保持一致（推荐选项的取法、L2 不进批量），界面只负责呈现。
 
-import type { ConfirmBoard, ConfirmItem, ConfirmKind, ConfirmOption, ConfirmRisk, ConfirmStatus } from '../api/confirms'
+import type { ConfirmItem, ConfirmKind, ConfirmOption, ConfirmRisk, ConfirmStatus } from '../api/confirms'
 
 export const CONFIRM_NOTE_MAX = 2000
 /** 自定义答复（#183）的字数上限，与服务端 model.ConfirmCustomMax 一致。 */
@@ -20,6 +20,15 @@ export const RISK_LABEL: Record<ConfirmRisk, string> = {
 }
 
 export const RISK_SHORT: Record<ConfirmRisk, string> = { L0: 'L0', L1: 'L1', L2: 'L2' }
+
+/**
+ * 风险标签的悬停说明。L2 多带一句约定（#217）：不可逆 / 高风险的事要逐条有意识地选择，
+ * 智能体在用户明确批准之前不会执行这一步——这句只在经典的待答复卡上有，预览卡漏了；经典视图删除（#166）后由预览卡接过来。
+ */
+export function riskHint(risk: ConfirmRisk): string {
+  if (risk === 'L2') return `${RISK_LABEL.L2}：需要逐条有意识地选择；按约定，智能体在您明确批准前不会执行这一步`
+  return RISK_LABEL[risk]
+}
 
 export const STATUS_LABEL: Record<ConfirmStatus, string> = {
   pending: '待答复',
@@ -150,6 +159,35 @@ export function answerText(item: Pick<ConfirmItem, 'options' | 'answer'>, custom
   return segs.join('；')
 }
 
+// ---------- 决策路由（#236 P2）----------
+// 分支会话里的智能体发出的请示，默认先送主会话的智能体定夺：主会话可以代答、转交给用户，或一直没人答复时超时自动转交。
+// 用户任何时候都能直接答复（先到先得）。下面是界面上要用到的几个判断与文案，全是纯函数。
+
+/** 请示正等主会话的智能体定夺：路由给了主会话、用户还没接手（用户仍可随时直接答复，先到先得）。 */
+export function routedToMain(item: Pick<ConfirmItem, 'status' | 'addressee'>): boolean {
+  return item.status === 'pending' && /^wf:\S/.test(item.addressee ?? '')
+}
+
+/** 已答复的答复者是主会话的智能体（代为定夺，不是用户本人）。 */
+export function answeredByMain(item: Pick<ConfirmItem, 'status' | 'answer'>): boolean {
+  return item.status === 'answered' && (item.answer?.by ?? '').startsWith('agent:')
+}
+
+/** 折叠行 / 提示条里结局的开头：主会话代答时写明「主会话代答」，免得用户把它当成自己的决定。 */
+export function answerLead(item: Pick<ConfirmItem, 'status' | 'answer'>): string {
+  return answeredByMain(item) ? '主会话代答' : '已答复'
+}
+
+/** 转交 / 升级的一句话（卡上的提示条与回看里）；没转交过为空串。 */
+export function escalationText(item: Pick<ConfirmItem, 'escalation'>): string {
+  const e = item.escalation
+  if (!e) return ''
+  const note = (e.note ?? '').trim()
+  if (e.by.startsWith('agent:')) return note ? `主会话转交给您：${note}` : '主会话转交给您定夺'
+  if (note) return note
+  return e.by === 'timeout' ? '主会话一直没有答复，已转交给您' : '已转交给您定夺'
+}
+
 export interface RecallOption {
   id: string
   label: string
@@ -253,20 +291,14 @@ export function adoptPreview(items: ReadonlyArray<ConfirmItem>): AdoptPreviewRow
   }))
 }
 
-/** 工具栏「待答复」徽标的文案：「待答复 3」「待答复 3 · 告警 1」「告警 1」；都为 0 时返回空串（徽标不出现）。 */
-export function pendingChipText(items: number, guards: number): string {
-  const parts: string[] = []
-  if (items > 0) parts.push(`待答复 ${items}`)
-  if (guards > 0) parts.push(`告警 ${guards}`)
-  return parts.join(' · ')
+/** 工具栏「待答复」徽标的文案：「待答复 3」；为 0 时返回空串（徽标不出现）。 */
+export function pendingChipText(items: number): string {
+  return items > 0 ? `待答复 ${items}` : ''
 }
 
 /** 徽标的悬浮提示：说清楚数的是什么、点开能做什么。 */
-export function pendingChipTitle(items: number, guards: number): string {
-  const parts: string[] = []
-  if (items > 0) parts.push(`${items} 项提问等你答复`)
-  if (guards > 0) parts.push(`${guards} 条守护告警`)
-  return parts.length ? `${parts.join('、')}；点开可定位到对话里的卡片` : ''
+export function pendingChipTitle(items: number): string {
+  return items > 0 ? `${items} 项提问等你答复；点开可定位到对话里的卡片` : ''
 }
 
 /** 「多久以前」的人话：刚刚 / N 分钟前 / N 小时前 / N 天前；时间无法解析时为空串。 */

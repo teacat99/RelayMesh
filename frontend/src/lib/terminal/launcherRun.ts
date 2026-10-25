@@ -1,6 +1,6 @@
 import type { HostView, LauncherRunPlan, LauncherRunView, TerminalLauncher } from '../../api/terminal'
 import { relativeTime, runLimitText } from './format'
-import { hostReadiness, isWindowsHost } from './launcher'
+import { effectiveAfterNew, effectiveSource, hostReadiness } from './launcher'
 
 /** 平台单次运行的上限（7 天，秒）：预设没设「最长运行时间」时就是它（与服务端 termproto.MaxRunTimeoutSec 一致）。 */
 export const DEFAULT_RUN_LIMIT_SEC = 7 * 24 * 3600
@@ -18,7 +18,7 @@ export interface RunStatus {
   busy: boolean
 }
 
-/** 运行状态的文字与圆点颜色（与守护状态的配色一致）；预设的运行现状与「其他非交互运行」区共用。 */
+/** 运行状态的文字与圆点颜色；预设的运行现状与「其他非交互运行」区共用。 */
 export const RUN_TONE_TEXT: Record<RunTone, string> = {
   good: 'text-emerald-600 dark:text-emerald-400',
   warn: 'text-amber-600 dark:text-amber-400',
@@ -82,6 +82,8 @@ export function runMeta(v: LauncherRunView, nowMs: number = Date.now()): string 
     const label = `自动续跑 ${v.auto.attempt}/${v.auto.max || v.auto.attempt}`
     parts.push(v.auto.settled ? `${label}（已成功）` : label)
   }
+  // 「最近会话」（--continue，#191）接哪个对话由 Cursor CLI 决定、不是 Hub 选的：写明实际接上的对话（读到输出之前只写来源）。
+  if (v.mode === 'continue') parts.push(v.conversation ? `接上对话 ${v.conversation.slice(0, 8)}…` : '最近会话')
   if (v.active) {
     parts.push(`${relativeTime(v.started_at ?? v.created_at, nowMs)}开始`)
   } else {
@@ -205,7 +207,6 @@ export type RunReadiness = { ok: true } | { ok: false; text: string }
 export function runReadiness(host: HostView | undefined, last: LauncherRunView | undefined): RunReadiness {
   const r = hostReadiness(host)
   if (!r.ok) return { ok: false, text: r.text }
-  if (isWindowsHost(host?.os)) return { ok: false, text: '暂不支持 Windows 主机' }
   if (last?.active) return { ok: false, text: '上一次运行还没结束' }
   return { ok: true }
 }
@@ -215,9 +216,16 @@ export function runSummary(l: Pick<TerminalLauncher, 'run'>): string {
   const r = l.run
   if (!r) return ''
   const parts: string[] = []
+  const source = effectiveSource(r)
   if (r.conversation_id) parts.push(`固定对话 ${r.conversation_id.slice(0, 8)}`)
-  else if (r.new_conversation && r.workflow_id) parts.push(`第一次新开对话，之后接着工作流 ${r.workflow_id} 里的对话`)
-  else if (r.workflow_id) parts.push(`工作流 ${r.workflow_id} 里最近的对话`)
+  else if (source === 'continue') parts.push('最近会话（接着目录里 Cursor CLI 认的最近对话）')
+  else if (source === 'new' && r.workflow_id) {
+    switch (effectiveAfterNew(r)) {
+      case 'stay': parts.push('新会话（每次运行都新开对话）'); break
+      case 'continue': parts.push('新会话（第一次新开，成功后自动切成最近会话）'); break
+      default: parts.push(`第一次新开对话，之后接着工作流 ${r.workflow_id} 里的对话`)
+    }
+  } else if (r.workflow_id) parts.push(`工作流 ${r.workflow_id} 里最近的对话`)
   if (r.model) parts.push(r.model)
   parts.push(r.posture === 'force' ? '放开全部命令（--force）' : '只放行白名单内的操作')
   // 设了最长运行时间才写（没设就是 7 天，不是你的选择，不占位置）。
@@ -238,7 +246,15 @@ export function runNotice(plan: LauncherRunPlan): { title: string; description: 
   if (plan.run_state === 'awaiting_approval') {
     lines.push('这台主机的执行模式是「需批准」：到 ExecMesh 的运行记录里批准后才会开始。')
   } else if (plan.new_conversation) {
-    lines.push('在主机上新开了一个 Cursor CLI 对话（不打开终端）：它会带着工作流编号接入，之后再点「运行」都接着它，不会再新开；结果会显示在这条预设下面，聊天里也会有记录。')
+    // 之后会怎样取决于「新会话」运行之后的去向（#559）；旧版 Hub 没有 after_new，按默认的「记下编号」说。
+    const after = plan.after_new === 'stay'
+      ? '这个预设每次运行都会新开对话，不会接着这一个'
+      : plan.after_new === 'continue'
+        ? '运行成功之后，预设会自动切换成「最近会话」'
+        : '之后再点「运行」都接着它，不会再新开'
+    lines.push(`在主机上新开了一个 Cursor CLI 对话（不打开终端）：它会带着工作流编号接入，${after}；结果会显示在这条预设下面，聊天里也会有记录。`)
+  } else if (plan.continue) {
+    lines.push('在主机上接着这个目录里最近的 Cursor CLI 对话运行一次（--continue，不打开终端）：接到哪个对话由 CLI 决定，实际接上的对话会写在运行记录里；结果会显示在这条预设下面，聊天里也会有记录。')
   } else {
     lines.push('在主机上接着原对话运行一次（不打开终端）；结果会显示在这条预设下面，聊天里也会有记录。')
   }
@@ -266,8 +282,22 @@ export function runPollDelay(runs: Record<string, LauncherRunView> | null | unde
   return runsActive(runs, others) ? RUN_POLL_ACTIVE_MS : RUN_POLL_IDLE_MS
 }
 
+/**
+ * 有没有预设的运行刚刚结束（#191）：上一次读到它还在进行，这一次它已经结束、或预设的最近一次运行换成了另一条。
+ * 「新会话」运行成功之后服务端会把预设改成「最近会话」，界面要在这时把预设清单读新，免得表单拿着旧预设保存、把切换盖回去。
+ * 第一次读（没有上一次的现状）不算。
+ */
+export function runsJustEnded(before: Record<string, LauncherRunView> | null | undefined, after: Record<string, LauncherRunView> | null | undefined): boolean {
+  if (!before) return false
+  return Object.entries(before).some(([id, was]) => {
+    if (!was.active) return false
+    const now = after?.[id]
+    return !now || now.run_id !== was.run_id || !now.active
+  })
+}
+
 // ---------- 不属于任何预设的运行（#147） ----------
-// 旧入口（会话页「运行」接口）、会话守护的非交互唤醒、所属预设已删除的预设运行：预设清单里没有位置，
+// 旧入口（会话页「运行」接口）、会话守护的非交互唤醒（已下线，只剩旧记录）、所属预设已删除的预设运行：预设清单里没有位置，
 // 弹窗里单列一个「其他非交互运行」区，可以到 ExecMesh 里看输出，进行中的可以取消。
 
 /** 来源的口语名与一句解释（悬停提示用）。服务端以后增加新来源时，界面按通用说法显示。 */
@@ -276,7 +306,7 @@ export function otherRunSource(source: string): { label: string; hint: string } 
     case 'session_run':
       return { label: '会话页「运行」', hint: '会话页的「运行」入口（旧版页面或脚本）直接提交的非交互续聊，没有挂在任何预设上。' }
     case 'wake':
-      return { label: '非交互唤醒', hint: '在会话守护的状态里点「非交互唤醒」提交的运行，它不是预设的「运行」。' }
+      return { label: '非交互唤醒', hint: '旧版会话守护的「非交互唤醒」提交的运行（该功能已下线），它不是预设的「运行」。' }
     case 'deleted_preset':
       return { label: '预设已删除', hint: '这次运行是删掉预设之前提交的，预设没了，所以只能在这里看到它。' }
     default:

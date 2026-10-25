@@ -38,7 +38,9 @@ const (
 	MinGuardSilenceMinutes     = 5
 	MaxGuardSilenceMinutes     = 720
 	MaxGuardWorkflowRunes      = 128
-	MaxGuardPromptRunes        = 300
+	// MaxGuardPromptRunes 与会话 / 全局模板同一个上限（sessionprompt.TemplateMaxRunes，测试里核对）：
+	// v2 内置默认比旧版长，预设里「以默认为底稿」填进去必须还能存（#232 D3，原先是 300）。
+	MaxGuardPromptRunes = 1500
 )
 
 var (
@@ -234,7 +236,11 @@ func (s *Store) ListTerminalLaunchers(ctx context.Context) ([]TerminalLauncher, 
 	return decodeTerminalLaunchers(rec.Value), nil
 }
 
-// updateTerminalLaunchers 在一个事务里「读—改—写」整份预设；mutate 返回错误时不写入。
+// errLauncherUnchanged 是 mutate 的「什么都不用改」信号：updateTerminalLaunchers 不写库、也不报错。
+var errLauncherUnchanged = errors.New("预设没有变化")
+
+// updateTerminalLaunchers 在一个事务里「读—改—写」整份预设；mutate 返回错误时不写入
+// （返回 errLauncherUnchanged 表示没有要改的，同样不写入但不算错误）。
 func (s *Store) updateTerminalLaunchers(ctx context.Context, mutate func([]TerminalLauncher) ([]TerminalLauncher, error)) ([]TerminalLauncher, error) {
 	var out []TerminalLauncher
 	err := s.WithTx(ctx, func(tx *gorm.DB) error {
@@ -246,6 +252,10 @@ func (s *Store) updateTerminalLaunchers(ctx context.Context, mutate func([]Termi
 			return err
 		}
 		next, err := mutate(cur)
+		if errors.Is(err, errLauncherUnchanged) {
+			out = cur // 条件不满足：不写库
+			return nil
+		}
 		if err != nil {
 			return err
 		}

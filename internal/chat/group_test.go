@@ -271,3 +271,80 @@ func TestDisambiguateLabels(t *testing.T) {
 		t.Fatalf("处理后名字必须互不相同: %v", labels)
 	}
 }
+
+// 协作系统行（共享任务板，#180 B3c）：正文里的成员占位读出来时换成群里当前的显示名。
+func TestExpandRefs(t *testing.T) {
+	e := groupEnv{labels: map[string]string{"wf-a": "前端", "wf-b": "后端 · 2222"}}
+	cases := []struct{ in, want string }{
+		{"没有占位的话原样返回", "没有占位的话原样返回"},
+		{"{{m:wf-a}} 把 #12「接口改造」派给了 {{m:wf-b}}", "前端 把 #12「接口改造」派给了 后端 · 2222"},
+		{"{{m:user}} 验收通过了 {{m:wf-b}} 交付的 #3", "你 验收通过了 后端 · 2222 交付的 #3"},
+		{"群里没有的编号显示编号本身：{{m:wf-zzz}}", "群里没有的编号显示编号本身：wf-zzz"},
+		{"不完整的占位原样保留 {{m:wf-a 后面没有收尾", "不完整的占位原样保留 {{m:wf-a 后面没有收尾"},
+		{"{{m:wf-a}}{{m:wf-a}}", "前端前端"},
+		{"标题里被破坏过的 { {m:wf-a} } 不会被当成占位", "标题里被破坏过的 { {m:wf-a} } 不会被当成占位"},
+	}
+	for _, c := range cases {
+		if got := e.expandRefs(c.in); got != c.want {
+			t.Errorf("expandRefs(%q)\n想要 %q\n得到 %q", c.in, c.want, got)
+		}
+	}
+}
+
+// 端到端：store 写出的协作系统行，群窗口与 Agent 的 chat read 看到的都是换好名字的整句话；它是系统行，不算未读。
+func TestListGroup_BoardLineExpandsMemberNames(t *testing.T) {
+	svc, st, gid := newGroup(t, "wf-a", "wf-b")
+	ctx := context.Background()
+	groups, err := st.PostBoardGroupLines(ctx, []store.BoardLineEvent{
+		{Event: model.WorkEventAssign, ActorRef: "wf-a", AssignerRef: "wf-a", AssigneeRef: "wf-b", Seq: 12, Title: "接口改造", UpdateID: 501},
+		{Event: model.WorkEventAcceptDelivery, ActorRef: store.GroupHumanRef, AssignerRef: "wf-a", AssigneeRef: "wf-b", Seq: 13, Title: "文档", UpdateID: 502},
+	})
+	if err != nil || len(groups) != 1 || groups[0] != gid {
+		t.Fatalf("应写进这个群: %v %v", groups, err)
+	}
+	wants := []string{"wf-a 把 #12「接口改造」派给了 wf-b", "你 验收通过了 wf-b 交付的 #13「文档」"}
+
+	pg, err := svc.ListGroup(ctx, gid, ListParams{Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range wants {
+		found := false
+		for _, m := range pg.Items {
+			if m.Kind == KindSystem && m.Text == want {
+				found = true
+				if m.Sender.Kind != SenderSystem {
+					t.Errorf("协作系统行的发送者应是系统: %+v", m.Sender)
+				}
+			}
+			if m.Kind == KindSystem && contains(m.Text, "{{m:") {
+				t.Errorf("群窗口里不该看到占位记号: %q", m.Text)
+			}
+		}
+		if !found {
+			t.Errorf("群窗口里缺 %q", want)
+		}
+	}
+
+	rd, err := svc.ReadForAgent(ctx, gid, "wf-b", 0, 50, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, m := range rd.Items {
+		for _, want := range wants {
+			if m.Text == want {
+				seen++
+			}
+		}
+		if contains(m.Text, "{{m:") {
+			t.Errorf("Agent 读到的也不该有占位记号: %q", m.Text)
+		}
+	}
+	if seen != len(wants) {
+		t.Errorf("Agent 应读到 %d 条协作系统行，实际 %d", len(wants), seen)
+	}
+	if unread, mentioned, err := st.GroupUnread(ctx, gid, model.ConversationReaderWorkflow, "wf-b", time.Time{}); err != nil || unread != 0 || mentioned != 0 {
+		t.Errorf("系统行不算未读: %d %d %v", unread, mentioned, err)
+	}
+}

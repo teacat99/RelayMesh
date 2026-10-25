@@ -113,7 +113,9 @@ describe('群聊窗口（GroupChatPane）的接线：只有一种画法', () => 
 
   it('发送只带文字与点名（群聊没有图片、「作为追加」与引用回复）', () => {
     assert.match(pane, /await store\.send\(\{\s*text: p\.text,\s*mentions: p\.mentions\.length \? p\.mentions : undefined,\s*\}\)/)
-    const send = pane.slice(pane.indexOf('async function onSend'), pane.indexOf('// ---- 定位到某条消息'))
+    // pane 是去掉注释的源码：不能拿注释当终点（找不到会变成 -1，一路切到文件末尾，把模板也算进来）；终点取下一个函数
+    const send = pane.slice(pane.indexOf('async function onSend'), pane.indexOf('function scrollToMessage'))
+    assert.ok(send.length > 0 && send.length < 600, 'onSend 函数体应只是一小段')
     assert.ok(send.includes('store.send') && !/images|target:|reply_to|replyTo/.test(send))
   })
 
@@ -133,11 +135,20 @@ describe('群聊窗口（GroupChatPane）的接线：只有一种画法', () => 
   })
 
   it('成员头像传给面板与 @ 选择器；归档的群输入框不可用并说明原因', () => {
-    assert.match(pane, /<GroupMembersPanel :info="store\.group" :hues="hues"/)
+    // 成员面板拿的是叠加了实时状态的那份（页头徽标与面板读同一份，#241 第三步），不是服务端随群页带的原始对象
+    assert.match(pane, /<GroupMembersPanel :info="liveGroup" :hues="hues"/)
+    assert.doesNotMatch(pane, /<GroupMembersPanel :info="store\.group"/)
     assert.match(pane, /const pickerIdentities = computed\(\(\) => candidateIdentities\(candidates\.value, store\.group\?\.members \?\? \[\], hues\.value\)\)/)
     assert.match(pane, /:identities="pickerIdentities"/)
     assert.match(pane, /:disabled="archived"/)
     assert.match(pane, /disabled-reason="这个群已归档，不能再发消息。在成员面板里取消归档后可继续。"/)
+  })
+
+  it('页头群级状态徽标（#241 第三步）：读叠加了实时状态的成员；已归档的群不画；点它开关成员面板；挂载时取一次实时状态', () => {
+    assert.match(pane, /<GroupStatusBadge v-if="!archived" :members="liveMembers" :expanded="membersOpen" @toggle="membersOpen = !membersOpen" \/>/)
+    assert.match(pane, /const liveMembers = computed\(\(\) => overlayLiveState\(store\.group\?\.members \?\? \[\], wf => agentStore\.entryFor\(wf\)\.primary\)\)/)
+    assert.match(pane, /const liveGroup = computed\(\(\) => \(store\.group \? \{ \.\.\.store\.group, members: liveMembers\.value \} : null\)\)/)
+    assert.match(pane, /agentStore\.ensureFresh\(\)/)
   })
 
   it('所有对外可见的 data-testid 都还在（e2e 与外部脚本靠它们定位）', () => {
@@ -146,11 +157,59 @@ describe('群聊窗口（GroupChatPane）的接线：只有一种画法', () => 
       'chat-view', 'chat-title', 'chat-scroll', 'chat-composer', 'chat-input', 'chat-send', 'mention-picker', 'mention-option', 'chat-disabled',
       'chat-message', 'chat-reads', 'chat-mentions-you', 'chat-deliveries', 'chat-attachments',
       'chat-system', 'chat-card', 'chat-decision', 'chat-task-update',
-      'chat-search-toggle', 'chat-search', 'chat-search-input', 'chat-search-results', 'chat-to-latest', 'chat-error', 'chat-start', 'chat-empty', 'chat-loading',
+      'chat-search-toggle', 'chat-to-latest', 'chat-error', 'chat-start', 'chat-empty', 'chat-loading',
       'group-avatar-stack', 'group-avatar-more', 'group-member-count', 'group-archived-badge', 'group-members-toggle', 'group-cross-banner',
     ]
     const missing = ids.filter(id => !all.includes(`data-testid="${id}"`))
     assert.deepEqual(missing, [], `缺少 data-testid：${missing.join(', ')}`)
+  })
+
+  it('搜索用预览视图的同一个面板（#241）：群页只管开关与落点，不再自带输入框 / 结果列表 / 搜索状态', () => {
+    // 面板的钩子换成预览视图的那一套（preview-search / -input / -results / -hit），旧的 chat-search / -input / -results / data-result-id 不再有
+    assert.match(pane, /import PreviewSearchPanel from '\.\.\/feedback\/preview-view\/PreviewSearchPanel\.vue'/)
+    assert.match(
+      pane,
+      /<PreviewSearchPanel\s+v-if="searchOpen"\s+:workflow-id="workflowId"\s+placeholder="搜索这个群的全部消息"\s+:kinds="SEARCH_ALL_KINDS"\s+@close="searchOpen = false"\s+@pick="openResult"\s*\/>/,
+    )
+    // 群消息的搜索由服务端只按文字消息匹配、不看 kinds 参数：传空数组 = 不带 kinds（conversationsApi.list 对空数组省略该参数）
+    assert.match(pane, /const SEARCH_ALL_KINDS: readonly string\[\] = \[\]/)
+    // 点中结果后面板自己收成一行输入条（目标露出来），群页的落点函数不关它
+    assert.match(pane, /async function openResult\(m: ChatMessage\) \{\s+const known = /)
+    assert.ok(!/searchText|searchResults|searching|searchTimer|store\.search|chat-search-input|chat-search-results|data-result-id|data-testid="chat-search"/.test(pane), '群页里不该再有自己的搜索输入 / 结果 / 状态')
+    // 切换群时仍收起面板（旧群的搜索词不带到新群）
+    assert.match(pane, /async function openConversation\(\) \{\s+searchOpen\.value = false/)
+  })
+
+  it('右侧缩略轴用预览视图的同一条轨（#241 第二步）：别的成员说的话上轨，点刻度落到那条消息，输入框不盖列表所以不按「悬浮行」让位', () => {
+    assert.match(pane, /import PreviewTimelineRail from '\.\.\/feedback\/preview-view\/PreviewTimelineRail\.vue'/)
+    assert.match(
+      pane,
+      /<PreviewTimelineRail\s+:scroll-el="scroller"\s+:has-earlier="store\.hasMoreBefore"\s+:loading-earlier="store\.loadingOlder"\s+:has-draft-images="false"\s+:dock="false"\s+@jump="onRailJump"\s+@load-earlier="loadOlderKeepingPosition"\s*\/>/,
+    )
+    // 落点就是搜索命中用的那个函数（消息都已载入，滚过去并闪一下）；「更早」就是顶部哨兵用的翻页函数
+    assert.match(pane, /function onRailJump\(item: RailItem\) \{\s+scrollToMessage\(item\.id\)\s+\}/)
+    // 轨挂在消息区的相对定位容器里（与搜索面板、「回到最新」同一个容器），不是挂在页面根上
+    const wrap = pane.indexOf('<div class="relative min-h-0 flex-1">')
+    assert.ok(wrap > 0 && pane.indexOf('<PreviewTimelineRail') > wrap, '轨在消息区容器里面')
+    // 轨占右侧 38px：内容列从 md 起右侧留白（右对齐的卡不压在刻度下面）；出错提示 z-30 盖在轨（z-20）上面，「重试」不被刻度挡住
+    assert.match(pane, /<div ref="content" class="md:pr-9">/)
+    assert.match(pane, /<div v-if="store\.error" class="absolute inset-x-3 top-2 z-30 /)
+    // 群消息卡把「别的成员的发言」写成 data-rail-*（轨扫的就是它）；您自己的话不上轨由 railMetaOfGroupMessage 判定
+    const card = code(read(GROUP_CARD))
+    assert.match(card, /import \{ railDomAttrs, railMetaOfGroupMessage \} from '\.\.\/\.\.\/lib\/timelineRail'/)
+    assert.match(card, /const railAttrs = computed\(\(\) => \{\s+const meta = railMetaOfGroupMessage\(m\.value\)\s+return meta \? railDomAttrs\(meta\) : \{\}\s+\}\)/)
+    assert.match(card, /<PreviewMessageCard[\s\S]*?v-bind="railAttrs"[\s\S]*?data-testid="chat-message"/)
+    // 共用的轨组件：dock 默认 true（会话页不变），false 时下沿只让开「回到最新」
+    const rail = code(read('components/feedback/preview-view/PreviewTimelineRail.vue'))
+    assert.match(rail, /dock\?: boolean/)
+    assert.match(rail, /\{ dock: true \}/)
+    assert.match(rail, /!dock \? 'bottom-14' : hasDraftImages \? 'bottom-44' : 'bottom-28'/)
+  })
+
+  it('「回到最新」换了一整段内容后：先把「在底部」记成真再直接贴底——不靠滚动事件的时序，也不用会被翻页打断的平滑滚动（#241 第二步里 e2e 抓到的竞态）', () => {
+    assert.match(pane, /async function toLatest\(\) \{\s+await store\.backToLatest\(\)\s+await nextTick\(\)\s+atBottom\.value = true\s+scrollToBottom\(\)\s+\}/)
+    // 点按钮：还有更新的一段（搜索跳转进了历史）就走 toLatest，否则才是同一页内的平滑滚动
+    assert.match(pane, /@click="store\.hasMoreAfter \? toLatest\(\) : scrollToBottom\(true\)"/)
   })
 })
 
@@ -278,6 +337,43 @@ describe('群聊输入框（GroupComposer）：只留群聊需要的', () => {
     assert.match(composer, /identities: Record<string, SenderIdentity>/)
     assert.match(composer, /<MemberAvatar v-if="identities\[c\.ref\]" :identity="identities\[c\.ref\]" \/>/)
     assert.match(composer, /data-testid="mention-option"/)
+  })
+
+  it('外观与会话页输入区对齐（#241 第四步）：底面与留白同一套、输入框下面一行操作行（左快捷键提示、右带字的小号发送）；只对齐外观，不加功能', () => {
+    const dock = read('components/feedback/FeedbackInputDock.vue')
+    // 基准：会话页输入区的底面 / 留白 / 分隔线 / 快捷键提示（它们变了，这里要跟着改，这条测试就是提醒）
+    assert.ok(dock.includes('bg-background/95 backdrop-blur-xs px-3 sm:px-6'), '会话页输入区的底面与留白变了：群聊输入框要跟着对齐')
+    assert.ok(dock.includes("'border-t border-border/70 transition-[height] duration-150'"), '会话页输入区的分隔线变了')
+    assert.ok(dock.includes('hidden lg:inline text-muted-foreground/80 text-[11px]">按 <kbd class="px-1.5 py-0.5 rounded-xs bg-muted border border-border font-mono text-[10px]">'), '会话页输入区的快捷键提示变了')
+    assert.ok(dock.includes('h-7 px-3 sm:px-3.5 text-xs rounded-sm gap-1'), '会话页输入区的发送按钮变了')
+
+    const root = /<div\s+class="([^"]*)"\s+data-testid="chat-composer"/.exec(composer)?.[1] ?? ''
+    for (const cls of ['border-t', 'border-border/70', 'bg-background/95', 'backdrop-blur-xs', 'px-3', 'sm:px-6']) {
+      assert.ok(root.split(/\s+/).includes(cls), `输入框的底面应带 ${cls}：${root}`)
+    }
+    assert.match(composer, /data-testid="mention-picker"/)
+    assert.ok(/class="absolute inset-x-3 [^"]*sm:inset-x-6"/.test(composer), '@ 补全的左右边要跟着留白走')
+
+    // 操作行：提示在左（宽屏才显示，和会话页一样用 lg）、发送在右；发送按钮是带字的小号矩形按钮，不再是圆形图标按钮
+    assert.match(composer, /<span class="hidden text-\[11px\] text-muted-foreground\/80 lg:inline" data-testid="chat-hint">/)
+    assert.match(composer, /<kbd class="rounded-xs border border-border bg-muted px-1\.5 py-0\.5 font-mono text-\[10px\]">Enter<\/kbd> 发送/)
+    assert.match(composer, /<kbd class="[^"]*">Shift \+ Enter<\/kbd> 换行/)
+    assert.match(composer, /<Button\s+class="ml-auto h-7 shrink-0 cursor-pointer gap-1 rounded-sm px-3 text-xs font-medium sm:px-3\.5"[\s\S]*?data-testid="chat-send"/)
+    assert.match(composer, /<Send class="size-3" \/>\s*<span>\{\{ sending \? '发送中…' : '发送' \}\}<\/span>/)
+    assert.ok(!/SendHorizontal|rounded-full/.test(composer), '圆形图标发送按钮应已去掉')
+    // 输入框占满一行（不再与按钮并排）；放在操作行之前
+    assert.ok(composer.indexOf('data-testid="chat-input"') < composer.indexOf('data-testid="chat-hint"'))
+    assert.ok(composer.indexOf('data-testid="chat-hint"') < composer.indexOf('data-testid="chat-send"'))
+    assert.match(composer, /<textarea\s+ref="area"\s+v-model="text"\s+rows="1"\s+class="block [^"]*w-full /)
+  })
+
+  it('输入框长高时把上下边框补回去、没长到上限不出滚动条（一行高的空输入框右边不能冒出一根滚动条）', () => {
+    // scrollHeight 不含边框，而盒子是 border-box：少补这两条边框，空输入框会差 2px 而冒出滚动条（#241 第四步看截图时发现，旧版同样有）
+    assert.match(composer, /const MAX_HEIGHT = 168/)
+    assert.match(composer, /const want = el\.scrollHeight \+ \(el\.offsetHeight - el\.clientHeight\)/)
+    assert.match(composer, /el\.style\.height = `\$\{Math\.min\(want, MAX_HEIGHT\)\}px`/)
+    assert.match(composer, /el\.style\.overflowY = want > MAX_HEIGHT \? 'auto' : 'hidden'/)
+    assert.ok(/<textarea[^>]*class="[^"]*\bmax-h-42\b/.test(composer), '样式上限 max-h-42（168px）要与 MAX_HEIGHT 是同一个数')
   })
 })
 

@@ -6,9 +6,11 @@ import {
   type ConfirmBoard,
   type ConfirmItem,
 } from '../api/confirms'
+import { buildSeqIndex } from '../lib/linkRefs'
+import { registerConnectHook } from '../lib/connectHooks'
 import { whenSecondaryOpen } from '../lib/secondaryGate'
 
-// 「待确认」区与时间线确认卡的数据（交流页）：当前工作流的待处理确认项、守护告警，
+// 「待确认」区与时间线确认卡的数据（交流页）：当前工作流的待处理确认项，
 // 外加最近处理过的几条（时间线里要看到「已答复 / 已忽略」的结局）。
 // 数据以服务端为准：任何写操作之后都靠 confirm_updated 事件（或这里的主动刷新）收敛；
 // 同一时刻只关心一个工作流，切换时旧数据立刻清空，晚到的旧响应按请求序号丢弃。
@@ -18,8 +20,7 @@ const HISTORY_LIMIT = 60
 function emptyBoard(): ConfirmBoard {
   return {
     items: [],
-    guard_alerts: [],
-    counts: { pending: 0, items: 0, guard_alerts: 0, by_risk: {}, by_kind: {} },
+    counts: { pending: 0, items: 0, by_risk: {}, by_kind: {} },
   }
 }
 
@@ -58,6 +59,11 @@ export const useConfirmStore = defineStore('confirms', () => {
     }
     return all.sort((a, b) => a.seq - b.seq)
   })
+  /**
+   * 时间线上的确认项按序号建的索引（正文里的 Q<N> 引用用）：整个页面共用这一份。
+   * 以前每段 Markdown 的 useLinkRefs 实例各建一份，长会话里是几百份（#186 C2a，见 lib/linkRefs.ts 的 buildSeqIndex）。
+   */
+  const timelineSeqIndex = computed(() => buildSeqIndex(timelineItems.value))
 
   function reset() {
     if (refreshTimer) {
@@ -145,6 +151,9 @@ export const useConfirmStore = defineStore('confirms', () => {
     }, 200)
   }
 
+  // 实时流连上之后补取一遍（#243）：理由与 workItems 相同——谁用到这个仓库谁才补取，没人用过的页面不实例化它、不多发请求。
+  registerConnectHook('confirms', () => onServerEvent())
+
   async function withBusy<T>(key: string, fn: () => Promise<T>): Promise<T> {
     if (busy.value.has(key)) throw new Error('正在提交，请稍候')
     busy.value = new Set(busy.value).add(key)
@@ -215,6 +224,7 @@ export const useConfirmStore = defineStore('confirms', () => {
     pending,
     pendingCount,
     timelineItems,
+    timelineSeqIndex,
     watchWorkflow,
     load,
     onServerEvent,

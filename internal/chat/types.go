@@ -70,7 +70,8 @@ const (
 )
 
 // 同一毫秒内的先后顺序（来源序）：汇报在先，随后是回复、追加、进度气泡……沿用前端 timeline.ts 的 KIND_RANK
-// （inbox < notice < capsule < task < confirm < decisions < guard），汇报与回复排在它们之前。
+// （inbox < notice < capsule < task < confirm < decisions），汇报与回复排在它们之前。
+// rankGuard 是保留位：原来的会话守护告警（#245 下线）不再出现在消息流里，但游标里带着来源序，rankSystem 不能往前挪。
 const (
 	rankReport   = 0
 	rankReply    = 1

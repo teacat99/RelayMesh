@@ -35,6 +35,14 @@ func (m PreviewMode) Valid() bool {
 	return m == PreviewAuto || m == PreviewAlways || m == PreviewNever
 }
 
+// 「指派久无人接」的阈值范围（#180 B3d）：指派派出后超过这么久还没人接取，就算「久无人接」——
+// 回执头 board: 行、任务页上「已等多久」转红、以及给用户的一次性提醒都按它算。
+const (
+	BoardStaleDefaultMinutes = 120
+	BoardStaleMinMinutes     = 30
+	BoardStaleMaxMinutes     = 24 * 60
+)
+
 const (
 	// MaxConversations 是会话级偏好条目的上限：偏好存在一个 JSON 值里，不能无限长大。
 	MaxConversations = 500
@@ -53,11 +61,50 @@ type ConvPref struct {
 	MutedUntil *time.Time `json:"muted_until,omitempty"`
 }
 
-// Prefs 是全部通知偏好。零值就是「出厂默认」：免打扰关、预览 auto、没有任何会话级设置。
+// Prefs 是全部通知偏好。零值就是「出厂默认」：免打扰关、预览 auto、没有任何会话级设置、
+// 「指派久无人接」提醒开且阈值 2 小时。
 type Prefs struct {
-	DND           bool                `json:"dnd"`
-	NtfyPreview   PreviewMode         `json:"ntfy_preview"`
-	Conversations map[string]ConvPref `json:"conversations,omitempty"`
+	DND         bool        `json:"dnd"`
+	NtfyPreview PreviewMode `json:"ntfy_preview"`
+	// BoardStaleOff 为真表示不再发「指派久无人接」的提醒（网页与 ntfy 都不发；阈值本身仍然生效）。
+	// 取反存放，是为了让「没有这个字段的旧偏好」自然落在出厂默认（提醒开）上。
+	BoardStaleOff bool `json:"board_stale_off,omitempty"`
+	// BoardStaleMinutes 是「久无人接」的阈值（分钟，30~1440）；0 = 没设置过，按默认 120。
+	// 存「用户选的值」而不是「生效的值」，这样以后调整默认值时，没改过的人跟着走，不会冻结在旧值上。
+	BoardStaleMinutes int                 `json:"board_stale_minutes,omitempty"`
+	Conversations     map[string]ConvPref `json:"conversations,omitempty"`
+}
+
+// ValidBoardStaleMinutes 报告用户提交的阈值是否可以接受：0（恢复默认）或 30~1440 分钟。
+func ValidBoardStaleMinutes(m int) bool {
+	return m == 0 || (m >= BoardStaleMinMinutes && m <= BoardStaleMaxMinutes)
+}
+
+// clampBoardStale 把存下来的阈值收进允许的范围：没设置过（0）或是负数的当作没设置，其余越界的收到边界上
+// （手写进库里的 5 分钟按 30 算，99999 按 1440 算），免得一个坏值让回执头与提醒的口径跑偏。
+func clampBoardStale(m int) int {
+	switch {
+	case m <= 0:
+		return 0
+	case m < BoardStaleMinMinutes:
+		return BoardStaleMinMinutes
+	case m > BoardStaleMaxMinutes:
+		return BoardStaleMaxMinutes
+	}
+	return m
+}
+
+// BoardStaleAfterMinutes 返回生效的「久无人接」阈值（分钟）：没设置过的按默认。
+func (p Prefs) BoardStaleAfterMinutes() int {
+	if m := clampBoardStale(p.BoardStaleMinutes); m > 0 {
+		return m
+	}
+	return BoardStaleDefaultMinutes
+}
+
+// BoardStaleAfter 返回生效的「久无人接」阈值。
+func (p Prefs) BoardStaleAfter() time.Duration {
+	return time.Duration(p.BoardStaleAfterMinutes()) * time.Minute
 }
 
 // DefaultPolicy 是会话没有显式设置时的策略：群只在被 @ 时通知，其余（1:1）全部通知。
@@ -104,7 +151,7 @@ func (p Prefs) PolicyFor(conversation string, now time.Time) Policy {
 // Normalize 返回规整后的副本（不改动接收者）：补默认预览模式；丢掉非法条目、已过期的静音、
 // 以及与默认策略相同且没有期限的冗余条目；muted 以外的策略不带期限。
 func (p Prefs) Normalize(now time.Time) Prefs {
-	out := Prefs{DND: p.DND, NtfyPreview: p.NtfyPreview}
+	out := Prefs{DND: p.DND, NtfyPreview: p.NtfyPreview, BoardStaleOff: p.BoardStaleOff, BoardStaleMinutes: clampBoardStale(p.BoardStaleMinutes)}
 	if !out.NtfyPreview.Valid() {
 		out.NtfyPreview = PreviewAuto
 	}

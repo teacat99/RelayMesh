@@ -7,7 +7,11 @@ import { useSettingsStore } from './stores/settings'
 import { installPerfProbe } from './utils/perf'
 import { installChunkFailureHandling } from './utils/chunkFailure'
 import { pruneBrowserDrafts } from './lib/localDraft'
+import { dropLegacyStorageKeys } from './lib/legacyKeys'
 import './assets/globals.css'
+
+// 已经删掉的功能留在本机存储里的开关键（旧聊天视图、预览视图的「经典」开关）：启动时清一次，选过经典的设备从此直接看预览视图（#166）
+dropLegacyStorageKeys()
 
 const app = createApp(App)
 const pinia = createPinia()

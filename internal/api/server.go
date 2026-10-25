@@ -31,7 +31,10 @@ type Server struct {
 	terminal        *terminal.Hub // 初始化失败时为 nil（终端功能整体不可用）
 	terminalLimiter *RateLimiter
 	ntfy            *ntfy.Notifier
-	notifier        *gateNotifier // 统一通知闸的接线层（见 notify_gate.go）
+	notifier        *gateNotifier     // 统一通知闸的接线层（见 notify_gate.go）
+	exceptions      *exceptionWatcher // 「异常」推送的发现端（见 ntfy_exceptions.go）
+	boardRemind     *boardReminder    // 「指派久无人接」一次性提醒的发现端（见 board_remind.go）
+	branchEsc       *branchEscalator  // 分支请示超时升级的发现端（见 branch_escalate.go）
 
 	// 任务清单的后台整理（见 work_items_maintenance.go）
 	workMaintMu     sync.Mutex
@@ -94,7 +97,13 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 	auth := NewAuthHandler(cfg, st, nil)
 	handler := NewAPIHandler(cfg, st, mcpServer, broker)
 	handler.SetNtfy(ntfyNotifier)
+	handler.SetAskNotifier(gateNotify)
 	terminalHub, terminalLimiter := newTerminalHub(cfg, st, auth)
+
+	// 「异常」推送（#235）：Agent 出错 / 卡住、主机掉线由后台巡检发现；安全告警由审计与登录锁定的挂钩送来。
+	// 默认全部不推送——设置页「各类消息的优先级」里逐类打开之后才会有推送，没打开的类一次库都不查。
+	exceptions := newExceptionWatcher(ntfyNotifier, st, terminalHub)
+	auth.SetLoginLockedHook(exceptions.LoginLockedHook())
 
 	var oauthSvc *oauth.Service
 	if !cfg.OAuthOff {
@@ -113,11 +122,10 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 	}
 	if terminalHub != nil {
 		mcpServer.SetTerminalExecutor(terminalHub.Executor())
-		mcpServer.SetTerminalGuardHub(terminalHub)
 		mcpServer.SetPresetRunner(presetRunner{hub: terminalHub})
 		handler.SetTerminal(terminalHub)
 		terminalHub.SetRunEndHook(gateNotify.RunEndHook())
-		terminalHub.SetGuardHook(gateNotify.GuardHook())
+		terminalHub.SetSecurityHook(exceptions.SecurityHook())
 		terminalHub.SetAutoResumeHook(gateNotify.AutoResumeHook())
 		gateNotify.broadcast = broker.Broadcast
 		terminalHub.SetScreenHook(gateNotify.ScreenHook())
@@ -160,6 +168,12 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		}
 		c.Next()
 	})
+
+	// 前端产物的 Brotli 预压缩（#186）：浏览器接受 br 时，带哈希的 /assets 产物直接发构建时压好的 .br（比动态 gzip 小约 19%、不占 CPU）。
+	// 必须排在 Gzip 之前：命中的请求到这里结束，不会再被二次压缩；没命中的原样往下走。
+	if staticFS != nil {
+		engine.Use(PrecompressedAssets(staticFS))
+	}
 
 	// Gzip 动态传输压缩中间件（大幅缩减弱网/小带宽下的 JSON 传输体积，跳过 SSE 实时流）
 	engine.Use(GzipMiddleware())
@@ -241,6 +255,18 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		// 网页手动新建会话：占位会话 + 启动提示词（#174）
 		v1.POST("/workflows", handler.CreateWorkflow)
 
+		// 分支会话（#236）：全部关系、会话页的分支消息流、开放范围与抄送设置、结束分支
+		v1.GET("/branches", handler.ListBranches)
+		v1.GET("/workflows/:workflow_id/branch-feed", handler.GetBranchFeed)
+		v1.PUT("/workflows/:workflow_id/branch", handler.UpdateBranch)
+		v1.POST("/workflows/:workflow_id/branch/close", handler.CloseBranch)
+		// 会话参数（#236 P3）：主会话改过的参数记录与用户撤销；放宽授权要终端解锁（见 branch_params.go）
+		v1.GET("/workflows/:workflow_id/branch/params-events", handler.ListBranchParamEvents)
+		v1.POST("/workflows/:workflow_id/branch/params-events/:event_id/revert", handler.RevertBranchParamEvent)
+		// 决策路由（#236 P2）：升级时限与 L2 兜底开关
+		v1.GET("/branch/prefs", handler.GetBranchPrefs)
+		v1.PUT("/branch/prefs", handler.UpdateBranchPrefs)
+
 		// Queued & Appended Feedback (支持无交互期间提前追加留言与秒回直取)
 		v1.GET("/workflows/:workflow_id/sessions", handler.GetWorkflowSessions)
 		v1.GET("/workflows/:workflow_id/sessions/bodies", handler.GetWorkflowSessionBodies)
@@ -277,7 +303,14 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		// 异步对话模式（#42）：按工作流开关 + 全局的授权档位
 		v1.GET("/workflows/:workflow_id/async-mode", handler.GetAsyncMode)
 		v1.PUT("/workflows/:workflow_id/async-mode", handler.UpdateAsyncMode)
+		v1.POST("/workflows/:workflow_id/async-mode/release-gate", handler.ReleaseGate)
 		v1.POST("/workflows/:workflow_id/reply-window", handler.ReplyWindow)
+		v1.GET("/workflows/:workflow_id/prompts", handler.GetWorkflowPrompts)
+		v1.PUT("/workflows/:workflow_id/prompts", handler.UpdateWorkflowPrompts)
+		v1.POST("/workflows/:workflow_id/prompts/preview", handler.PreviewWorkflowPrompts)
+		v1.POST("/workflows/:workflow_id/prompts/restore", handler.RestoreWorkflowPrompts)
+		v1.GET("/wake-prompts/defaults", handler.GetWakePromptDefaults)
+		v1.POST("/wake-prompts/preview", handler.PreviewWakePrompt)
 		v1.GET("/auth-profiles", handler.ListAuthProfiles)
 		v1.POST("/auth-profiles", handler.CreateAuthProfile)
 		v1.PUT("/auth-profiles/:id", handler.UpdateAuthProfile)
@@ -411,6 +444,7 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		v1.GET("/work-items", handler.ListWorkItems)
 		v1.POST("/work-items", handler.CreateWorkItem)
 		v1.GET("/work-items/assignees", handler.ListWorkItemAssignees)
+		v1.GET("/work-items/by-seq", handler.GetWorkItemBySeq)
 		v1.GET("/work-items/:id", handler.GetWorkItem)
 		v1.GET("/workflows/:workflow_id/work-updates", handler.GetWorkflowUpdates)
 
@@ -498,6 +532,9 @@ func NewServer(cfg *config.Config, st *store.Store, staticFS fs.FS) *Server {
 		terminalLimiter: terminalLimiter,
 		ntfy:            ntfyNotifier,
 		notifier:        gateNotify,
+		exceptions:      exceptions,
+		boardRemind:     newBoardReminder(st, gateNotify, cfg.BoardStaleUnitMs),
+		branchEsc:       newBranchEscalator(st, cfg.BranchEscalateUnitMs, handler.notifyEscalatedAsks),
 	}
 }
 
@@ -508,6 +545,11 @@ func (s *Server) Start() {
 	}
 	s.startWorkItemMaintenance()
 	s.startDraftImageMaintenance()
+	if s.exceptions != nil {
+		s.exceptions.start()
+	}
+	s.boardRemind.start()
+	s.branchEsc.start()
 }
 
 // Shutdown 优雅关闭被 HTTP 服务器「劫持」的长连接（终端 WebSocket）：http.Server.Shutdown 不会处理它们，
@@ -515,6 +557,11 @@ func (s *Server) Start() {
 func (s *Server) Shutdown(ctx context.Context) {
 	s.stopWorkItemMaintenance()
 	s.stopDraftImageMaintenance()
+	if s.exceptions != nil {
+		s.exceptions.stop()
+	}
+	s.boardRemind.stop()
+	s.branchEsc.stop()
 	s.ntfy.Stop()
 	if s.broker != nil {
 		s.broker.Close()

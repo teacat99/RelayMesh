@@ -44,11 +44,11 @@ describe('预览视图阶段 E-a：智能体正文里的 Artifact 引用卡', ()
     }
   })
 
-  it('您自己写的话（回复 / 追加）不抽取记号；经典视图与共享叶子不引用预览目录里的新组件', () => {
+  it('您自己写的话（回复 / 追加）不抽取记号；共享叶子不引用预览目录里的新组件', () => {
     for (const f of ['PreviewReplyCard.vue', 'PreviewInboxCard.vue']) {
       assert.ok(!/PreviewMarkdown|extractArtifactRefs/.test(read(PV + f)), `${f} 不该抽取 Artifact 记号`)
     }
-    for (const rel of ['components/feedback/FeedbackMessageList.vue', 'components/confirms/ConfirmCard.vue', 'components/confirms/ConfirmTimelineCard.vue', 'components/MarkdownRenderer.vue']) {
+    for (const rel of ['components/confirms/ConfirmCard.vue', 'components/confirms/ConfirmTimelineCard.vue', 'components/MarkdownRenderer.vue']) {
       const src = read(rel)
       assert.ok(!/PreviewMarkdown|PreviewDateSeparator/.test(src), `${rel} 不该引用预览视图的新组件`)
     }
@@ -113,9 +113,5 @@ describe('预览视图阶段 E-b：日期分隔', () => {
     assert.match(body, /daySeparators\(items, new Date\(\)\)/, '日期标签用当下时间')
     assert.ok(!/inboxNow/.test(body), 'dayMarks 里不能直接读 inboxNow')
     assert.match(script, /const todayKey = computed\(\(\) => \{\s*const d = new Date\(inboxNow\.value\)\s*return `\$\{d\.getFullYear\(\)\}-\$\{d\.getMonth\(\)\}-\$\{d\.getDate\(\)\}`\s*\}\)/, 'todayKey 由低频时钟推出日历日')
-  })
-
-  it('经典列表没有日期分隔（只改预览）', () => {
-    assert.ok(!/date-separator|daySeparators/.test(read('components/feedback/FeedbackMessageList.vue')))
   })
 })

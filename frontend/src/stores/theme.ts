@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
+import { applyDarkClass, browserScheduler, createTransitionSuppressor } from '../lib/themeSwitch'
 
 export type ThemeMode = 'light' | 'dark' | 'auto'
 
@@ -31,14 +32,19 @@ export const useThemeStore = defineStore('theme', () => {
     return systemDark.value
   })
 
+  // 切主题的那一刻临时压住全局颜色过渡（#185）：不压的话每个元素都建过渡动画，2.5 万元素的长会话要同步卡 4 秒多。
+  // 首次应用（刷新页面）没有旧样式可过渡，不用压；之后明暗真的变了才压（原因与做法见 lib/themeSwitch.ts）。
+  let suppress: (() => void) | null = null
+  let appliedOnce = false
+
   function apply() {
     if (typeof document === 'undefined') return
     const root = document.documentElement
-    if (isDark.value) {
-      root.classList.add('dark')
-    } else {
-      root.classList.remove('dark')
+    if (!suppress && typeof window !== 'undefined') {
+      suppress = createTransitionSuppressor(root.classList, browserScheduler(window))
     }
+    applyDarkClass(root.classList, isDark.value, appliedOnce && suppress ? suppress : undefined)
+    appliedOnce = true
     // 同步更新浏览器顶部地址栏/状态栏 theme-color
     document.querySelectorAll('meta[name="theme-color"]').forEach(meta => {
       meta.setAttribute('content', isDark.value ? '#0f1216' : '#f6f8fb')

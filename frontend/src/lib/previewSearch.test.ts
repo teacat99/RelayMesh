@@ -136,6 +136,19 @@ describe('hitKindLabel / hitWhen / SEARCH_KINDS', () => {
     assert.equal(hitKindLabel({ kind: 'text', sender: { kind: 'agent', name: 'x' }, source: undefined as unknown as ChatMessage['source'] }), '事件')
   })
 
+  it('群聊消息（chat_message）：小标签写「谁说的」——您自己「您」（与消息卡一致）、成员写名字（空名字写「成员」）', () => {
+    const g = (sender: 'agent' | 'human' | 'system', name: string) => ({
+      kind: 'text' as ChatMessage['kind'],
+      sender: { kind: sender, name },
+      source: { type: 'chat_message', id: '7' },
+    })
+    assert.equal(hitKindLabel(g('human', '你')), '您')
+    assert.equal(hitKindLabel(g('agent', 'RelayMesh-主线')), 'RelayMesh-主线')
+    assert.equal(hitKindLabel(g('agent', '  ')), '成员')
+    // 不会被工作流会话那套标签（汇报 / 提问 / 事件…）误标：来源不同，标签不同
+    assert.notEqual(hitKindLabel(g('agent', 'x')), '事件')
+  })
+
   it('时间：今天 / 昨天 / 日期 + 时分；坏时间返回空串', () => {
     const now = new Date(2026, 9, 18, 12, 0)
     const at = (d: number, h: number, mi: number) => ({ sent_at: new Date(2026, 9, d, h, mi).toISOString() })

@@ -20,12 +20,15 @@ const (
 	KindBlockingFeedback Kind = "blocking_feedback" // interactive_feedback 阻塞等你
 	KindMention          Kind = "mention"           // 群里 @你 / @all（N-2：@all 也穿透）
 	KindApprovalWaiting  Kind = "approval_waiting"  // 托管终端等你批准
-	KindGuardAlert       Kind = "guard_alert"       // 卡住 / 出错 / 唤醒预算耗尽
+	KindGuardAlert       Kind = "guard_alert"       // 不再自动续跑（#151）/ 群聊过密；取值沿用历史名（原「终端会话守护告警」）
 
 	// 受约束类：免打扰与会话策略都能让它安静。
 	KindAgentText Kind = "agent_text" // Agent 主动发的文本：notice、chat send、群文本
 	KindAskCard   Kind = "ask_card"   // async_ask 带默认值的提问 / 授权卡
 	KindRunEnd    Kind = "run_end"    // ExecMesh 运行结束（只有 ntfy 通道）
+	// KindBoardStale 是共享任务板上「指派派出后很久没人接」的一次性提醒（#180 B3d）：给用户看的，不属于任何会话。
+	// 受免打扰约束；ntfy 通道默认不推（在「各类消息的优先级」里打开才推）。
+	KindBoardStale Kind = "board_stale"
 
 	// 永不通知：任务 / 进展更新与系统行只在界面里体现。
 	KindTaskUpdate  Kind = "task_update"
@@ -48,6 +51,7 @@ var kindSpecs = map[Kind]kindSpec{
 	KindAgentText:        {browser: true, ntfy: true},
 	KindAskCard:          {browser: true, ntfy: true},
 	KindRunEnd:           {ntfy: true},
+	KindBoardStale:       {browser: true, ntfy: true},
 	KindTaskUpdate:       {never: true},
 	KindSystemEvent:      {never: true},
 }

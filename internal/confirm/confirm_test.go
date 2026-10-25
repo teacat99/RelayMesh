@@ -283,3 +283,55 @@ func TestExportDecisionRowsCustomAnswer(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatMainAnswerLine_MarksNotTheUser(t *testing.T) {
+	it := itemWithOptions(7, "选哪个", []model.ConfirmOption{{ID: "a", Label: "甲"}, {ID: "b", Label: "乙"}})
+	line := FormatMainAnswerLine(it, []string{"b"}, "理由", "")
+	if !strings.HasPrefix(line, "【主会话代为定夺，不是用户本人的答复】") || !strings.Contains(line, "Q7「选哪个」已答复：选 b（乙）") || !strings.HasSuffix(line, "；备注：理由") {
+		t.Errorf("代答文案: %q", line)
+	}
+}
+
+func TestFormatRoutedAskLine(t *testing.T) {
+	o := []model.ConfirmOption{{ID: "a", Label: "甲", Recommended: true, Detail: "快"}, {ID: "b", Label: "乙"}}
+	raw, _ := json.Marshal(o)
+	it := &model.ConfirmItem{Seq: 12, Title: "要不要迁移", Body: "第一行\n第二行", OptionsJSON: string(raw), Risk: "L1", Multi: true, AllowNote: true, Kind: model.ConfirmKindAsk}
+	got := FormatRoutedAskLine("wf-b1", "分支一", it, 30, false)
+	for _, want := range []string{
+		"分支「分支一」（wf-b1）有一项请示在等你定夺：Q12「要不要迁移」（风险 L1，多选，可附备注）",
+		"说明：第一行\n第二行",
+		"选项：a. 甲（快） [推荐]；b. 乙",
+		`branch(action:"answer", branch:"wf-b1", ref:"Q12", options:["a"])`,
+		`branch(action:"escalate", branch:"wf-b1", ref:"Q12", note:`,
+		"超过 30 分钟没有答复会自动转交给用户",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("缺 %q:\n%s", want, got)
+		}
+	}
+	// 分支没有标题时只写编号；升级时限为 0 不写那一句
+	bare := FormatRoutedAskLine("wf-b1", "", it, 0, false)
+	if !strings.Contains(bare, "分支（wf-b1）有一项请示") || strings.Contains(bare, "自动转交") {
+		t.Errorf("无标题 / 无时限: %s", bare)
+	}
+	// 计划确认写明绑定任务
+	plan := &model.ConfirmItem{Seq: 3, Kind: model.ConfirmKindPlan, TaskSeq: 9, Title: "计划", OptionsJSON: string(raw), Risk: "L1"}
+	if p := FormatRoutedAskLine("wf-b1", "x", plan, 30, false); !strings.Contains(p, "计划确认·任务 #9") {
+		t.Errorf("计划确认应写任务号: %s", p)
+	}
+	// 说明太长：截断并注明
+	long := &model.ConfirmItem{Seq: 4, Title: "长", Body: strings.Repeat("长", routedAskBodyRunes+50), OptionsJSON: string(raw), Risk: "L1"}
+	if l := FormatRoutedAskLine("wf-b1", "x", long, 30, false); !strings.Contains(l, "说明较长，已截断") || strings.Contains(l, strings.Repeat("长", routedAskBodyRunes+1)) {
+		t.Errorf("长说明应截断: %d", len(l))
+	}
+	// L2 + 兜底开：只能转交，不再给 answer 写法
+	l2 := &model.ConfirmItem{Seq: 5, Title: "不可逆", OptionsJSON: string(raw), Risk: "L2"}
+	g := FormatRoutedAskLine("wf-b1", "x", l2, 30, true)
+	if !strings.Contains(g, "兜底开关") || strings.Contains(g, `branch(action:"answer"`) || !strings.Contains(g, `branch(action:"escalate"`) {
+		t.Errorf("L2 兜底: %s", g)
+	}
+	// L2 + 兜底关：和普通请示一样可以答
+	if open := FormatRoutedAskLine("wf-b1", "x", l2, 30, false); !strings.Contains(open, `branch(action:"answer"`) {
+		t.Errorf("兜底关时 L2 应可答: %s", open)
+	}
+}

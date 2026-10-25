@@ -55,10 +55,16 @@ type Config struct {
 	AutoOpenBrowser          bool
 	Version                  string
 
-	// 以下三项只供实验与端到端测试（不写进部署模板）：把会话守护 / 自动续跑的检查间隔、自动续跑的退避与「续跑成功」的判定时长缩短到秒级，免得真等几分钟。生产不要设。
-	TerminalGuardTickSec         int    // RELAYMESH_TERMINAL_GUARD_TICK_SEC：守护与自动续跑的检查间隔（秒，默认 60）
+	// 以下三项只供实验与端到端测试（不写进部署模板）：把自动续跑的检查间隔、自动续跑的退避与「续跑成功」的判定时长缩短到秒级，免得真等几分钟。生产不要设。
+	TerminalGuardTickSec         int    // RELAYMESH_TERMINAL_GUARD_TICK_SEC：自动续跑的检查间隔（秒，默认 60；名字是历史遗留）
 	TerminalAutoResumeBackoffSec string // RELAYMESH_TERMINAL_AUTORESUME_BACKOFF_SEC：自动续跑的退避（秒，逗号分隔，默认 300,1200,3600）
 	TerminalAutoResumeOKSec      int    // RELAYMESH_TERMINAL_AUTORESUME_OK_SEC：自动续跑「成功」的判定时长（秒；默认按预设里的分钟数，10 分钟）
+
+	// 同样只供实验与端到端测试：「指派久无人接」提醒里的「一分钟」缩短到这么多毫秒（阈值与扫描间隔都按它换算），生产不要设。
+	BoardStaleUnitMs int // RELAYMESH_BOARD_STALE_UNIT_MS：默认 0 = 真实的一分钟
+
+	// 同样只供实验与端到端测试：分支请示「超时升级」里的「一分钟」缩短到这么多毫秒（时限与扫描间隔都按它换算），生产不要设。
+	BranchEscalateUnitMs int // RELAYMESH_BRANCH_ESCALATE_UNIT_MS：默认 0 = 真实的一分钟
 }
 
 func Load() *Config {
@@ -142,6 +148,10 @@ func LoadWithMode(mode string) *Config {
 		TerminalGuardTickSec:         getEnvInt("RELAYMESH_TERMINAL_GUARD_TICK_SEC", 0),
 		TerminalAutoResumeBackoffSec: getEnv("RELAYMESH_TERMINAL_AUTORESUME_BACKOFF_SEC", ""),
 		TerminalAutoResumeOKSec:      getEnvInt("RELAYMESH_TERMINAL_AUTORESUME_OK_SEC", 0),
+
+		BoardStaleUnitMs: getEnvInt("RELAYMESH_BOARD_STALE_UNIT_MS", 0),
+
+		BranchEscalateUnitMs: getEnvInt("RELAYMESH_BRANCH_ESCALATE_UNIT_MS", 0),
 	}
 	return cfg
 }

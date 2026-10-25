@@ -82,21 +82,47 @@ func BuildRequestMessage(cfg Config, in RequestInfo, merged int) Message {
 	return Message{
 		Title:    pushTitle,
 		Body:     strings.Join(lines, "\n"),
-		Priority: cfg.Priority,
+		Priority: cfg.msgPriority(KindRequest),
 		Tags:     []string{"speech_balloon"},
 		Click:    cfg.ClickURL,
 	}
 }
 
-// BuildTestMessage 生成「测试推送」的内容。
+// BuildTestMessage 生成「测试推送」的内容：只验证服务地址、主题与认证，用默认优先级。
 func BuildTestMessage(cfg Config, now time.Time) Message {
 	return Message{
 		Title:    "RelayMesh 测试推送",
 		Body:     fmt.Sprintf("收到这条消息，说明服务地址、主题与认证都配置正确。（%s）", now.Format("15:04:05")),
-		Priority: cfg.Priority,
+		Priority: cfg.defaultPriority(),
 		Tags:     []string{"white_check_mark"},
 		Click:    cfg.ClickURL,
 	}
+}
+
+// BuildKindTestMessage 生成「试发这一类」的测试推送：用这一类此刻要用的优先级发，正文里写明是哪一类、
+// 用了几级——让人在手机上直接看到这一级是什么效果，再回来决定要不要改。kind 不认识时退回普通测试推送。
+// 返回值的第二项是实际用的优先级（界面据此告诉用户「已按 N 级发出」）。
+func BuildKindTestMessage(cfg Config, kind string, now time.Time) (Message, int) {
+	info, ok := kindIndex[kind]
+	if !ok {
+		m := BuildTestMessage(cfg, now)
+		return m, m.Priority
+	}
+	p := cfg.TestPriorityFor(kind)
+	lines := []string{
+		fmt.Sprintf("这是「%s」这一类消息的试发，用的是 %d 级（%s）。", info.Label, p, PriorityName(p)),
+	}
+	if _, on := cfg.PriorityFor(kind); !on {
+		lines = append(lines, "这一类现在设成了不推送，实际发生时不会收到；这条只是让你看看打开后的效果。")
+	}
+	lines = append(lines, fmt.Sprintf("（%s）", now.Format("15:04:05")))
+	return Message{
+		Title:    "RelayMesh 试发 · " + info.Label,
+		Body:     strings.Join(lines, "\n"),
+		Priority: p,
+		Tags:     []string{"white_check_mark"},
+		Click:    cfg.ClickURL,
+	}, p
 }
 
 // mergedNote 说明有几条通知因限流被合并了。被合并的既可能是请求、也可能是运行结束，所以统一说「通知」。

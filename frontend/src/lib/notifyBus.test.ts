@@ -120,8 +120,19 @@ describe('presentNotice', () => {
     assert.equal(presentNotice(payload({ kind: 'ask_card', preview: '' })).body, '有新的待确认提问')
     assert.deepEqual(presentNotice(payload({ kind: 'mention', preview: '' })), { title: 'RelayMesh · @你', body: '有人 @ 了你' })
     assert.deepEqual(presentNotice(payload({ kind: 'approval_waiting', preview: '' })), { title: 'RelayMesh · 待批准', body: '终端在等你批准' })
-    assert.deepEqual(presentNotice(payload({ kind: 'guard_alert', title: '夜间回归', preview: '意外结束：出错中断' })), { title: '终端守护 · 夜间回归', body: '意外结束：出错中断' })
+    assert.deepEqual(presentNotice(payload({ kind: 'guard_alert', title: '夜间回归', preview: '不再自动续跑：预算用完' })), { title: '系统告警 · 夜间回归', body: '不再自动续跑：预算用完' })
     assert.deepEqual(presentNotice(payload({ kind: 'something_new', preview: '' })), { title: 'RelayMesh', body: '有新通知' })
+  })
+
+  it('board_stale（指派久无人接）：标题固定，正文是服务端写好的那句；没有正文时有兜底', () => {
+    const stale = payload({ kind: 'board_stale', conversation: '', id: 'bst:1', title: '指派久无人接', preview: '#12「接口改造」派给 后端组，已超过 2 小时没人接', deep_link: '/work/wf-b?task=12' })
+    assert.deepEqual(presentNotice(stale), { title: '指派久无人接', body: '#12「接口改造」派给 后端组，已超过 2 小时没人接' })
+    assert.deepEqual(presentNotice({ ...stale, title: '', preview: '' }), { title: '指派久无人接', body: '有指派很久没人接' })
+    // 不属于任何会话、不穿透：每条独立的系统通知，不会被并进某个会话的「N 条新消息」，也不会被前台抑制
+    assert.equal(notificationTag(stale), 'evt:bst:1')
+    assert.equal(shouldSuppress(stale, [tab()], NOW), false)
+    // 深链是站内的任务页地址，多个指派时带「待接取」筛选
+    assert.equal(safeDeepLink('/work/wf-b?quick=offered'), '/work/wf-b?quick=offered')
   })
 })
 

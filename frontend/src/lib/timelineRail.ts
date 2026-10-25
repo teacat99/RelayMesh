@@ -16,16 +16,19 @@
 // 读出位置与属性（parseRailItem），交给 layoutRail 算出刻度。「还没处理」的状态直接来自数据
 // （ConfirmItem.status === 'pending'、FeedbackSession.status === 'pending'），不靠颜色或文字猜。
 
+import type { ChatMessage } from '../api/conversations'
 import type { FeedbackSession } from '../api/types'
 import { firstLinePreview } from './eventRow'
 import { KIND_LABEL, confirmRef } from './confirms'
+import { branchPreview } from './branch'
+import { senderIdentity } from './groupCard'
 import { needsAnswer, type TimelineBlock, type TimelineEntry } from './timeline'
 import { STATUS_WORD } from './statusWords'
 import type { CardTone } from './messageCard'
 import { formatStackParts, parseStackParts, stackTypeCounts, stackTypesText, type StackTypeCount } from './stackTypes'
 
-/** 轨上条目的种类。 */
-export const RAIL_KINDS = ['plan', 'ask', 'decisions', 'round', 'reply', 'append', 'task', 'stack', 'notice', 'capsule', 'guard'] as const
+/** 轨上条目的种类。member = 群聊里别的成员说的话（#241；群聊页用同一条轨，条目是群消息）。 */
+export const RAIL_KINDS = ['plan', 'ask', 'decisions', 'round', 'reply', 'append', 'task', 'stack', 'notice', 'capsule', 'branch', 'member'] as const
 export type RailKind = (typeof RAIL_KINDS)[number]
 
 /** pending = 还要您处理（等回复 / 待答复 / 待决策 / 正在告警）；done = 其余。 */
@@ -33,7 +36,7 @@ export type RailState = 'pending' | 'done'
 
 /**
  * 刻度的色调 = 这一类卡片的色调（lib/messageCard 的 CardTone）。追加 #265：所有刻度都按卡片类型着色——
- * 汇报 黑灰（zinc）/ 进度 蓝（sky）/ 提问 黄（amber）/ 计划 红 / 文档决策 紫 / 任务与恢复胶囊 灰蓝（slate）/ 守护告警 黄；
+ * 汇报 黑灰（zinc）/ 进度 蓝（sky）/ 提问 黄（amber）/ 计划 红 / 文档决策 紫 / 任务与恢复胶囊 灰蓝（slate）；
  * 具体颜色由刻度元素上的 CARD_TONE_CLASS[tone] 定义的 --card-tone 变量给出（亮 / 暗各一套）。
  */
 export type RailTone = CardTone
@@ -64,7 +67,7 @@ export const RAIL_DIM_OPACITY = 0.55
 
 /**
  * 刻度线长度只有两档（追加 #248 / Q24，#160）：**需要您交互的画长的，默认画短的**。
- * 长 = 还要您处理的（待处理的计划 / 提问 / 文档决策、等回复的汇报、守护告警）；短 = 其余（已处理的、任务、摞、通知、胶囊）。
+ * 长 = 还要您处理的（待处理的计划 / 提问 / 文档决策、等回复的汇报）；短 = 其余（已处理的、任务、摞、通知、胶囊）。
  * 长度只表达「要不要您动手」，类型靠颜色与悬停提示——摞的刻度另按内含类型分段着色（RailMeta.parts）。
  */
 export const RAIL_LEN_LONG = 24
@@ -74,21 +77,25 @@ export const RAIL_LEN_SHORT = 14
  * 轨上画什么、画成什么样：种类 → 状态 → 样式；**查不到的格子就是不画**。
  * 规则（追加 #225 澄清）：**只画非用户消息的类型**——您自己的话（确认回复、追加）不上轨，其余都上。
  * 颜色（追加 #265）：**一律按卡片类型**，不按状态：
- *   计划确认 红 / 智能体提问 黄 / 文档决策 紫 / AI 方案汇报轮次 黑灰 / 守护告警 黄 / 进度通知 蓝 / 任务进展与恢复胶囊 灰蓝；
+ *   计划确认 红 / 智能体提问 黄 / 文档决策 紫 / AI 方案汇报轮次 黑灰 / 进度通知 蓝 / 任务进展与恢复胶囊 灰蓝；
  *   折叠的卡片摞按内含类型分段着色（RailMeta.parts），没有 parts 时（旧数据）退回灰蓝。
  * 状态用别的方式表达：还要您处理的 长 24px · 粗 4px（计划与等回复的汇报再加脉冲）；已处理的 短 14px · 细 2px · 同色变淡；
- * 本来就不分「待处理 / 已处理」的种类（任务、摞、通知、胶囊）两个状态用同一格，不变淡；守护告警描述的是「现在」，两个状态长度相同。
+ * 本来就不分「待处理 / 已处理」的种类（任务、摞、通知、胶囊）两个状态用同一格，不变淡。
  */
 export const RAIL_STYLE: { readonly [K in RailKind]?: { readonly [S in RailState]?: RailStyle } } = {
   plan: { pending: S(RAIL_LEN_LONG, 'red', 4, { pulse: true }), done: S(RAIL_LEN_SHORT, 'red', 2, { dim: true }) },
   round: { pending: S(RAIL_LEN_LONG, 'zinc', 4, { pulse: true }), done: S(RAIL_LEN_SHORT, 'zinc', 2, { dim: true }) },
   ask: { pending: S(RAIL_LEN_LONG, 'amber', 4), done: S(RAIL_LEN_SHORT, 'amber', 2, { dim: true }) },
   decisions: { pending: S(RAIL_LEN_LONG, 'violet', 4), done: S(RAIL_LEN_SHORT, 'violet', 2, { dim: true }) },
-  guard: { pending: S(RAIL_LEN_LONG, 'amber', 4), done: S(RAIL_LEN_LONG, 'amber', 2) },
   task: { pending: S(RAIL_LEN_SHORT, 'slate', 2), done: S(RAIL_LEN_SHORT, 'slate', 2) },
   stack: { pending: S(RAIL_LEN_SHORT, 'slate', 2), done: S(RAIL_LEN_SHORT, 'slate', 2) },
   notice: { pending: S(RAIL_LEN_SHORT, 'sky', 2), done: S(RAIL_LEN_SHORT, 'sky', 2) },
   capsule: { pending: S(RAIL_LEN_SHORT, 'slate', 2), done: S(RAIL_LEN_SHORT, 'slate', 2) },
+  // 分支会话（#236）：主会话 ↔ 分支的智能体消息与分支建立 / 结束；不分「待处理 / 已处理」，两个状态用同一格；
+  // 色调取具名卡（统一消息卡的 member 类型）的 zinc——「刻度色 = 这一类卡片的色调」这条规则不破例
+  branch: { pending: S(RAIL_LEN_SHORT, 'zinc', 2), done: S(RAIL_LEN_SHORT, 'zinc', 2) },
+  // 群聊里别的成员说的话（#241）：群里的话没有「待处理 / 已处理」之分，两个状态用同一格；色调同样取具名卡（member 类型）的 zinc
+  member: { pending: S(RAIL_LEN_SHORT, 'zinc', 2), done: S(RAIL_LEN_SHORT, 'zinc', 2) },
   // reply（您的确认回复）、append（您的追加）：您自己的话，不上轨
 }
 
@@ -112,7 +119,8 @@ const KIND_NAME: Record<RailKind, string> = {
   stack: '卡片摞',
   notice: '进度通知',
   capsule: '恢复胶囊',
-  guard: '守护告警',
+  branch: '分支消息',
+  member: '成员发言',
 }
 
 // 状态名取预览视图的状态词汇表（lib/statusWords，阶段 D2）：要您动手的都叫「待您处理」，处理完的叫「已处理」
@@ -193,10 +201,14 @@ export function railMetaOfEntry(e: TimelineEntry): RailMeta {
       }
     case 'decisions':
       return { id: e.key, kind: 'decisions', state: e.group.pending > 0 ? 'pending' : 'done', title: e.group.docTitle, at: e.at }
-    case 'guard':
-      return { id: e.key, kind: 'guard', state: 'pending', title: e.alert.name || e.alert.preset_id, at: e.at }
     case 'capsule':
       return { id: e.key, kind: 'capsule', state: 'done', title: oneLine(e.capsule.objective, 48) || `检查点 r${e.capsule.revision}`, at: e.at }
+    case 'branch':
+      // 您在分支页里说、被抄送到主会话的话是您自己的话（和「追加」同理不上轨）；其余——智能体之间的话、分支建立 / 结束——上轨
+      if (e.item.kind === 'message' && e.item.actor.kind === 'human') {
+        return { id: e.key, kind: 'append', state: 'done', title: oneLine(e.item.text, 48) || '分支里的话', at: e.at }
+      }
+      return { id: e.key, kind: 'branch', state: 'done', title: branchPreview(e.item), at: e.at }
   }
 }
 
@@ -231,6 +243,18 @@ export function railMetaOfRound(s: Pick<FeedbackSession, 'session_id' | 'status'
 /** 您对某一轮的确认回复；at 是您提交回复的时刻（取不到时留空，悬停提示里就不显示时间）。 */
 export function railMetaOfReply(s: Pick<FeedbackSession, 'session_id' | 'response_text'>, at: string | undefined): RailMeta {
   return { id: `reply:${s.session_id}`, kind: 'reply', state: 'done', title: oneLine(s.response_text, 48) || '已确认', at: at ?? '', ref: s.session_id }
+}
+
+/**
+ * 群聊里的一条消息 → 轨上条目（#241）。只画「别的成员说的话」：您自己的话不上轨（与会话页「您自己的话不上轨」同一条规则）；
+ * 系统行、确认卡、决策卡、任务进展不走群消息卡（由事件行画），这一步也不上轨。
+ * 标题把发送者名字放在前面：悬停提示里最要紧的是「谁说的」，其次才是说了什么；名字与卡片头部是同一个（senderIdentity，没有名字时回退到工作流编号）。
+ */
+export function railMetaOfGroupMessage(m: Pick<ChatMessage, 'id' | 'sender' | 'text' | 'sent_at'>): RailMeta | null {
+  if (m.sender?.kind !== 'agent') return null
+  const who = senderIdentity(m.sender).name
+  const line = oneLine(m.text, 48)
+  return { id: m.id, kind: 'member', state: 'done', title: line ? `${who}：${line}` : who, at: m.sent_at }
 }
 
 /** RailMeta → 要绑到 DOM 根节点上的 data-* 属性（模板里 v-bind 它）。 */

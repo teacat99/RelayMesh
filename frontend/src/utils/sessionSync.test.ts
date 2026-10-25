@@ -11,6 +11,7 @@ import {
   isCacheFresh,
   isSameSessionData,
   isStaleIncoming,
+  isWorkflowTableBehind,
   mergeFetchedList,
   mergeSessionPatch,
   shouldFollowNewPending,
@@ -84,6 +85,36 @@ describe('isStaleIncoming', () => {
     const newer = sess('a', '2026-09-30T22:50:45.000000001+08:00')
     assert.equal(isStaleIncoming(newer, older), true)
     assert.equal(isStaleIncoming(older, newer), false)
+  })
+})
+
+describe('isWorkflowTableBehind（首次连上时核对整张会话表，#243）', () => {
+  it('列表里有整表没有的行：落后（智能体在实时流连上之前接入，新的一轮只在列表里）', () => {
+    assert.equal(isWorkflowTableBehind([sess('a', T1)], [sess('a', T1), sess('b', T2)]), true)
+  })
+
+  it('某一行比整表里的新：落后（同一轮在缺口里变了状态）', () => {
+    assert.equal(isWorkflowTableBehind([sess('a', T1)], [sess('a', T2)]), true)
+  })
+
+  it('一致或整表更新：不算落后（常态，不该多发请求）', () => {
+    assert.equal(isWorkflowTableBehind([sess('a', T2)], [sess('a', T2)]), false)
+    assert.equal(isWorkflowTableBehind([sess('a', T3)], [sess('a', T2)]), false)
+    assert.equal(isWorkflowTableBehind([sess('a', T1), sess('b', T2)], []), false, '列表没带的行（更早的轮次）正常')
+    assert.equal(isWorkflowTableBehind([sess('old', T1), sess('a', T2)], [sess('a', T2)]), false, '整表比列表多出更早的轮次正常')
+  })
+
+  it('整表还没有任何行：不算落后（还没取到；之后第一次取到的就是最新的）', () => {
+    assert.equal(isWorkflowTableBehind([], [sess('a', T1)]), false)
+  })
+
+  it('时间解析不了：不算落后（保守，不为解析不了的时间反复整表重取）', () => {
+    assert.equal(isWorkflowTableBehind([sess('a', 'not-a-date')], [sess('a', T2)]), false)
+    assert.equal(isWorkflowTableBehind([sess('a', T1)], [sess('a', '')]), false)
+  })
+
+  it('能比较 Go 输出的纳秒精度时间', () => {
+    assert.equal(isWorkflowTableBehind([sess('a', '2026-09-30T22:50:44.123456789+08:00')], [sess('a', '2026-09-30T22:50:45.000000001+08:00')]), true)
   })
 })
 

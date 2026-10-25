@@ -489,6 +489,7 @@ func TestSSHCredentialsNeverLeak(t *testing.T) {
 }
 
 func TestSSHOpProbeAndCheck(t *testing.T) {
+	sshdtest.NeedShell(t) // 测试用 SSH 服务器要用 /bin/sh 真正执行命令；Windows 原生没有，跳过
 	srv := gwServer(t)
 	env, _ := newSSHEnv(t, gwOpts(t, SSHOptions{}))
 	p := env.dial(t, RoleController)
@@ -555,6 +556,7 @@ func TestSSHCheckReportsNonPosixTarget(t *testing.T) {
 
 // 凭据只在真实登录成功后才落库：填错的密码不会覆盖原来可用的凭据；改成新的正确凭据后旧连接作废。
 func TestSSHPersistOnlyAfterSuccessfulLogin(t *testing.T) {
+	sshdtest.NeedShell(t) // 测试用 SSH 服务器要用 /bin/sh 真正执行命令；Windows 原生没有，跳过
 	srv := gwServer(t)
 	env, _ := newSSHEnv(t, gwOpts(t, SSHOptions{}))
 	p := env.dial(t, RoleController)
@@ -575,6 +577,7 @@ func TestSSHPersistOnlyAfterSuccessfulLogin(t *testing.T) {
 }
 
 func TestSSHExecProxy(t *testing.T) {
+	sshdtest.NeedShell(t) // 测试用 SSH 服务器要用 /bin/sh 真正执行命令；Windows 原生没有，跳过
 	srv := gwServer(t)
 	env, _ := newSSHEnv(t, gwOpts(t, SSHOptions{}))
 	p := env.dial(t, RoleController)
@@ -620,6 +623,7 @@ func TestSSHExecProxy(t *testing.T) {
 
 // exec 代理有独立于建连的并发上限，超出立即返回 busy。
 func TestSSHExecConcurrencyIsBounded(t *testing.T) {
+	sshdtest.NeedShell(t) // 测试用 SSH 服务器要用 /bin/sh 真正执行命令；Windows 原生没有，跳过
 	srv := gwServer(t)
 	env, _ := newSSHEnv(t, gwOpts(t, SSHOptions{ExecConcurrent: 1}))
 	p := env.dial(t, RoleController)
@@ -701,6 +705,7 @@ func TestSSHCredDelAndSync(t *testing.T) {
 
 // 重启后凭据仍在（守护进程升级 / 重启不丢凭据），并且换了进程也能继续使用。
 func TestSSHCredentialsSurviveRestart(t *testing.T) {
+	sshdtest.NeedShell(t) // 测试用 SSH 服务器要用 /bin/sh 真正执行命令；Windows 原生没有，跳过
 	srv := gwServer(t)
 	dir := t.TempDir()
 	first, _ := newSSHEnv(t, &SSHOptions{CredDir: dir})

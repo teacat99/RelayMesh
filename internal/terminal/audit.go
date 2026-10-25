@@ -5,6 +5,7 @@ import (
 	"log"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/teacat99/RelayMesh/v2/internal/model"
@@ -45,11 +46,10 @@ const (
 	EvLifecycle         = "lifecycle_changed"   // 修改主机默认或某个会话的生命周期（永久保持 / 空闲回收）
 	EvLauncherSave      = "launcher_save"       // 新建或修改了终端启动预设（只记预设编号与主机，不含命令内容——命令里可能带令牌）
 	EvLauncherDelete    = "launcher_delete"     // 删除了终端启动预设
-	EvGuardWake         = "guard_wake"          // 人类点了「唤醒」：让浏览器把一句提示词输入到预设的会话里（或重新拉起它）；只记预设编号、方式与第几次，不含提示词与命令
-	EvGuardPermit       = "guard_permit"        // 唤醒许可切换：只记预设编号、permit 值与 by，不含备注
 	EvLauncherRun       = "launcher_run"        // 人类点了「非交互续聊」预设的「运行」：只记预设编号与权限姿态（运行编号在 run_id 里），不含提示词与命令
 	EvLauncherAutoRun   = "launcher_auto_run"   // 系统按预设里打开的「异常退出时自动续跑」发起了一次运行（#151）：只记预设编号与第几次（运行编号在 run_id 里），不含提示词与命令
 	EvLauncherAutoStop  = "launcher_auto_stop"  // 人类取消了一次排期中的自动续跑（#151）：只记预设编号（出事的运行编号在 run_id 里）
+	EvLauncherSwitch    = "launcher_switch"     // 系统在「新会话 · 成功后切到最近会话」的预设运行成功之后，把预设的对话来源改成了「最近会话」（#191，#559）：只记预设编号（运行编号在 run_id 里），不含命令
 	EvLauncherAgentRun  = "launcher_agent_run"  // 项目管理 Agent 经 MCP 运行了一条预设（#179）：只记谁（身份编号）、预设编号、目标工作流与权限姿态（运行编号在 run_id 里），不含提示词与命令；被拒绝的尝试记成 deny / fail
 	EvSessionEnable     = "session_enable"      // 人类在「待接入」会话页点了「启用 Agent」（#176）：只记工作流、预设编号、权限姿态与是否新开对话（运行编号在 run_id 里），不含提示词与命令
 	EvSessionRun        = "session_run"         // 人类经 session-run 接口发起了会话页运行（#128；Web 从 #140 起改走预设运行 launcher_run，接口保留）：只记工作流与权限姿态（运行编号在 run_id 里），不含提示词与命令
@@ -97,6 +97,11 @@ const (
 	EvOAuthRevoke         = "oauth_revoke"
 	EvOAuthClientRegister = "oauth_client_register"
 	EvOAuthPolicyChanged  = "oauth_policy_changed"
+	// 管理员在「设置 → OAuth 授权」里的操作（#239）：开启 / 续期接入窗口、关闭接入窗口、删除一条还没授权的登记。
+	// 与上面的协议事件不同，它们有明确的操作者与来源地址（见 Hub.RecordOAuthAdmin）。
+	EvOAuthWindowOpen   = "oauth_window_open"
+	EvOAuthWindowClose  = "oauth_window_close"
+	EvOAuthClientDelete = "oauth_client_delete"
 )
 
 // 审计操作者类型。
@@ -130,6 +135,8 @@ type auditEvent struct {
 type auditor struct {
 	store *store.Store
 	now   func() time.Time
+	// security 是「安全告警」挂钩（见 SetSecurityHook）：审计里几类高危事件落库之后同步调一次。
+	security atomic.Pointer[func(SecurityAlert)]
 
 	mu      sync.Mutex
 	limits  map[string]*auditBucket
@@ -176,6 +183,55 @@ func (a *auditor) record(ctx context.Context, e auditEvent) {
 	if err := a.store.AppendTerminalAudit(ctx, entry); err != nil && ctx.Err() == nil {
 		log.Printf("[terminal] 审计日志写入失败 (%s): %v", e.Event, err)
 	}
+	// 落库成败都要告警：数据库写不进去时，恰恰更需要有人知道有人在撞门。
+	if isSecurityAuditEvent(e.Event) {
+		a.fireSecurity(SecurityAlert{Event: e.Event, Result: entry.Result, Detail: entry.Detail})
+	}
+}
+
+// SecurityAlert 是一条值得打扰你的安全事件：审计里「有人在撞门」的几类事件。纯事实，推不推、怎么写由接收方（ntfy）决定；
+// 接收方不该把 Detail 原样推出去——它只属于审计日志。
+type SecurityAlert struct {
+	// Event 是审计事件名：EvOAuthCodeReplay / EvOAuthRefreshReplay / EvUnlockLocked。
+	Event  string
+	Result string
+	Detail string
+}
+
+// isSecurityAuditEvent 列出会触发安全告警的审计事件：
+// OAuth 授权码 / 刷新令牌被重放（令牌可能已经泄露），以及终端解锁尝试过多被临时锁定（有人在猜口令）。
+func isSecurityAuditEvent(event string) bool {
+	switch event {
+	case EvOAuthCodeReplay, EvOAuthRefreshReplay, EvUnlockLocked:
+		return true
+	}
+	return false
+}
+
+// SetSecurityHook 接入安全告警；启动时调用一次，传 nil 表示摘掉。
+// fn 在写审计的协程里被同步调用，必须立即返回，不能在里面做网络请求；fn 里的 panic 会被截住。
+func (h *Hub) SetSecurityHook(fn func(SecurityAlert)) {
+	if h == nil || h.audit == nil {
+		return
+	}
+	if fn == nil {
+		h.audit.security.Store(nil)
+		return
+	}
+	h.audit.security.Store(&fn)
+}
+
+func (a *auditor) fireSecurity(ev SecurityAlert) {
+	fn := a.security.Load()
+	if fn == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[terminal] 安全告警挂钩发生内部错误：%v", r)
+		}
+	}()
+	(*fn)(ev)
 }
 
 // recordLimited 用于攻击者可触发的高频事件：同一 (event, key) 在一分钟内最多落盘 auditRateBurst 条，

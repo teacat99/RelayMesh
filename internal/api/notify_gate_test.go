@@ -339,27 +339,6 @@ func TestNotifyGate_RunEndIsNtfyOnlyAndRespectsDND(t *testing.T) {
 	g.expectQuiet("免打扰下的运行结束")
 }
 
-// 守护告警是穿透类：免打扰下浏览器与 ntfy 都照常到达；ntfy 走老的构造器。
-func TestNotifyGate_GuardAlertPenetrates(t *testing.T) {
-	g := newGateRig(t)
-	g.setPrefs(map[string]any{"dnd": true})
-
-	g.srv.notifier.GuardHook()(terminal.GuardAlert{
-		PresetID: "p1", Episode: "ep-1", Name: "夜间回归", Machine: "RM-AAAA", WorkflowID: "wf-guard",
-		State: terminal.GuardCrashed, Reason: "上一轮对话因出错中断", Since: time.Now().Add(-time.Hour),
-	})
-	got := g.waitNotifies(1)
-	p := got[0]
-	if p.Kind != notify.KindGuardAlert || !p.Penetrate || p.Title != "夜间回归" || p.Preview != "意外结束：上一轮对话因出错中断" ||
-		p.WorkflowID != "wf-guard" || p.ID != "grd:p1:ep-1:0" || p.DeepLink != "/exec" {
-		t.Fatalf("guard_alert 载荷不对：%+v", p)
-	}
-	posts := g.fake.waitFor(t, 1)
-	if posts[0].Body["title"] != "「夜间回归」意外结束" {
-		t.Fatalf("守护告警的推送应保持原样：%+v", posts[0].Body)
-	}
-}
-
 // 「不再自动续跑」（#151）也是穿透类：预算用完 / 连续没进展时系统不会再自己重试，免打扰下也要让你知道；
 // ntfy 的标题与说明是它自己的，不能说成「疑似停摆」；同一次放弃只通知一次。
 func TestNotifyGate_AutoResumeGaveUpPenetratesWithItsOwnWording(t *testing.T) {

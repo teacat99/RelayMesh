@@ -1,6 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { asyncModeApi, asyncModeErrorMessage, type AuthProfileDraft } from '../api/asyncMode'
+import { workItemsApi } from '../api/workItems'
+import { registerConnectHook } from '../lib/connectHooks'
+import { GATE_SHELVE_PROGRESS } from '../lib/wrapupGate'
 import type { AsyncModeView, AuthProfile, AuthProfileLimits } from '../api/types'
 import { useSessionStore } from './session'
 
@@ -67,6 +70,35 @@ export const useAsyncModeStore = defineStore('asyncMode', () => {
     })
   }
 
+  /** 严格收尾门开关（#232 D2）：默认开；关掉后回复窗口回到老口径。 */
+  async function setStrictWrapup(workflowId: string, on: boolean): Promise<AsyncModeView> {
+    return guarded(async () => {
+      const view = await asyncModeApi.update(workflowId, { strict_wrapup: on })
+      applyView(view)
+      return view
+    })
+  }
+
+  /** 「本次放行」：这一轮窗口不再被未完成任务挡住；失败（没有窗口 / 门已关）由调用方 toast 服务端给的原因。 */
+  async function releaseGate(workflowId: string): Promise<AsyncModeView> {
+    return guarded(async () => {
+      const view = await asyncModeApi.releaseGate(workflowId)
+      applyView(view)
+      return view
+    })
+  }
+
+  /**
+   * 在收尾门清单里把一个任务置「暂缓」（你替智能体放下它）：进展里写明是你放下的、等你另行安排，
+   * 这样服务端「暂缓要写缘由」的提醒不会再去打扰智能体。置完后重取本会话状态，清单立刻少一项。
+   */
+  async function shelveGateTask(workflowId: string, taskId: number): Promise<void> {
+    return guarded(async () => {
+      await workItemsApi.update(taskId, { state: 'shelved', progress: GATE_SHELVE_PROGRESS })
+      await useSessionStore().fetchQueuedFeedbacks(workflowId, { urgent: true })
+    })
+  }
+
   async function selectProfile(workflowId: string, profileId: number): Promise<AsyncModeView> {
     return guarded(async () => {
       const view = await asyncModeApi.update(workflowId, { profile_id: profileId })
@@ -110,6 +142,9 @@ export const useAsyncModeStore = defineStore('asyncMode', () => {
   function onProfilesEvent() {
     if (loaded.value) void loadProfiles(true)
   }
+  // 实时流（首次或重新）连上：连上之前 / 断线期间的 auth_profiles_updated 没人听见；已加载过的档位表重取一次（#243）。
+  // 惰性仓库：用到了才会被创建，登记即「有旧数据要校准」，没用到的页面不会为此多拉代码块（lib/connectHooks.ts）
+  registerConnectHook('asyncMode', onProfilesEvent)
 
   return {
     profiles,
@@ -121,6 +156,9 @@ export const useAsyncModeStore = defineStore('asyncMode', () => {
     busy,
     loadProfiles,
     setEnabled,
+    setStrictWrapup,
+    releaseGate,
+    shelveGateTask,
     selectProfile,
     createProfile,
     updateProfile,

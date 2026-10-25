@@ -9,6 +9,7 @@ import type {
   WorkKind,
   WorkModule,
   WorkModuleStats,
+  WorkOffered,
   WorkSessionLink,
   WorkStage,
   WorkState,
@@ -48,6 +49,8 @@ export interface WorkItemList {
   truncated: boolean
   /** 只有 with_links 时才有：这个工作流里哪个会话涉及哪个任务、做了什么。 */
   links: WorkSessionLink[]
+  /** 各工作流手上待接取的协作任务个数与最早派出时间（全局口径，不随过滤变）；没有待接取的指派时是空数组（服务端此时不带这个字段）。侧栏徽标用（#180 B3b）。 */
+  offered: WorkOffered[]
 }
 
 export interface WorkItemCreate {
@@ -164,12 +167,28 @@ export const workItemsApi = {
       board_key: data.board_key || '',
       truncated: data.truncated === true,
       links: data.links || [],
+      // 没有待接取的指派时服务端不带这个字段：统一成空数组，调用方不必区分「没带」与「没有」
+      offered: Array.isArray(data.offered) ? data.offered : [],
     }
   },
 
   async get(id: number): Promise<WorkItem> {
     const res = await api.get(`/work-items/${id}`)
     return res.data.item
+  },
+
+  /**
+   * 按「工作流 + 板内序号 #N」取任务：正文、汇报与链接里写的 #N 是板内序号（每张板各自从 1 数起，同一个项目的工作流共用一套），
+   * 不是 get() 用的数据库编号——两者混用会打开别的任务（#242）。这张板上没有这个序号返回 null。
+   */
+  async getBySeq(workflowId: string, seq: number): Promise<WorkItem | null> {
+    try {
+      const res = await api.get('/work-items/by-seq', { params: { workflow_id: workflowId, seq } })
+      return res.data.item ?? null
+    } catch (err) {
+      if ((err as { response?: { status?: number } })?.response?.status === 404) return null
+      throw err
+    }
   },
 
   /** 这个工作流所在的任务板上能被指派的工作流编号（项目板 = 项目里的全部工作流；独立板为空）：详情里「指派」下拉按需取。 */

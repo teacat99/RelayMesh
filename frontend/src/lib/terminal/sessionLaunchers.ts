@@ -43,13 +43,20 @@ export interface RunFacts {
   options: string
 }
 
+/** 「接着对话」那一行（#191）：新会话没有可接的对话、最近会话由 Cursor CLI 决定，都不是「还不知道」。 */
+function conversationFact(p: SessionLauncherView): string {
+  if (p.mode === 'new') return '新开一个对话（运行后记下它的编号）'
+  if (p.mode === 'continue') return '目录里最近动过的对话（由 Cursor CLI 决定，可能不是这个会话的）'
+  return p.conversation_id ? `${p.conversation_id.slice(0, 8)}…` : '还不知道'
+}
+
 export function runFacts(p: SessionLauncherView): RunFacts {
   const parts = [p.model || '默认模型', p.posture === 'force' ? '放开全部命令（--force）' : '只放行白名单内的操作']
   // 设了时限才写（默认的 7 天不是用户的选择，不占位置）。
   if (p.max_run_seconds > 0 && p.max_run_seconds < DEFAULT_RUN_LIMIT_SEC) parts.push(`最长运行 ${runLimitText(p.max_run_seconds)}`)
   return {
     target: `${p.host_title || shortCode(p.host)} · ${p.dir}`,
-    conversation: p.conversation_id ? `${p.conversation_id.slice(0, 8)}…` : '还不知道',
+    conversation: conversationFact(p),
     options: parts.join(' · '),
   }
 }
@@ -128,7 +135,7 @@ export function suggestDraft(s: SessionLauncherSuggest, host: string = s.host ??
   const run = blankRunDraft()
   run.workflow = s.workflow_id
   run.posture = s.posture === 'force' ? 'force' : 'allowlist'
-  return { id: newLauncherId(), name: s.name, host, dir: s.dir, command: '', run }
+  return { id: newLauncherId(), name: s.name, host, dir: s.dir, run }
 }
 
 /** 建议 → 可以直接保存的预设（主机必须已经唯一确定）。 */

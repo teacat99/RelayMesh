@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, markRaw, shallowRef, onBeforeUnmount, onMounted, watch, type Component, type ShallowRef } from 'vue'
+import { ref, computed, markRaw, shallowRef, onBeforeUnmount, watch, type Component, type ShallowRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMediaQuery } from '@vueuse/core'
 import { useSessionStore } from '../../stores/session'
@@ -7,11 +7,14 @@ import { useSettingsStore } from '../../stores/settings'
 import { useWorkItemStore } from '../../stores/workItems'
 import { useProjectDocStore } from '../../stores/projectDocs'
 import { useTerminalStore } from '../../stores/terminal'
+import { useBranchStore } from '../../stores/branches'
 import SessionStatusBadge from './SessionStatusBadge.vue'
 import WorkflowSheetDrawer from './WorkflowSheetDrawer.vue'
 import ConversationNotifyMenu from './ConversationNotifyMenu.vue'
 import SessionHeaderMore from './SessionHeaderMore.vue'
+import BranchHeaderChip from '../branch/BranchHeaderChip.vue'
 import MobileMenuButton from '../shell/MobileMenuButton.vue'
+import { useLazyComponent } from '../../composables/useLazyComponent'
 import { TONE_CLASSES } from '../work/tone'
 import {
   Sparkles,
@@ -20,6 +23,7 @@ import {
   Copy,
   PanelLeftOpen,
   FileText,
+  GitBranch,
   ListChecks,
   SquareTerminal
 } from 'lucide-vue-next'
@@ -28,6 +32,8 @@ import { legacyDocsLocation, projectKbLocation, resolveOwnerPatiently, retryWith
 import { ownerProjects, ownerProjectIdWithin, ownerProjectName } from '../../lib/docNavClient'
 import { reportChunkFailure } from '../../utils/chunkFailure'
 import { PHONE_MEDIA } from '../../lib/pendingSessions'
+import { branchChipView } from '../../lib/branch'
+import type { FeedbackSession } from '../../api/types'
 
 const props = defineProps<{
   sidebarCollapsed?: boolean
@@ -38,6 +44,10 @@ const emit = defineEmits<{
   (e: 'expand-sidebar'): void
   /** 状态徽标的待处理清单里点了「等回复的汇报」：让对话列表滚到那一轮。 */
   (e: 'jump-session', sessionId: string): void
+  /** 分支会话（#236）：从分支芯片 / 分支面板跳到另一个工作流的会话页（主会话或某个分支）。 */
+  (e: 'open-workflow', workflowId: string): void
+  /** 分支会话（#236）：新建分支之后进入它（按会话编号定位）。 */
+  (e: 'open-session', sessionId: string): void
 }>()
 
 const sessionStore = useSessionStore()
@@ -61,8 +71,6 @@ const isPhone = useMediaQuery(PHONE_MEDIA)
 const launcherOpen = ref(false)
 const launcherComponent: ShallowRef<Component | null> = shallowRef(null)
 let launcherLoading: Promise<boolean> | null = null
-/** 从状态卡点「唤醒」进来时要定位的预设；从「终端」按钮进来时为空。 */
-const launcherFocusId = ref('')
 function ensureLauncher(): Promise<boolean> {
   if (launcherComponent.value) return Promise.resolve(true)
   launcherLoading ??= import('../terminal/launcher/TerminalLauncherDialog.vue')
@@ -84,49 +92,16 @@ function ensureLauncher(): Promise<boolean> {
 }
 async function openLauncher() {
   if (!(await ensureLauncher())) return
-  launcherFocusId.value = ''
-  launcherOpen.value = true
-}
-async function openLauncherFor(presetId: string) {
-  if (!(await ensureLauncher())) return
-  launcherFocusId.value = presetId
   launcherOpen.value = true
 }
 
-// 会话守护（D-214）：有预设开着监测、并且它的会话意外结束 / 停摆了，「终端」入口上亮一个红点，悬停写明是哪个、怎么了。
-// 数据半分钟读一次（服务端一分钟才判断一次）；没有预设开着监测、或 Hub 太旧不认识时不发请求。
-const guardNeeds = computed(() => terminalStore.guardNeeds)
-// Agent 状态芯片搬到了输入区（#81）；它点「唤醒」时用窗口事件把预设递过来，由这里打开启动器。
-function onWakeEvent(e: Event) {
-  const id = (e as CustomEvent<{ presetId?: string }>).detail?.presetId
-  if (id) openLauncherFor(id)
-}
-onMounted(() => {
-  terminalStore.startGuardPolling()
-  window.addEventListener('relaymesh:open-launcher', onWakeEvent)
-})
-onBeforeUnmount(() => {
-  terminalStore.stopGuardPolling()
-  window.removeEventListener('relaymesh:open-launcher', onWakeEvent)
-})
-// 预设是随终端状态异步到的：一旦发现有预设开着监测，马上读一次，不必等下一个半分钟。
-watch(
-  () => terminalStore.guardWatching,
-  watching => {
-    if (watching) void terminalStore.refreshGuard()
-  },
-  { immediate: true },
-)
 // 页头右侧按钮共用的盒子（#168）：PC 是「图标 + 文字」的小按钮；手机一律是 36×36 的方块、只留 16px 的图标，
 // 免得 终端 / 任务 / 项目 / ⋯ 各有各的宽度与图标大小。切换点用 md（768px），与 isPhone / PHONE_MEDIA 同一条线。
-// relative：数字角标与红点（任务的数字、终端的守护红点）都贴在按钮右上角。
+// relative：数字角标（任务的数字）贴在按钮右上角。
 const HEADER_BTN =
   'relative inline-flex items-center gap-1 px-2.5 py-1 max-md:size-9 max-md:justify-center max-md:gap-0 max-md:p-0 rounded-sm border text-[10px] sm:text-xs font-mono shrink-0 shadow-xs transition-colors cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-ring bg-muted/40 hover:bg-muted/80 hover:text-primary border-border/80'
 const HEADER_ICON = 'size-4 md:size-3.5 text-primary'
-const launcherTitle = computed(() => {
-  const base = '终端启动器：一键在预设的主机和目录里开终端、运行命令（例如启动 Cursor CLI）'
-  return guardNeeds.value.count ? `${base}\n\n需要你处理：\n${guardNeeds.value.title}` : base
-})
+const launcherTitle = '续聊预设：点「运行」由 Hub 在预设的主机和目录里接着原对话运行一次（不开终端）；也能在这里看到其他非交互运行'
 
 // 「任务」入口：进入这个会话所属项目（workflow）的任务清单整页。
 const sessionWorkflowId = computed(() => sessionStore.selectedSession?.workflow_id || sessionStore.currentSession?.workflow_id || '')
@@ -151,6 +126,46 @@ const workBadge = computed(() => {
 function openWork() {
   if (!sessionWorkflowId.value) return
   void router.push({ name: 'work', params: { workflowId: sessionWorkflowId.value } })
+}
+
+// 「分支」入口与标签（#236）：把一块工作拆成独立的分支会话。入口按钮（手机上在「⋯」里）始终在；
+// 标签只在这个会话有分支关系时出现（分支页上写「分支 · 主会话「X」」，主会话上写「N 个分支」），没用到分支的会话页头上不多任何标签。
+// 关系表由分支仓库统一取（切到会话时 viewWorkflow 会确保取过一次），实时流校准；没有关系的会话切过去不发额外的消息流请求。
+const branchStore = useBranchStore()
+const branchPanelOpen = ref(false)
+const newBranchOpen = ref(false)
+// 分支面板与新建分支窗口是点开才用的弹窗：做成懒加载的分块，第一次点的时候才取（加载与失败重试见 useLazyComponent）
+const { component: BranchPanelDialog, ensure: ensureBranchPanel } = useLazyComponent(() => import('../branch/BranchPanel.vue'), '分支面板')
+const { component: NewBranchWindow, ensure: ensureNewBranch } = useLazyComponent(() => import('../branch/NewBranchDialog.vue'), '新建分支窗口')
+async function openBranchPanel() {
+  if (await ensureBranchPanel()) branchPanelOpen.value = true
+}
+async function openNewBranch() {
+  if (await ensureNewBranch()) newBranchOpen.value = true
+}
+const sessionTitle = computed(() => sessionStore.selectedSession?.title || sessionStore.currentSession?.title || '')
+const branchOf = computed(() => (sessionWorkflowId.value ? branchStore.asBranch(sessionWorkflowId.value) : undefined))
+const activeBranchCount = computed(() =>
+  sessionWorkflowId.value ? branchStore.asMain(sessionWorkflowId.value).filter(b => b.status === 'active').length : 0,
+)
+const branchChip = computed(() => branchChipView(branchOf.value, activeBranchCount.value))
+const branchEntryTitle = computed(() =>
+  activeBranchCount.value > 0
+    ? `分支会话：这个会话有 ${activeBranchCount.value} 个进行中的分支`
+    : branchOf.value
+      ? '分支会话：这个会话是一个分支，可以改它向主会话开放多少、结束它'
+      : '分支会话：把这个会话里的一块工作拆出去，交给另一个智能体单独做',
+)
+watch(sessionWorkflowId, wf => void branchStore.viewWorkflow(wf), { immediate: true })
+
+function onBranchChip() {
+  const parent = branchOf.value?.parent_workflow_id
+  if (parent) emit('open-workflow', parent)
+  else void openBranchPanel()
+}
+
+function onBranchOpened(session: FeedbackSession) {
+  emit('open-session', session.session_id)
 }
 
 // 「项目」入口（#131，取代原来的「文档」）：进入这个会话所属项目的知识库——文档、设计与决策都汇在那里。
@@ -263,6 +278,8 @@ const displayProjectDirectory = computed(() => {
             class="text-[10px] sm:text-xs"
             @jump-session="emit('jump-session', $event)"
           />
+          <!-- 分支标签（#236）：只在有分支关系时出现；宽屏跟在状态徽章后面，手机放到第二行（见下） -->
+          <BranchHeaderChip v-if="branchChip && !isPhone" :chip="branchChip" @click="onBranchChip" />
         </div>
         <!-- overflow-hidden：窄屏下第二行放不下时让会话 ID 自己截断，别伸到右边的按钮底下被盖住 -->
         <div class="flex items-center gap-1.5 sm:gap-2 text-[10px] sm:text-xs text-muted-foreground min-w-0 overflow-hidden">
@@ -272,6 +289,7 @@ const displayProjectDirectory = computed(() => {
             class="text-[10px]"
             @jump-session="emit('jump-session', $event)"
           />
+          <BranchHeaderChip v-if="branchChip && isPhone" :chip="branchChip" @click="onBranchChip" />
           <!-- 1. 工作区路径（有空间时自适应展开，支持主机名前缀与点击一键复制） -->
           <button
             v-if="displayProjectDirectory"
@@ -320,18 +338,10 @@ const displayProjectDirectory = computed(() => {
         :class="HEADER_BTN"
         :title="launcherTitle"
         data-testid="session-terminal-launcher"
-        :data-guard-attention="guardNeeds.count"
         @click="openLauncher"
       >
         <SquareTerminal :class="HEADER_ICON" />
         <span class="hidden md:inline font-medium">终端</span>
-        <!-- 有会话需要处理（意外结束 / 停摆）：红点；具体是哪个在悬停说明里，点开启动器能直接唤醒 -->
-        <span
-          v-if="guardNeeds.count"
-          class="absolute -right-1 -top-1 size-2.5 rounded-full bg-destructive ring-2 ring-background"
-          aria-hidden="true"
-          data-testid="session-terminal-guard-dot"
-        />
       </button>
 
       <!-- 任务清单入口：点击后整个会话页切换为这个项目的任务清单页 -->
@@ -341,11 +351,12 @@ const displayProjectDirectory = computed(() => {
         :class="HEADER_BTN"
         title="打开这个项目的任务清单"
         data-testid="session-work-entry"
+        data-prefetch="work"
         @click="openWork"
       >
         <ListChecks :class="HEADER_ICON" />
         <span class="hidden md:inline font-medium">任务</span>
-        <!-- 手机：按钮只剩图标，数字改成贴在右上角的角标（不占按钮宽度，和终端的红点同一个位置） -->
+        <!-- 手机：按钮只剩图标，数字改成贴在右上角的角标（不占按钮宽度） -->
         <span
           v-if="workBadge"
           class="min-w-4 rounded-xs border px-1 text-center text-[10px] leading-4 tabular-nums max-md:absolute max-md:-right-1.5 max-md:-top-1.5 max-md:bg-background max-md:ring-2 max-md:ring-background"
@@ -364,6 +375,7 @@ const displayProjectDirectory = computed(() => {
         aria-label="项目"
         :data-project-id="ownerId || undefined"
         data-testid="session-project-entry"
+        data-prefetch="projects"
         @click="openProject"
       >
         <FolderGit2 :class="HEADER_ICON" />
@@ -376,6 +388,26 @@ const displayProjectDirectory = computed(() => {
         >{{ docsBadge }}</span>
       </button>
 
+      <!-- 分支入口（#236）：PC 是页头上的按钮；手机收进「⋯」菜单（见下） -->
+      <button
+        v-if="sessionWorkflowId && !isPhone"
+        type="button"
+        :class="HEADER_BTN"
+        :title="branchEntryTitle"
+        aria-label="分支"
+        data-testid="session-branch-entry"
+        @click="openBranchPanel"
+      >
+        <GitBranch :class="HEADER_ICON" />
+        <span class="hidden md:inline font-medium">分支</span>
+        <span
+          v-if="activeBranchCount"
+          class="min-w-4 rounded-xs border px-1 text-center text-[10px] leading-4 tabular-nums border-border text-muted-foreground"
+          :title="`${activeBranchCount} 个进行中的分支`"
+          data-testid="session-branch-badge"
+        >{{ activeBranchCount }}</span>
+      </button>
+
       <!-- 手机：项目、提醒策略与会话工作表收进「⋯」（#156 批 1、#168）；主动作终端 / 任务留在页头 -->
       <SessionHeaderMore
         v-if="isPhone && sessionWorkflowId"
@@ -383,8 +415,10 @@ const displayProjectDirectory = computed(() => {
         :project-id="ownerId"
         :project-title="projectEntryTitle"
         :docs-count="docsBadge"
+        :branch-count="activeBranchCount"
         @open-project="openProject"
         @open-sheet="isSheetDrawerOpen = true"
+        @open-branch="openBranchPanel"
       />
 
       <!-- 这个会话的提醒策略（#115）：全部提醒 / 静音一段时间 / 一直静音 -->
@@ -414,5 +448,23 @@ const displayProjectDirectory = computed(() => {
   />
 
   <!-- 终端启动器：第一次点「终端」时才加载并挂载 -->
-  <component :is="launcherComponent" v-if="launcherComponent" v-model:open="launcherOpen" :focus-preset-id="launcherFocusId" :workflow-id="sessionWorkflowId" />
+  <component :is="launcherComponent" v-if="launcherComponent" v-model:open="launcherOpen" :workflow-id="sessionWorkflowId" />
+
+  <!-- 分支面板与新建分支（#236）：第一次点开时才加载并挂载（懒加载分块） -->
+  <component
+    :is="BranchPanelDialog"
+    v-if="BranchPanelDialog && sessionWorkflowId"
+    v-model:open="branchPanelOpen"
+    :workflow-id="sessionWorkflowId"
+    @open-workflow="emit('open-workflow', $event)"
+    @new-branch="openNewBranch"
+  />
+  <component
+    :is="NewBranchWindow"
+    v-if="NewBranchWindow && sessionWorkflowId"
+    v-model:open="newBranchOpen"
+    :parent-workflow-id="sessionWorkflowId"
+    :parent-title="sessionTitle"
+    @opened="onBranchOpened"
+  />
 </template>

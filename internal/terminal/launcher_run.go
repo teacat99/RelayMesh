@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/sessionprompt"
 	"github.com/teacat99/RelayMesh/v2/internal/store"
 	"github.com/teacat99/RelayMesh/v2/internal/termexec"
 	"github.com/teacat99/RelayMesh/v2/internal/termproto"
@@ -26,7 +27,7 @@ import (
 //   - 只在人点了「运行」时发生（需要刚刚解锁，和新建、修改预设一样）；唯一的自动触发是预设里明确打开的
 //     「异常退出时自动续跑」（#151，见 auto_resume.go：默认关闭，只重试可重试的错误，有预算与熔断），它走同一条提交路径；
 //   - 命令只由预设里已校验的字段拼出，所有动态部分都单引号包裹——预设不能写任意命令；
-//   - 与 ExecMesh、守护的非交互唤醒同一条通道、同一套闸门（总闸、暂停、主机「模型访问」、主机执行模式、令牌限额）；
+//   - 与 ExecMesh 同一条通道、同一套闸门（总闸、暂停、主机「模型访问」、主机执行模式、令牌限额）；
 //     「需批准」模式下运行会停在待批准，要在 ExecMesh 里批准；
 //   - 同一个预设同一时间只跑一次；对话还在运行（工作中 / 等你回答 / 等批准）时不让再续聊它，免得两边打架；
 //   - 审计只记预设编号、运行编号与权限姿态，不含提示词与命令；聊天里的系统行同样不含。
@@ -47,71 +48,6 @@ const (
 	// launcherLearnActor 是「新对话已建立」系统行在聊天里的发起者标记（#176）。
 	launcherLearnActor = "launcher-run"
 )
-
-// launcherDefaultPrompt 是预设没填提示词时用的正文；%workflow 换成工作流编号。
-//
-// 写法上有两个要点（#125）：非交互运行结束后没有人在终端里看输出，所以结果必须发到 RelayMesh；
-// 且「等你回复」在这里等于结束本次运行，要说清楚，免得它没说一句话就悄悄退出。
-const launcherDefaultPrompt = "这是一次非交互续聊：没有人在终端里看你的输出，所以结果必须发到 RelayMesh。" +
-	"请先恢复现场：用 RelayMesh 的 workflow_context inbox 读取工作流 %workflow 里我离线期间的追加指令，" +
-	"用 list_sessions 和 task_board 查看最近会话与进行中的任务，再核对 git status 和 git log，不要重复已完成的步骤。" +
-	"恢复后先用 interactive_feedback 按回执里的异步规则发一条进度通知说明现状（不要阻塞等回复），再继续：" +
-	"任务进行中就继续执行，已交付或在等我回复就通过 RelayMesh 沟通。" +
-	"无论有没有事可做，结束前都要向 RelayMesh 发一条消息说明结果。" +
-	"权限沿用本会话此前的授权范围（以回执 auth 行为准），不自行放宽，超出的先向我确认。" +
-	"仍无法继续就说明原因后结束本次运行，不要重复同样的尝试。"
-
-// launcherNewConversationPrompt 是「新开对话」的预设没填提示词时用的正文；%workflow 换成工作流编号（#176）。
-//
-// 与 launcherDefaultPrompt 同一个原则（非交互运行没有人看输出，结果必须发到 RelayMesh，「等你回复」等于结束本次运行），
-// 但这是一个全新的对话——它不认识这个工作流——所以先要带着工作流编号接进来，这与网页新建会话时给用户的「启动提示词」是同一套步骤
-// （store.WebWorkflowStartPrompt）：先调一次 interactive_feedback 接入，再读用户留下的第一条指令。
-const launcherNewConversationPrompt = "这是一次无人值守的新对话：没有人在终端里看你的输出，所以结果必须发到 RelayMesh。" +
-	"请接入 RelayMesh 的工作流（workflow_id：%workflow）：" +
-	"1. 先调用 RelayMesh 的 interactive_feedback 汇报一次（异步模式下用 wait:false），参数里必须带 workflow_id \"%workflow\"，project_directory 填你当前工作区的绝对路径；不要另起别的 workflow_id，也不要省略它。" +
-	"2. 我可能已经留了第一条指令：第 1 步的回执里带回来了就直接执行；没带回来就调用 workflow_context 的 inbox（workflow_id 同上）读取；仍然没有，就汇报「已接入，等待指示」后结束本次运行。" +
-	"3. 之后所有的汇报、提问、确认都沿用这个 workflow_id，并按 RelayMesh 回执里的指引继续；「等我回复」在这里等于结束本次运行，所以无论有没有事可做，结束前都要向 RelayMesh 发一条消息说明结果。" +
-	"权限以回执 auth 行为准，不自行放宽，超出的先向我确认。"
-
-// renderLauncherNewPromptFor 生成「新开对话」的提示词：自定义正文（没填用 launcherNewConversationPrompt）里的 %workflow 换成工作流编号；
-// 与 renderLauncherPromptFor 一样，只给默认提示词补一句本次运行的最长运行时间。
-func renderLauncherNewPromptFor(custom, workflowID string, maxRunSec int) string {
-	body := strings.TrimSpace(custom)
-	isDefault := body == ""
-	if isDefault {
-		body = launcherNewConversationPrompt
-	}
-	out := strings.ReplaceAll(body, "%workflow", strings.TrimSpace(workflowID))
-	if isDefault && maxRunSec > 0 {
-		out += " " + launcherRunLimitNote(maxRunSec)
-	}
-	return out
-}
-
-// renderLauncherPrompt 生成要交给 agent 的提示词：自定义正文（没填用默认）里的 %workflow 换成工作流编号。
-// 提示词最终是单引号包裹的一个参数，工作流编号里即使有 shell 特殊字符也不会被解释，所以不需要像键入唤醒那样回避。
-func renderLauncherPrompt(custom, workflowID string) string {
-	body := strings.TrimSpace(custom)
-	workflowID = strings.TrimSpace(workflowID)
-	if body == "" {
-		body = launcherDefaultPrompt
-		if workflowID == "" {
-			body = strings.ReplaceAll(body, "工作流 %workflow 里", "工作流里")
-		}
-	}
-	return strings.ReplaceAll(body, "%workflow", workflowID)
-}
-
-// renderLauncherPromptFor 在 renderLauncherPrompt 的基础上，给**默认提示词**补一句本次运行的最长运行时间（#141）：
-// 到点主机会强制结束这次运行，智能体知道时限，就会在那之前先把进度和下一步写进 RelayMesh。
-// 自定义提示词一个字不加（正文是用户自己写的，也许有别的安排）。
-func renderLauncherPromptFor(custom, workflowID string, maxRunSec int) string {
-	out := renderLauncherPrompt(custom, workflowID)
-	if strings.TrimSpace(custom) == "" && maxRunSec > 0 {
-		out += " " + launcherRunLimitNote(maxRunSec)
-	}
-	return out
-}
 
 // launcherRunLimitNote 是追加在默认提示词后面的时限提醒。
 func launcherRunLimitNote(maxRunSec int) string {
@@ -149,6 +85,11 @@ type LauncherRunPlan struct {
 	// NewConversation 表示这次运行是新开对话（#176）：命令里没有 --resume，ConversationID 为空——
 	// 对话编号要等智能体启动后从它的输出里学到（见 run_watch.go 的 learn）。
 	NewConversation bool `json:"new_conversation,omitempty"`
+	// AfterNew 是新会话运行之后的去向（#191，store.HeadlessAfter*）：只在 NewConversation 时有，界面据此说明「之后会怎样」。
+	AfterNew string `json:"after_new,omitempty"`
+	// Continue 表示这次运行是「最近会话」（#191）：命令里是 --continue，ConversationID 为空——
+	// 接到哪个对话由 Cursor CLI 决定，要等它启动后从输出里看（见 run_watch.go 的 peek）。
+	Continue bool `json:"continue,omitempty"`
 	// MaxRunSeconds 是这次运行的最长运行时间（秒）：预设里设的值，没设就是平台上限 7 天。
 	MaxRunSeconds int      `json:"max_run_seconds"`
 	Warnings      []string `json:"warnings,omitempty"`
@@ -184,6 +125,11 @@ type LauncherRunView struct {
 	Auto *AutoResumeView `json:"auto,omitempty"`
 	// By 不为空表示这次运行是项目管理 Agent 经 MCP 发起的（#179，见 agent_run.go）：写的是它的名字；人点的运行与自动续跑没有它。
 	By string `json:"by,omitempty"`
+	// Mode 是这次运行接对话的方式（#191，从命令判断）：resume（指定会话）/ new（新会话）/ continue（最近会话）。
+	Mode string `json:"mode,omitempty"`
+	// Conversation 是这次运行实际接上的对话编号（#191）：命令里有 --resume 就是它；新会话与最近会话的命令里没有编号，
+	// 从输出开头的 init 事件里取（运行还没读到、或认不出时没有）。最近会话接到哪个是 Cursor CLI 的决定，在这里能看到实际结果。
+	Conversation string `json:"conversation,omitempty"`
 }
 
 // ---------- 提交一次运行 ----------
@@ -202,12 +148,31 @@ type launcherInspect struct {
 	run       store.HeadlessRun
 	host      *model.TerminalHost
 	conv      string
-	newConv   bool // 新开对话（#176）：预设打开了「新开对话」、还不知道对话编号、工作流里也没有智能体在运行；此时 conv 为空且没有错误
+	newConv   bool // 新会话（#176）：命令不带 --resume；conv 为空且没有错误
+	cont      bool // 最近会话（#191）：命令用 --continue，接哪个对话由 Cursor CLI 决定；conv 为空且没有错误
 	cur       *store.AgentSessionView
 	warnings  []string
 	maxRunSec int
 	command   string
-	errs      []*wakeError
+	// windows 表示目标主机是 Windows（#178）：命令是 PowerShell 写法，提交时要让 Agent 用 PowerShell 执行（shell）。
+	windows bool
+	// shell 是 Windows 主机上执行命令的 shell（pwsh / powershell）；其他主机为空，由 Agent 按主机默认选。
+	shell string
+	errs  []*wakeError
+}
+
+// modeName 是这次运行接对话的方式（store.HeadlessSource*）：检查已经得出结论就用结论（新会话 / 最近会话 / 指定会话），
+// 还没有（检查没通过）就按预设配置的来源。
+func (in *launcherInspect) modeName() string {
+	switch {
+	case in.newConv:
+		return store.HeadlessSourceNew
+	case in.cont:
+		return store.HeadlessSourceContinue
+	case in.conv != "":
+		return store.HeadlessSourceResume
+	}
+	return in.run.EffectiveSource()
 }
 
 func (in *launcherInspect) add(status int, code, msg string) {
@@ -217,6 +182,12 @@ func (in *launcherInspect) add(status int, code, msg string) {
 // inspectLauncher 检查一条预设此刻能不能运行；传入的必须已是「非交互续聊」预设（否则只报 not_headless）。
 // 任何一项不满足都记进 errs，但会尽量继续往下检查，好让预览能把原因列全。
 func (g *guardService) inspectLauncher(ctx context.Context, p store.TerminalLauncher, now time.Time) *launcherInspect {
+	return g.inspectLauncherPrefer(ctx, p, now, "")
+}
+
+// inspectLauncherPrefer 与 inspectLauncher 相同，只是多一个「优先接着的对话」：自动续跑把刚出事的那次运行学到的对话传进来，
+// 「新会话」每次都新开的预设据此重试接着它，而不是再新开一个（见 launcherPick）。
+func (g *guardService) inspectLauncherPrefer(ctx context.Context, p store.TerminalLauncher, now time.Time, prefer string) *launcherInspect {
 	in := &launcherInspect{preset: p}
 	if !p.IsHeadless() || p.Run == nil {
 		in.add(http.StatusConflict, "not_headless", "这个预设不是「非交互续聊」类型，请用「启动」打开终端")
@@ -229,19 +200,32 @@ func (g *guardService) inspectLauncher(ctx context.Context, p store.TerminalLaun
 	switch {
 	case herr != nil || host == nil:
 		in.add(http.StatusNotFound, "host_not_found", "这台主机不存在了（可能已被删除）")
-	case strings.Contains(strings.ToLower(host.OS), "windows"):
-		in.host = host
-		in.add(http.StatusConflict, "unsupported_os", "暂不支持 Windows 主机")
 	default:
 		in.host = host
-		if a := g.h.onlineAgent(p.Host); a == nil || !a.isEnabled() {
+		in.windows = isWindowsOS(host.OS)
+		a := g.h.onlineAgent(p.Host)
+		offline := a == nil || !a.isEnabled()
+		if offline {
 			in.add(http.StatusConflict, "host_offline", "主机离线，现在没法运行")
+		}
+		if in.windows {
+			// Windows 主机：命令是 PowerShell 写法（#178），要先确认主机上有 PowerShell；离线时没法问，预览按 powershell 算。
+			if offline {
+				a = nil
+			}
+			sh, serr := windowsShell(a)
+			if serr != nil {
+				in.add(http.StatusConflict, "no_powershell", serr.Error())
+			}
+			in.shell = sh
 		}
 	}
 
-	conv, cur, warnings, cerr := g.launcherConversation(ctx, run, now)
+	pick := g.launcherPick(ctx, run, now, prefer)
+	conv, cur, warnings, cerr := pick.Conv, pick.Cur, pick.Warnings, pick.Err
 	in.conv, in.cur = conv, cur
-	in.newConv = conv == "" && cerr == nil // launcherConversation 只在「新开对话」时返回「没有对话编号、也没有错误」
+	in.newConv = cerr == nil && pick.Mode == convNew
+	in.cont = cerr == nil && pick.Mode == convContinue
 	if busy, id := g.launcherRunActive(ctx, p.ID, now); busy {
 		in.add(http.StatusConflict, "run_active",
 			fmt.Sprintf("这个预设上一次运行还没结束（运行编号 %s），等它结束再运行；到 ExecMesh 里可以取消它", id))
@@ -253,19 +237,27 @@ func (g *guardService) inspectLauncher(ctx context.Context, p store.TerminalLaun
 	}
 
 	in.maxRunSec = run.EffectiveMaxRunSeconds()
-	if conv != "" || in.newConv {
-		prompt := renderLauncherPromptFor(run.Prompt, run.WorkflowID, in.maxRunSec)
+	if conv != "" || in.newConv || in.cont {
+		kind := sessionprompt.KindResume // 最近会话（--continue）也是续聊：用「续聊」那类唤醒词
 		if in.newConv {
-			prompt = renderLauncherNewPromptFor(run.Prompt, run.WorkflowID, in.maxRunSec)
+			kind = sessionprompt.KindNew
 		}
+		prompt := renderLauncherWake(ctx, g.h.store, launcherWake{
+			Kind: kind, Custom: run.Prompt, WorkflowID: run.WorkflowID, Project: p.Dir, MaxRunSec: in.maxRunSec,
+		}).Text
 		cmd, berr := headlessCmd{
-			Bin: run.EffectiveBin(), ChatID: conv, New: in.newConv, Dir: strings.TrimSpace(p.Dir), Posture: run.EffectivePosture(),
-			Prompt: prompt, Model: run.Model,
+			Bin: run.EffectiveBin(), ChatID: conv, New: in.newConv, Continue: in.cont, Dir: strings.TrimSpace(p.Dir), Posture: run.EffectivePosture(),
+			Prompt: prompt, Model: run.Model, Windows: in.windows,
 		}.build()
 		if berr != nil {
 			in.add(http.StatusConflict, "headless_command", berr.Error())
 		} else {
 			in.command = cmd
+			if in.windows {
+				if _, n := winNeutralize(prompt); n > 0 {
+					in.warnings = append(in.warnings, winPromptNote(n))
+				}
+			}
 		}
 	}
 	return in
@@ -306,7 +298,11 @@ func (g *guardService) runLauncherWith(ctx context.Context, presetID string, now
 	defer g.releaseLauncherRun(p.ID)
 
 	// 全部前置检查走 inspectLauncher（与会话页「运行」按钮的预览共用，口径永远一致）；提交只看撞到的第一个原因。
-	in := g.inspectLauncher(ctx, *p, now)
+	prefer := ""
+	if opts.Auto != nil {
+		prefer = opts.Auto.Prefer
+	}
+	in := g.inspectLauncherPrefer(ctx, *p, now, prefer)
 	if len(in.errs) > 0 {
 		return LauncherRunPlan{}, zero, in.errs[0]
 	}
@@ -321,9 +317,14 @@ func (g *guardService) runLauncherWith(ctx context.Context, presetID string, now
 		desc += agentRunSuffix(opts.Agent.Label)
 		userAgent = "relaymesh-launcher-agent"
 	}
+	afterNew := ""
+	if in.newConv {
+		afterNew = run.EffectiveAfterNew()
+	}
 	res, serr := g.h.exec.submitHeadless(ctx, headlessSubmit{
 		Caller: launcherRunCaller, UserAgent: userAgent,
-		Machine: p.Host, Workflow: strings.TrimSpace(run.WorkflowID), Conversation: conv, NewConversation: in.newConv, Cwd: strings.TrimSpace(p.Dir), Command: cmd,
+		Machine: p.Host, Workflow: strings.TrimSpace(run.WorkflowID), Conversation: conv, NewConversation: in.newConv, ContinueConversation: in.cont, AfterNew: afterNew,
+		Cwd: strings.TrimSpace(p.Dir), Command: cmd, Shell: in.shell,
 		Description: desc, Thread: launcherThreadPrefix + p.ID,
 		TimeoutSec: maxRunSec,
 	})
@@ -337,7 +338,7 @@ func (g *guardService) runLauncherWith(ctx context.Context, presetID string, now
 
 	plan := LauncherRunPlan{
 		Name: p.Name, Host: p.Host, RunID: res.RunID, RunState: res.State,
-		Posture: run.EffectivePosture(), Model: run.Model, ConversationID: conv, NewConversation: in.newConv, MaxRunSeconds: maxRunSec, Warnings: warnings,
+		Posture: run.EffectivePosture(), Model: run.Model, ConversationID: conv, NewConversation: in.newConv, AfterNew: afterNew, Continue: in.cont, MaxRunSeconds: maxRunSec, Warnings: warnings,
 	}
 	if plan.Posture == store.HeadlessPostureAllowlist {
 		plan.Warnings = append(plan.Warnings, allowlistRunWarning)
@@ -380,10 +381,14 @@ func launcherAutoLineText(plan LauncherRunPlan, auto autoRunInfo) string {
 		plan.Name, auto.Attempt, auto.Max, why, convPhrase(plan), modelName, posture)
 }
 
-// convPhrase 是聊天系统行里「这次运行接哪个对话」的说法：续聊写对话编号的前 8 位，新开对话（#176）直接写「新开对话」。
+// convPhrase 是聊天系统行里「这次运行接哪个对话」的说法：续聊写对话编号的前 8 位，新开对话（#176）直接写「新开对话」，
+// 最近会话（#191）写明接哪个由 Cursor CLI 决定。
 func convPhrase(plan LauncherRunPlan) string {
-	if plan.NewConversation {
+	switch {
+	case plan.NewConversation:
 		return "新开对话"
+	case plan.Continue:
+		return "接着最近的对话（由 Cursor CLI 决定）"
 	}
 	return "接着对话 " + shortConv(plan.ConversationID)
 }
@@ -419,15 +424,50 @@ func shortConv(id string) string {
 	return id
 }
 
-// launcherConversation 找出这次要接着的对话，并判断它现在能不能被续聊。
+// convMode 是一次预设运行接对话的方式：对应命令里的 `--resume <编号>` / 不带 / `--continue`（#191）。
+type convMode int
+
+const (
+	// convResume：指定会话——命令带 `--resume <对话编号>`（含「跟随工作流」的存量预设）。
+	convResume convMode = iota
+	// convNew：新会话——命令不带 `--resume`，对话编号要从输出的 init 事件里学。
+	convNew
+	// convContinue：最近会话——命令带 `--continue`，由 Cursor CLI 决定接哪个对话。
+	convContinue
+)
+
+// convPick 是 launcherPick 的结果：这次运行接对话的方式、对话编号（只有 convResume 才有）、已知的对话会话、提示与拒绝原因。
+type convPick struct {
+	Mode     convMode
+	Conv     string
+	Cur      *store.AgentSessionView
+	Warnings []string
+	Err      *wakeError
+}
+
+// launcherConversation 找出这次要接着的对话，并判断它现在能不能被续聊（#191 之前的四值形式，会话页「运行」按钮用它）。
+// 「新会话 / 最近会话」没有对话编号，都按「没有编号、也没有错误」返回；需要区分它们的调用方用 launcherPick。
+func (g *guardService) launcherConversation(ctx context.Context, run store.HeadlessRun, now time.Time) (string, *store.AgentSessionView, []string, *wakeError) {
+	pk := g.launcherPick(ctx, run, now, "")
+	return pk.Conv, pk.Cur, pk.Warnings, pk.Err
+}
+
+// launcherPick 找出这次运行接对话的方式，并判断现在能不能这样运行。
 //
-// 预设里固定了对话编号就用它；否则取这个工作流里最近有动静的对话（hook 汇报的）。
-// 对话还在运行（工作中且没卡住、在等你回答、在等批准）时拒绝：原进程还活着，再续聊同一个对话会和它打架；
-// 卡住（很久没动静）、已结束、离线都放行——这正是需要续聊的时候；空闲只提示。
+// 对话来源（run.EffectiveSource，#191）：
+//   - 指定会话：预设里固定了对话编号就用它；否则取这个工作流里最近有动静的对话（hook 汇报的）。
+//     对话还在运行（工作中且没卡住、在等你回答、在等批准）时拒绝：原进程还活着，再续聊同一个对话会和它打架；
+//     卡住（很久没动静）、已结束、离线都放行——这正是需要续聊的时候；空闲只提示。
+//   - 新会话：「记下编号」（存量预设的勾选）没有已知对话时新开一次，之后接着学到的对话；「不切换」「成功后切到最近会话」
+//     每次运行都新开，不看工作流已有的对话。工作流里已经有智能体在运行就不新开：再开一个会和它重复接入同一个会话。
+//   - 最近会话：命令用 `--continue`。Hub 不知道它会接到哪个对话，只能按这个工作流已知的对话做近似的保护，并提示可能接错。
+//
+// prefer 是自动续跑传来的「刚出事的那次运行学到的对话」：「新会话」每次都新开时，重试要接着它、不能再新开一个；
+// 其它来源不用它（指定会话有自己的编号，最近会话重试仍是 --continue，记下编号的预设已经把它记在工作流上了）。
 //
 // 同时返回这个对话在 Agent 状态里的会话（没有就是 nil）：会话页「运行」（#128）要从里面取主机名与项目目录。
 // 因为「对话还在运行」而拒绝时，对话编号与会话照样返回（预览要显示它），调用方看到错误就不要运行。
-func (g *guardService) launcherConversation(ctx context.Context, run store.HeadlessRun, now time.Time) (string, *store.AgentSessionView, []string, *wakeError) {
+func (g *guardService) launcherPick(ctx context.Context, run store.HeadlessRun, now time.Time, prefer string) convPick {
 	wf := strings.TrimSpace(run.WorkflowID)
 	var views []store.AgentSessionView
 	if wf != "" {
@@ -437,7 +477,27 @@ func (g *guardService) launcherConversation(ctx context.Context, run store.Headl
 		}
 		views = v
 	}
+
 	conv := run.ConversationID
+	switch run.EffectiveSource() {
+	case store.HeadlessSourceContinue:
+		return g.pickContinue(ctx, wf, views)
+	case store.HeadlessSourceNew:
+		if after := run.EffectiveAfterNew(); after != store.HeadlessAfterRemember {
+			if prefer == "" {
+				// 每次运行都新开：不看工作流里已有的对话编号。
+				if wf == "" {
+					return convPick{Err: newWakeError(http.StatusConflict, "no_conversation", "「新会话」需要填工作流编号：新对话靠它接入 RelayMesh")}
+				}
+				if e := liveAgentError(views); e != nil {
+					return convPick{Err: e}
+				}
+				return convPick{Mode: convNew, Warnings: []string{newConversationEveryNotice(after)}}
+			}
+			conv = prefer // 自动续跑：接着刚出事的那次运行学到的对话
+		}
+	}
+
 	var cur *store.AgentSessionView
 	for i := range views {
 		if (conv != "" && views[i].ConversationID == conv) || (conv == "" && views[i].ConversationID != "") {
@@ -454,35 +514,66 @@ func (g *guardService) launcherConversation(ctx context.Context, run store.Headl
 		}
 	}
 	if conv == "" {
-		if run.NewConversation && wf != "" {
-			// 新开对话（#176）：返回「没有对话编号、也没有错误」，调用方据此知道要新开。
+		if run.EffectiveSource() == store.HeadlessSourceNew && wf != "" {
+			// 新开对话（#176）：返回「新会话、没有对话编号、也没有错误」，调用方据此知道要新开。
 			// 工作流里已经有智能体在运行就不新开：再开一个会和它重复接入同一个会话。
 			if e := liveAgentError(views); e != nil {
-				return "", nil, nil, e
+				return convPick{Err: e}
 			}
-			return "", nil, []string{newConversationNotice}, nil
+			return convPick{Mode: convNew, Warnings: []string{newConversationNotice}}
 		}
-		return "", cur, nil, newWakeError(http.StatusConflict, "no_conversation",
-			"还不知道要接着哪个对话（hook 没汇报过这个工作流的对话编号）：在预设里固定一个对话编号，或先让智能体在这个工作流里跑一次")
+		return convPick{Cur: cur, Err: newWakeError(http.StatusConflict, "no_conversation",
+			"还不知道要接着哪个对话（hook 没汇报过这个工作流的对话编号）：在预设里固定一个对话编号，或先让智能体在这个工作流里跑一次")}
+	}
+	warnings, err := conversationStateGuard(cur)
+	if err != nil {
+		return convPick{Mode: convResume, Conv: conv, Cur: cur, Err: err}
+	}
+	return convPick{Mode: convResume, Conv: conv, Cur: cur, Warnings: warnings}
+}
+
+// pickContinue 是「最近会话」（--continue）的运行前检查：Hub 在运行前不知道 Cursor CLI 会接到哪个对话，
+// 只能按这个工作流已知的对话做近似的保护——已知对话正在工作 / 等你时拒绝（与指定会话同一套 conversation_live），
+// 未知就放行；任何情况都带一条「可能接错」的提示。
+func (g *guardService) pickContinue(ctx context.Context, wf string, views []store.AgentSessionView) convPick {
+	var cur *store.AgentSessionView
+	for i := range views {
+		if views[i].ConversationID != "" {
+			cur = &views[i]
+			break
+		}
+	}
+	pk := convPick{Mode: convContinue, Cur: cur}
+	warnings, err := conversationStateGuard(cur)
+	if err != nil {
+		pk.Err = err
+		return pk
+	}
+	pk.Warnings = append([]string{continueNotice}, warnings...)
+	return pk
+}
+
+// conversationStateGuard 按对话此刻的状态判断能不能被续聊：在运行就拒绝，卡住 / 空闲给提示。cur 为空（不知道状态）就放行。
+func conversationStateGuard(cur *store.AgentSessionView) ([]string, *wakeError) {
+	if cur == nil {
+		return nil, nil
 	}
 	var warnings []string
-	if cur != nil {
-		switch cur.State {
-		case "working":
-			if cur.Stalled {
-				warnings = append(warnings, "这个对话看起来已经卡住（很久没有动静），所以仍然接着它运行；如果它其实还活着，两边会打架")
-			} else {
-				return conv, cur, nil, liveConversationError("工作中")
-			}
-		case "waiting_you":
-			return conv, cur, nil, liveConversationError("在等你回答")
-		case "waiting_approval":
-			return conv, cur, nil, liveConversationError("在等你批准")
-		case "idle":
-			warnings = append(warnings, "这个对话现在是空闲状态；如果它还开在别的窗口里，同时续聊同一个对话会和它打架")
+	switch cur.State {
+	case "working":
+		if cur.Stalled {
+			warnings = append(warnings, "这个对话看起来已经卡住（很久没有动静），所以仍然接着它运行；如果它其实还活着，两边会打架")
+		} else {
+			return nil, liveConversationError("工作中")
 		}
+	case "waiting_you":
+		return nil, liveConversationError("在等你回答")
+	case "waiting_approval":
+		return nil, liveConversationError("在等你批准")
+	case "idle":
+		warnings = append(warnings, "这个对话现在是空闲状态；如果它还开在别的窗口里，同时续聊同一个对话会和它打架")
 	}
-	return conv, cur, warnings, nil
+	return warnings, nil
 }
 
 func liveConversationError(state string) *wakeError {
@@ -492,6 +583,17 @@ func liveConversationError(state string) *wakeError {
 
 // newConversationNotice 是新开对话时随运行计划返回的提示（不挡运行）。
 const newConversationNotice = "这个工作流还没有智能体接入：这次运行会新开一个对话；对话编号从它的输出里学到之后，再运行就是接着它，不会再新开"
+
+// continueNotice 是「最近会话」（--continue）随运行计划返回的提示（不挡运行）：接哪个对话是 Cursor CLI 的决定。
+const continueNotice = "这次运行用 --continue，接着这个目录里 Cursor CLI 认的最近对话——它由 CLI 决定，可能不是这个工作流的（同一目录有多个会话时，请改用「指定会话」）"
+
+// newConversationEveryNotice 是「新会话」每次都新开时随运行计划返回的提示（不挡运行）；after 是「运行之后的去向」。
+func newConversationEveryNotice(after string) string {
+	if after == store.HeadlessAfterContinue {
+		return "这个预设是「新会话 · 成功后切到最近会话」：这次运行会新开一个对话；运行成功之后，预设会自动切换成「最近会话」"
+	}
+	return "这个预设是「新会话 · 不切换」：每次运行都会新开一个对话，不会接着上一次的"
+}
 
 // liveAgentError 判断这个工作流里有没有智能体正在运行（工作中且没卡住、在等你回答、在等你批准）：有就返回错误——
 // 新开对话要避开它（#176：防重复启用）。代码沿用 conversation_live：自动续跑等调用方对它的处理是一样的（有人在用，不抢）。
@@ -624,7 +726,7 @@ func (g *guardService) launcherRunViews(ctx context.Context, now time.Time) (map
 const (
 	// OtherRunSessionRun 是旧的会话页运行接口（POST /terminal/session-run）提交的运行：新页面走预设，但旧页面与脚本还在用它。
 	OtherRunSessionRun = "session_run"
-	// OtherRunWake 是会话守护的「非交互唤醒」提交的运行。
+	// OtherRunWake 是会话守护的「非交互唤醒」提交的运行（#113）。守护在 #245 下线后不会再有新的，旧的记录仍按它归类显示。
 	OtherRunWake = "wake"
 	// OtherRunDeletedPreset 是所属预设已经被删除的预设运行。
 	OtherRunDeletedPreset = "deleted_preset"
@@ -742,6 +844,7 @@ func (g *guardService) runViewOf(ctx context.Context, rec model.TerminalRun, now
 		RunID: rec.RunID, ThreadKey: rec.ThreadKey, State: rec.State, Active: runActive(rec, now), ExitCode: rec.ExitCode,
 		CreatedAt: rec.CreatedAt, StartedAt: rec.StartedAt, EndedAt: rec.EndedAt, DurationMS: rec.DurationMS,
 		TimeoutSec: rec.TimeoutSec, By: parseAgentRunSuffix(rec.Description),
+		Mode: runModeOf(rec.Command), Conversation: convOfRun(rec),
 	}
 	if model.IsFinalRunState(rec.State) {
 		// 输出不超过开头预览的容量时，整份输出都在 PreviewHead、PreviewTail 为空；更长时结尾在 PreviewTail。
@@ -761,6 +864,17 @@ func (g *guardService) runViewOf(ctx context.Context, rec model.TerminalRun, now
 		}
 	}
 	return v
+}
+
+// runModeOf 从一条非交互续聊命令判断这次运行接对话的方式：带 --continue 是最近会话，带 --resume 是指定会话，都没有是新会话（#191）。
+func runModeOf(cmd string) string {
+	switch {
+	case isContinueCommand(cmd):
+		return store.HeadlessSourceContinue
+	case convFromRunCommand(cmd) != "":
+		return store.HeadlessSourceResume
+	}
+	return store.HeadlessSourceNew
 }
 
 // extractRunReply 从运行输出的末尾预览里提取「最后一条回复」。

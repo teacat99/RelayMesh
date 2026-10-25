@@ -223,6 +223,24 @@ export interface AsyncModeView {
   /** 每条新消息给回复窗口加多少分钟、智能体单次计时器最长等多少分钟。 */
   window_add_minutes?: number
   wait_slice_minutes?: number
+  /**
+   * 严格收尾门（#232 D2）开关，默认开：本会话名下还有未完成（待办 / 进行中 / 验证中）任务时回复窗口不走、也不能收尾，
+   * 不按时间截断；关掉后回到老口径（只数 3 小时内有更新的进行中 / 验证中）。老服务端没有这一项（按「关」处理，见 lib/wrapupGate）。
+   */
+  strict_wrapup?: boolean
+  /** 这一轮已被「本次放行」：窗口照常倒计时，任务不动；用户回复或窗口重新起算时自动复位。 */
+  gate_released?: boolean
+  /** 挡着收尾的任务总数与名单（最多 20 个，按编号升序；放行后仍如实给出）。门关着时没有。 */
+  gate_total?: number
+  gate_tasks?: GateTask[]
+}
+
+/** 挡着收尾的一个任务。id 是全局主键（REST 用），seq 是板内序号（界面与智能体说的 #12）。 */
+export interface GateTask {
+  id: number
+  seq: number
+  state: 'todo' | 'doing' | 'review' | string
+  title: string
 }
 
 export interface WorkflowDraft {

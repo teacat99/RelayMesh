@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/glebarez/sqlite"
 	"github.com/teacat99/RelayMesh/v2/internal/model"
@@ -17,6 +18,9 @@ import (
 type Store struct {
 	db *gorm.DB
 	mu sync.Mutex
+	// paramsMu 把「主会话改分支参数 / 用户撤销」串行化（#236 P3）：这几条路径要先读旧值、再调各字段自己的事务写入、
+	// 最后记事件，而 WithTx 的 mu 不可重入，没法把它们包进同一个事务，所以另设一把锁，保证旧值与「最新一条事件」判断不被并发写穿。
+	paramsMu sync.Mutex
 
 	// activity 记录各工作流的智能体最近一次调用 RelayMesh 的时间（只在内存里，见 inbox.go）。
 	activity agentActivity
@@ -27,6 +31,10 @@ type Store struct {
 	// agent 是 Agent 身份与状态核心的内存部分（见 agent_state.go）。
 	agent   agentStateMem
 	screens agentScreenMem // 托管终端屏幕信号（易失，见 agent_screen.go）
+
+	// workRev 在每次任务写入（建 / 改 / 删）后加一，boardDigest 靠它判断缓存是否过期（见 work_board_digest.go）。
+	workRev     atomic.Uint64
+	boardDigest boardDigestCache
 }
 
 func New(dbPath string) (*Store, error) {
@@ -111,6 +119,8 @@ func New(dbPath string) (*Store, error) {
 		&model.ConfirmItem{},
 		&model.ConfirmItemCounter{},
 		&model.WorkflowMode{},
+		&model.WorkflowPrompt{},
+		&model.WorkflowPromptRevision{},
 		&model.WorkflowHookSeen{},
 		&model.AuthProfile{},
 		&model.AgentIdentity{},
@@ -121,6 +131,8 @@ func New(dbPath string) (*Store, error) {
 		&model.Conversation{},
 		&model.ConversationMember{},
 		&model.ChatMessage{},
+		&model.WorkflowBranch{},
+		&model.BranchParamEvent{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to automigrate database tables: %w", err)
 	}

@@ -112,19 +112,24 @@ const STATE_TEXT: Record<string, string> = {
   offline: '离线',
 }
 
-/** 成员状态的一行文字：工作中 · 思考；等你回答时提示「在等你」。 */
-export function memberStatusText(m: Pick<GroupMember, 'kind' | 'state' | 'sub' | 'waiting_you'>): string {
+/**
+ * 成员状态的一行文字：工作中 · 思考；等你回答时提示「在等你」；服务端判出硬卡住的写「疑似卡住」。
+ * stalled 只来自实时会话（群页带的成员里没有它，见 lib/groupStatus.ts 的 overlayLiveState），与页头徽标同口径。
+ */
+export function memberStatusText(m: Pick<GroupMember, 'kind' | 'state' | 'sub' | 'waiting_you'> & { stalled?: boolean }): string {
   if (m.kind !== 'workflow') return ''
   if (m.waiting_you) return '在等你回答'
+  if (m.stalled) return '疑似卡住'
   const base = STATE_TEXT[m.state ?? ''] ?? ''
   if (!base) return ''
   const detail = m.state === 'working' ? subText(m.sub) : ''
   return detail ? `${base} · ${detail}` : base
 }
 
-/** 状态点的颜色：工作中绿、等你/等授权琥珀、出错红、其余灰。 */
-export function memberTone(m: Pick<GroupMember, 'state' | 'waiting_you'>): 'active' | 'attention' | 'danger' | 'muted' {
+/** 状态点的颜色：工作中绿、等你/等授权琥珀、疑似卡住与出错红、其余灰。 */
+export function memberTone(m: Pick<GroupMember, 'state' | 'waiting_you'> & { stalled?: boolean }): 'active' | 'attention' | 'danger' | 'muted' {
   if (m.waiting_you || m.state === 'waiting_approval') return 'attention'
+  if (m.stalled) return 'danger'
   if (m.state === 'working') return 'active'
   if (m.state === 'error') return 'danger'
   return 'muted'

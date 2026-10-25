@@ -19,11 +19,6 @@ import (
 	"github.com/teacat99/RelayMesh/v2/internal/termexec"
 )
 
-// terminalGuardHub 是 MCP 设置唤醒许可所需的最小终端 Hub 接口。
-type terminalGuardHub interface {
-	SetGuardWakePermit(ctx context.Context, presetID string, permit int, by, note string) (*store.GuardWakePermitState, error)
-}
-
 // MaxRequestBytes 是一个 MCP 请求体的大小上限。最大的合法请求是带长摘要的 interactive_feedback，远小于此。
 const MaxRequestBytes = 8 << 20
 
@@ -60,9 +55,8 @@ type Server struct {
 	localProxyKey   string
 	localProxyGuard localProxyGuard
 
-	termMu    sync.RWMutex
-	termExec  termexec.Executor // 终端执行能力；终端功能不可用时为 nil
-	termGuard terminalGuardHub  // 会话守护（唤醒许可等）；终端功能不可用时为 nil
+	termMu   sync.RWMutex
+	termExec termexec.Executor // 终端执行能力；终端功能不可用时为 nil
 
 	presetRunner PresetRunner // 项目管理 Agent 运行预设（preset_run，#179）；终端功能不可用时为 nil（同样由 termMu 保护）
 
@@ -600,6 +594,12 @@ func (s *Server) dispatchTool(ctx context.Context, credCtx *CredentialContext, t
 		return res, err != nil, err
 	case "chat":
 		res, err := s.handleChat(ctx, args)
+		return res, err != nil, err
+	case "branch":
+		res, err := s.handleBranch(ctx, args)
+		return res, err != nil, err
+	case "session_params":
+		res, err := s.handleSessionParams(ctx, args)
 		return res, err != nil, err
 	case "usage_guide":
 		res, err := s.handleUsageGuide(ctx, args)

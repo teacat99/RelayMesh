@@ -7,6 +7,7 @@ import {
   FIRST_MESSAGE_MAX,
   HOST_NAME_MAX,
   NEW_SESSION_PHASES,
+  NEW_SESSION_RESIDENTS,
   PROJECT_DIR_MAX,
   SESSION_NAME_MAX,
   WORKFLOW_ID_MAX,
@@ -28,6 +29,7 @@ import {
   warningLines,
   workflowRoundStatus,
 } from './newSession'
+import { builtinTemplate } from './residentPrompt'
 import { deriveSessionStatus } from './sessionStatus'
 
 /** 单测是编译到缓存目录里跑的，不能用 import.meta.url 找源码；从当前目录往 frontend/src 找。 */
@@ -177,7 +179,11 @@ describe('接线：会话页「启用 Agent」入口（#176 第三期）', () =>
     assert.match(entry, /isAwaitingAgent\(cur, pool\)/)
     assert.match(entry, /enableSupported\(terminal\.prefs\?\.limits\)/)
     assert.match(entry, /terminal\.gateOpen/)
-    assert.match(entry, /<EnableAgentDialog v-if="visible \|\| open"/)
+    // 弹窗是懒加载块（#186）：第一次点按钮才挂载（armed），挂上之后与「按钮是否还在」无关——会话被别的智能体接入、按钮消失，弹窗也不会被收掉
+    assert.match(entry, /<EnableAgentDialog v-if="armed" v-model:open="open"/)
+    assert.doesNotMatch(entry.match(/<EnableAgentDialog[^>]*>/)?.[0] ?? '', /visible/)
+    assert.match(entry, /function openDialog\(\) \{\s*armed\.value = true\s*open\.value = true\s*\}/)
+    assert.match(entry, /data-prefetch="enableAgent"/)
     assert.match(read('components/feedback/SessionStatusBadge.vue'), /latestWorkflowRow/)
   })
   it('弹窗：点「启用并运行」前后的护栏都在（提交期间禁用、解锁取消静默、失败就地显示原因）', () => {
@@ -280,6 +286,7 @@ describe('buildCreateRequest：整份草稿 → 请求体', () => {
       phase: 'plan',
       projectDirectory: '/home/me/pay',
       hostName: 'dev-box',
+      resident: '',
     })
     assert.ok(v.ok)
     assert.deepEqual(v.request, {
@@ -293,6 +300,17 @@ describe('buildCreateRequest：整份草稿 → 请求体', () => {
     const cleared = buildCreateRequest({ ...blankNewSessionDraft(), name: 'x', workflowId: '  ', firstMessage: '\n', hostName: ' ' })
     assert.ok(cleared.ok)
     assert.deepEqual(Object.keys(cleared.request), ['title'])
+  })
+  it('常驻规则（#232）：选了模板就带上「当前生效的模板文字」；用户在设置里覆盖过的优先；不选不带', () => {
+    const main = buildCreateRequest({ ...blankNewSessionDraft(), name: 'x', resident: 'main' })
+    assert.ok(main.ok)
+    assert.equal(main.request.resident, builtinTemplate('main').text)
+    const branch = buildCreateRequest({ ...blankNewSessionDraft(), name: 'x', resident: 'branch' }, { residentBranch: '  我自己的分支规则  ' })
+    assert.ok(branch.ok)
+    assert.equal(branch.request.resident, '我自己的分支规则')
+    const none = buildCreateRequest({ ...blankNewSessionDraft(), name: 'x' }, { residentMain: '覆盖了但没选' })
+    assert.ok(none.ok)
+    assert.ok(!('resident' in none.request))
   })
   it('名字空 / 任何一项不合规都不通过，错误按字段给出（可同时有多项）', () => {
     const none = buildCreateRequest(blankNewSessionDraft())
@@ -309,6 +327,11 @@ describe('advancedFilledCount / phaseLabel / NEW_SESSION_PHASES', () => {
   it('统计高级选项里填了几项（只有空白不算）', () => {
     assert.equal(advancedFilledCount(blankNewSessionDraft()), 0)
     assert.equal(advancedFilledCount({ ...blankNewSessionDraft(), workflowId: ' ', firstMessage: 'x', phase: 'dev' }), 2)
+    assert.equal(advancedFilledCount({ ...blankNewSessionDraft(), resident: 'branch' }), 1)
+  })
+  it('常驻规则的选项：不套用 + 内置模板（主线 / 分支）', () => {
+    assert.deepEqual(NEW_SESSION_RESIDENTS.map(r => r.id), ['', 'main', 'branch'])
+    assert.deepEqual(NEW_SESSION_RESIDENTS.map(r => r.label), ['不套用', '主线会话', '分支会话'])
   })
   it('阶段选项的顺序与名字：不指定 / 讨论 / 方案 / 开发', () => {
     assert.deepEqual(NEW_SESSION_PHASES.map(p => p.id), ['', 'discuss', 'plan', 'dev'])
@@ -330,6 +353,9 @@ describe('appliedLines / warningLines：建好之后告诉用户「实际生效�
     assert.ok(lines[1].includes('收件箱'))
     assert.ok(lines[2].includes('/home/me/pay') && lines[2].includes('拒绝'))
     assert.ok(lines[3].includes('dev-box'))
+    const withResident = appliedLines({ resident: 321 })
+    assert.equal(withResident.length, 1)
+    assert.ok(withResident[0].includes('常驻规则') && withResident[0].includes('321 字') && withResident[0].includes('「常驻」'))
   })
   it('warnings：会话已建好、哪一项没做成、原因与补救办法都写明', () => {
     assert.deepEqual(warningLines(undefined), [])
@@ -343,6 +369,8 @@ describe('appliedLines / warningLines：建好之后告诉用户「实际生效�
     assert.ok(w[0].includes('起始阶段') && w[0].includes('db busy') && w[0].includes('阶段滑块'))
     assert.ok(w[1].includes('首条指令') && w[1].includes('inbox full') && w[1].includes('输入框'))
     assert.ok(w[2].includes('other'))
+    const r = warningLines([{ field: 'resident', error: 'db busy' }])
+    assert.ok(r[0].includes('常驻规则没有存上') && r[0].includes('db busy') && r[0].includes('「常驻」'))
   })
 })
 

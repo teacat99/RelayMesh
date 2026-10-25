@@ -44,6 +44,13 @@ type WorkflowMode struct {
 	// ReplyWindowBankSec 是窗口暂停时攒着的剩余秒数：只要智能体还有进行中 / 验证中的任务，回复窗口就不走，
 	// 因为它没有「空下来等你」；任务清零后从这里接着走（用户 2026-10-15：倒计时仅在没有任务时触发，否则不算异步）。
 	ReplyWindowBankSec int `gorm:"default:0" json:"reply_window_bank_sec,omitempty"`
+	// StrictWrapupOff：用户在这个会话上关掉了「严格收尾门」（#232 D2）。默认 false = 开着：回复窗口只要本会话名下
+	// 还有未完成（待办 / 进行中 / 验证中）的任务就不走，且不按时间截断——「做完所有非搁置任务再结束会话」；
+	// 关掉后回到老口径（只数进行中 / 验证中、且 3 小时内有更新的任务）。取反存储，老库升级后自然是「开着」。
+	StrictWrapupOff bool `gorm:"default:false" json:"strict_wrapup_off,omitempty"`
+	// GateReleased：用户点了「本次放行」，当前这一轮窗口不再被任务挡住、照常倒计时。
+	// 「一次」的含义：用户下一次回复（窗口清零）或窗口过期后重新起算时自动复位，不留成永久开关。
+	GateReleased bool `gorm:"default:false" json:"gate_released,omitempty"`
 	// ToldSig 是最近一次告诉智能体的「模式签名」（见 asyncmode.Signature）：模式或档位变了、而智能体还没被告知时，
 	// 下一次任意工具回执会补一段说明（只提醒一次），让它在工作中途就知道升级 / 降级了。
 	ToldSig   string    `gorm:"size:64" json:"-"`

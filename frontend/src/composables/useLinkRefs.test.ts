@@ -19,7 +19,8 @@ describe('useLinkRefs：会话号引用的装饰（源码级防线）', () => {
   it('「选中的会话属于本工作流」是一个独立的计算属性，会话号解析与按需取整表都用它', () => {
     assert.match(src, /const sessionScopeReady = computed\(\(\) => \{[\s\S]*?\(sel\?\.workflow_id \|\| sel\?\.session_id \|\| ''\) === id[\s\S]*?\}\)/)
     const byHash = src.slice(src.indexOf('const sessionByHash = computed'), src.indexOf('/** 任何一种来源的「存在集合」'))
-    assert.ok(byHash.includes('!sessionScopeReady.value'), 'sessionByHash 要用 sessionScopeReady 判断选中归属')
+    // #186 C2a：索引本身在 store 里共用一份（sessionStore.sessionByHash），这里只做「选中归属」的判断，不属于时是空索引
+    assert.ok(byHash.includes('sessionScopeReady.value') && byHash.includes('sessionStore.sessionByHash') && byHash.includes('NO_SESSIONS'), 'sessionByHash 要用 sessionScopeReady 判断选中归属，不属于时是空索引')
     const ensure = src.slice(src.indexOf('function ensureSessions()'), src.indexOf('/** 当前是不是正显示这个工作流的会话页'))
     assert.ok(ensure.includes('!sessionScopeReady.value') && ensure.includes('ensureWorkflowSessions(id)'), 'ensureSessions 要用 sessionScopeReady 判断选中归属')
   })

@@ -87,7 +87,7 @@ type Options struct {
 	// OpenTimeout / AttachTimeout 是等待 Agent 应答新建会话 / 附着的期限，默认 10 秒。
 	OpenTimeout   time.Duration
 	AttachTimeout time.Duration
-	// GuardTickEvery 是会话守护与自动续跑检查的间隔，默认 1 分钟；AutoResumeBackoff 是自动续跑的退避（第 n 次续跑前等多久），
+	// GuardTickEvery 是自动续跑周期检查的间隔（名字是历史遗留：原先与会话守护共用同一个循环），默认 1 分钟；AutoResumeBackoff 是自动续跑的退避（第 n 次续跑前等多久），
 	// 默认 5 分钟 / 20 分钟 / 60 分钟。二者只用来让实验与端到端测试不必真等几分钟（RELAYMESH_TERMINAL_GUARD_TICK_SEC /
 	// RELAYMESH_TERMINAL_AUTORESUME_BACKOFF_SEC），生产不设。
 	GuardTickEvery    time.Duration
@@ -157,7 +157,8 @@ type Hub struct {
 
 	pre *preAuthLimiter
 	idx *sessionIndexer
-	// guardian 是终端会话守护（D-214）：判断启动器预设拉起的智能体会话有没有意外结束 / 停摆，并生成一键唤醒的计划。
+	// guardian 是终端的运行服务（名字是历史遗留：原先是会话守护，D-214，#245 下线）：非交互运行的提交协调、运行终结后的处理（系统行、切换对话来源）
+	// 与自动续跑的周期检查，见 guard.go。
 	guardian *guardService
 	// screens 消费托管终端的屏幕信号（M3.2）：审批等待、实时 token、上下文占用，见 screen.go。
 	screens *screenService
@@ -398,6 +399,17 @@ func (h *Hub) RecordOAuthAudit(event, result, detail string) {
 		return
 	}
 	h.audit.record(context.Background(), auditEvent{Event: event, Result: result, Actor: ActorSystem, Detail: detail})
+}
+
+// RecordOAuthAdmin 记录管理员在设置里对 OAuth 做的操作（开启 / 续期 / 关闭接入窗口、删除登记）：与协议事件不同，
+// 它有明确的操作者与来源地址。detail 只含时长、到期时间或客户端名，不含任何令牌与密钥。nil 安全。
+func (h *Hub) RecordOAuthAdmin(event, actor, ip, detail string) {
+	if h == nil || h.audit == nil {
+		return
+	}
+	h.audit.record(context.Background(), auditEvent{
+		Event: event, Result: ResultOK, Actor: actor, ActorKind: ActorHuman, IP: ip, Detail: detail,
+	})
 }
 
 func (h *Hub) CredentialRevealed(actor, ip, result, detail string) {

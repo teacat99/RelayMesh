@@ -22,13 +22,6 @@ func (s *Server) SetTerminalExecutor(e termexec.Executor) {
 	s.termMu.Unlock()
 }
 
-// SetTerminalGuardHub 注入终端 Hub（唤醒许可等）。
-func (s *Server) SetTerminalGuardHub(h terminalGuardHub) {
-	s.termMu.Lock()
-	s.termGuard = h
-	s.termMu.Unlock()
-}
-
 func (s *Server) terminalExecutor() termexec.Executor {
 	s.termMu.RLock()
 	defer s.termMu.RUnlock()

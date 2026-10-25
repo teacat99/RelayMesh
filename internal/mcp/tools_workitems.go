@@ -221,9 +221,13 @@ func (s *Server) handleTaskCreate(ctx context.Context, args workflowContextArgs)
 		return nil, workToolError("task_create", err)
 	}
 	s.notifyWorkItem(res.Item, false)
+	s.postBoardLines(ctx, res)
 	out := map[string]any{"status": "created", "task": compactTaskFor(res.Item, args.WorkflowID)}
 	if h := pol.hint(res); h != "" {
 		out["policy_hint"] = h
+	}
+	if h := s.branchAssignHint(ctx, args.WorkflowID, res); h != "" {
+		out["branch_hint"] = h
 	}
 	if strings.TrimSpace(args.SessionID) != "" {
 		out["session_linked"] = res.SessionLinked
@@ -283,10 +287,14 @@ func (s *Server) handleTaskUpdate(ctx context.Context, args workflowContextArgs)
 	if res.Changed {
 		status = "updated"
 		s.notifyWorkItem(res.Item, false)
+		s.postBoardLines(ctx, res)
 	}
 	out := map[string]any{"status": status, "task": compactTaskFor(res.Item, args.WorkflowID)}
 	if h := pol.hint(res); h != "" {
 		out["policy_hint"] = h
+	}
+	if h := s.branchAssignHint(ctx, args.WorkflowID, res); h != "" {
+		out["branch_hint"] = h
 	}
 	if strings.TrimSpace(args.SessionID) != "" {
 		out["session_linked"] = res.SessionLinked

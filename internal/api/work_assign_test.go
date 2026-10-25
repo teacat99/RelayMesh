@@ -188,3 +188,81 @@ func TestWorkItemAssigneesREST(t *testing.T) {
 		t.Fatalf("未登录应 401: %d", r.Code)
 	}
 }
+
+// 列表响应里的 offered（#180 B3b）：侧栏徽标的数据源——各工作流手上待接取的协作任务个数与最早派出时间；
+// 全局口径（不随 workflow_id 过滤），没有待接取时不带这个字段；接取 / 拒绝后立即对得上。
+func TestWorkListOffered(t *testing.T) {
+	srv := newWiredServer(t, nil)
+	tok := wiredLogin(t, srv)
+	auth := []string{"Authorization", "Bearer " + tok}
+	call := func(m, p string, body any) wiredResp { return wiredCall(srv, m, p, body, auth...) }
+	ctx := context.Background()
+
+	for _, wf := range []struct{ id, dir string }{{"wf-a", "/code/proj"}, {"wf-b", "/code/proj-feat"}} {
+		if _, err := srv.store.CreateFeedbackSession(ctx, store.CreateSessionInput{SessionID: "s-" + wf.id, WorkflowID: wf.id, EnvHostName: "h", ProjectDirectory: wf.dir, Title: "t", Summary: "s"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res := call("POST", "/api/v1/projects", map[string]any{
+		"name": "主项目", "slug": "main",
+		"dirs": []map[string]any{{"host_name": "h", "project_directory": "/code/proj"}, {"host_name": "h", "project_directory": "/code/proj-feat"}},
+	}); res.Code != http.StatusCreated {
+		t.Fatalf("创建项目: %d %s", res.Code, res.Raw)
+	}
+
+	offered := func(query string) []map[string]any {
+		t.Helper()
+		r := call("GET", "/api/v1/work-items"+query, nil)
+		if r.Code != http.StatusOK {
+			t.Fatalf("列表 %s: %d %s", query, r.Code, r.Raw)
+		}
+		raw, has := r.Body["offered"]
+		if !has {
+			return nil
+		}
+		var out []map[string]any
+		for _, v := range raw.([]any) {
+			out = append(out, v.(map[string]any))
+		}
+		return out
+	}
+
+	// 一条指派都没有：不带 offered。
+	if got := offered(""); got != nil {
+		t.Fatalf("没有指派时不应带 offered: %v", got)
+	}
+
+	// 用户在网页上把两个任务派给 wf-b；wf-a 自己的活不算。
+	var ids []string
+	for _, title := range []string{"迁移脚本", "补测试"} {
+		it := itemOf(t, call("POST", "/api/v1/work-items", map[string]any{"workflow_id": "wf-a", "title": title, "assignee_workflow_id": "wf-b"}))
+		ids = append(ids, strconv.Itoa(num(it["id"])))
+	}
+	call("POST", "/api/v1/work-items", map[string]any{"workflow_id": "wf-a", "title": "自己的活"})
+
+	got := offered("")
+	if len(got) != 1 || got[0]["workflow_id"] != "wf-b" || num(got[0]["count"]) != 2 {
+		t.Fatalf("wf-b 应有 2 项待接取: %v", got)
+	}
+	if at, _ := got[0]["oldest_at"].(string); at == "" {
+		t.Fatalf("应带最早派出时间: %v", got[0])
+	}
+	// 全局口径：换个 workflow_id 过滤、带别的条件，offered 不变。
+	if other := offered("?workflow_id=wf-a&kind=bug"); len(other) != 1 || num(other[0]["count"]) != 2 {
+		t.Fatalf("offered 不应随过滤条件变: %v", other)
+	}
+
+	// 接取一个、拒绝一个：对得上，最后一个处理完字段消失。
+	if r := call("PUT", "/api/v1/work-items/"+ids[0], map[string]any{"claim": "accept"}); r.Code != http.StatusOK {
+		t.Fatalf("接取: %d %s", r.Code, r.Raw)
+	}
+	if got := offered(""); len(got) != 1 || num(got[0]["count"]) != 1 {
+		t.Fatalf("接取一个后应剩 1 项: %v", got)
+	}
+	if r := call("PUT", "/api/v1/work-items/"+ids[1], map[string]any{"claim": "decline", "note": "排满了"}); r.Code != http.StatusOK {
+		t.Fatalf("拒绝: %d %s", r.Code, r.Raw)
+	}
+	if got := offered(""); got != nil {
+		t.Fatalf("都处理完后不应再带 offered: %v", got)
+	}
+}

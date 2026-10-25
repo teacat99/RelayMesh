@@ -49,7 +49,37 @@ const (
 
 	// 收件箱里确认项答复的消息种类（QueuedFeedback.Kind）。
 	InboxKindAnswer = "answer"
+
+	// 决策路由（#236 P2）：分支里智能体发的请示，先送主会话定夺。
+	// addressee = wf:<主会话工作流>；空 = 直接给用户。答复人 By = agent:<主会话工作流>（人 = human）。
+	ConfirmAddresseeMainPrefix = "wf:"
+	ConfirmByAgentPrefix       = "agent:"
+	// 转交 / 升级的来源（ConfirmEscalation.By）：agent:<主会话工作流> 主会话自己转的；timeout 超时自动升级；system 关系结束 / 关了「定夺」。
+	ConfirmEscalatedByTimeout = "timeout"
+	ConfirmEscalatedBySystem  = "system"
+	// ConfirmEscalateNoteMax 是主会话转交时说明的字数上限（必填，用户要靠它看懂为什么转给他）。
+	ConfirmEscalateNoteMax = 300
 )
+
+// ConfirmAddresseeMain 拼出「路由给某个主会话」的 addressee。
+func ConfirmAddresseeMain(workflowID string) string { return ConfirmAddresseeMainPrefix + workflowID }
+
+// ConfirmAddresseeMainOf 取出 addressee 里的主会话工作流编号；不是路由给主会话的返回空串。
+func ConfirmAddresseeMainOf(addressee string) string {
+	if !strings.HasPrefix(addressee, ConfirmAddresseeMainPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(addressee, ConfirmAddresseeMainPrefix))
+}
+
+// ConfirmByAgent 拼出「某个主会话 Agent 代答」的 By。
+func ConfirmByAgent(workflowID string) string { return ConfirmByAgentPrefix + workflowID }
+
+// ConfirmEscalation 记录一次转交 / 升级：谁转的、说了什么。
+type ConfirmEscalation struct {
+	By   string `json:"by"`
+	Note string `json:"note,omitempty"`
+}
 
 // ConfirmOption 是确认项里的一个可选项。
 type ConfirmOption struct {
@@ -68,7 +98,7 @@ type ConfirmAnswer struct {
 	OptionIDs []string `json:"options"`
 	Note      string   `json:"note,omitempty"`
 	Custom    string   `json:"custom,omitempty"`
-	By        string   `json:"by"` // 目前只有 human（Web 登录用户）
+	By        string   `json:"by"` // human（Web 登录用户）| agent:<主会话工作流>（分支里的请示由主会话代为定夺，#236 P2；老记录只有 human）
 }
 
 type ConfirmItem struct {
@@ -100,6 +130,19 @@ type ConfirmItem struct {
 	CreatedBy string    `gorm:"size:16;not null" json:"created_by"`
 	CreatedAt time.Time `gorm:"index:idx_confirm_wf_created,priority:2" json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// 决策路由（#236 P2），三列都可空：空 = 和以前完全一样（直接给用户）。
+	//   - Addressee：wf:<主会话工作流> = 先送主会话定夺；转交 / 升级时清空，作答后保留（用来标注「这条曾路由给主会话」）；
+	//   - EscalatedAt：主会话转交 / 超时升级 / 关系结束善后的时刻；
+	//   - EscalationJSON：{"by":…,"note":…}（见 ConfirmEscalation）。
+	Addressee      string     `gorm:"size:160;index" json:"addressee,omitempty"`
+	EscalatedAt    *time.Time `json:"escalated_at,omitempty"`
+	EscalationJSON string     `gorm:"type:text" json:"-"`
+}
+
+// RoutedToMain 报告这条请示此刻是否在等主会话定夺（路由给了主会话、仍待处理）。
+func (c ConfirmItem) RoutedToMain() bool {
+	return c.Status == ConfirmStatusPending && ConfirmAddresseeMainOf(c.Addressee) != ""
 }
 
 // ConfirmItemCounter 保证工作流内确认项序号不复用（即使中间的项被删除）。
@@ -134,6 +177,11 @@ type ConfirmItemView struct {
 	CreatedBy     string          `json:"created_by"`
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
+
+	// 决策路由（#236 P2）：Addressee 非空且 Status=pending = 在等主会话定夺；Escalated* 有值 = 主会话转交 / 超时升级给了用户。
+	Addressee   string             `json:"addressee,omitempty"`
+	EscalatedAt *time.Time         `json:"escalated_at,omitempty"`
+	Escalation  *ConfirmEscalation `json:"escalation,omitempty"`
 }
 
 // NewConfirmItemView 把库里的行转成对外视图（选项 JSON 损坏时返回空选项，不让一行脏数据拖垮整个列表）。
@@ -145,7 +193,14 @@ func NewConfirmItemView(item *ConfirmItem) ConfirmItemView {
 		TaskSeq: item.TaskSeq, DocID: item.DocID, DocKey: item.DocKey, Anchor: item.Anchor,
 		Status: item.Status, AnsweredAt: item.AnsweredAt,
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+		Addressee: item.Addressee, EscalatedAt: item.EscalatedAt,
 		Options: []ConfirmOption{},
+	}
+	if strings.TrimSpace(item.EscalationJSON) != "" {
+		var e ConfirmEscalation
+		if json.Unmarshal([]byte(item.EscalationJSON), &e) == nil {
+			v.Escalation = &e
+		}
 	}
 	if strings.TrimSpace(item.OptionsJSON) != "" {
 		var opts []ConfirmOption

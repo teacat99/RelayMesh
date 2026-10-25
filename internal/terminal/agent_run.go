@@ -176,6 +176,8 @@ type AgentPresetLastRun struct {
 	Silent     bool       `json:"silent,omitempty"`
 	Why        string     `json:"why,omitempty"`
 	By         string     `json:"by,omitempty"`
+	// Conversation 是这次运行实际接上的对话编号（#191）；最近会话 / 新会话在运行开始、读到输出之后才有。
+	Conversation string `json:"conversation,omitempty"`
 }
 
 // AgentPresetView 是项目管理 Agent 能看到的一条预设。
@@ -190,8 +192,15 @@ type AgentPresetView struct {
 	MaxRunMinutes   int    `json:"max_run_minutes"`
 	AutoResume      bool   `json:"auto_resume,omitempty"`
 	NewConversation bool   `json:"new_conversation,omitempty"`
+	// Source 是预设的对话来源（#191）：resume（指定会话）/ new（新会话）/ continue（最近会话：--continue，接哪个对话由 Cursor CLI 决定）。
+	// AfterNew 只在 new 时有：remember（记下编号，之后接着它）/ stay（每次都新开）/ continue（成功后自动切到最近会话）。
+	Source   string `json:"source,omitempty"`
+	AfterNew string `json:"after_new,omitempty"`
 	// Origin 是预设的来源：enable_agent = 网页上「启用 Agent」建的；空 = 用户手工建的。
 	Origin string `json:"origin,omitempty"`
+	// Branch 为真表示这条预设的目标是调用方自己的活动分支（#236 P4）：用来唤醒分支，只有它的主会话看得到；
+	// 用户没有在这个分支的开放范围里打开「启动」时 can_run 为否、why_code = branch_launch_closed。
+	Branch bool `json:"branch,omitempty"`
 	// CanRun 是此刻能不能运行（沿用网页「运行」按钮预览的那套检查，再加上频率账本）；不能时 WhyNot 是一句中文原因、WhyCode 是稳定的代码。
 	CanRun  bool                `json:"can_run"`
 	WhyNot  string              `json:"why_not,omitempty"`
@@ -201,17 +210,21 @@ type AgentPresetView struct {
 
 // AgentRunResult 是运行提交成功之后的回执。
 type AgentRunResult struct {
-	Preset          string   `json:"preset"`
-	Name            string   `json:"name"`
-	WorkflowID      string   `json:"workflow_id"`
-	RunID           string   `json:"run_id"`
-	State           string   `json:"state"`
-	Posture         string   `json:"posture"`
-	Model           string   `json:"model,omitempty"`
-	MaxRunMinutes   int      `json:"max_run_minutes"`
-	NewConversation bool     `json:"new_conversation,omitempty"`
-	Warnings        []string `json:"warnings,omitempty"`
-	Message         string   `json:"message"`
+	Preset          string `json:"preset"`
+	Name            string `json:"name"`
+	WorkflowID      string `json:"workflow_id"`
+	RunID           string `json:"run_id"`
+	State           string `json:"state"`
+	Posture         string `json:"posture"`
+	Model           string `json:"model,omitempty"`
+	MaxRunMinutes   int    `json:"max_run_minutes"`
+	NewConversation bool   `json:"new_conversation,omitempty"`
+	// Continue 表示这次运行是「最近会话」（--continue，#191）：接到哪个对话由 Cursor CLI 决定，运行开始后在 last_run.conversation 里能看到。
+	Continue bool `json:"continue,omitempty"`
+	// Branch 为真表示这次运行唤醒的是调用方自己的分支（#236 P4）。
+	Branch   bool     `json:"branch,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+	Message  string   `json:"message"`
 }
 
 // ---------- 资格 ----------
@@ -229,25 +242,72 @@ func (g *guardService) boardProjectOf(ctx context.Context, workflowID string) ui
 	return pid
 }
 
-// agentEligible 把预设分成两类：actor 有资格运行的（目标工作流在 actor 所在项目的任务板上、且不是它自己的工作流），
-// 以及目标就是 actor 自己的工作流的（不能运行，单列出来是为了给出更明确的拒绝原因）。别的预设一概不返回——
-// 包括别的项目的、没有目标工作流的、不是非交互续聊的：对 actor 来说它们不存在。结果按名字排序。
-func (g *guardService) agentEligible(ctx context.Context, actor AgentRunActor) (eligible, own []store.TerminalLauncher, err error) {
+// agentBranchInfo 标记「这条预设的目标是调用方自己的活动分支」（#236 P4）：这类预设的资格按目标工作流走、不再看任务板。
+type agentBranchInfo struct {
+	// Branch 是分支的工作流编号（预设的目标）。
+	Branch string
+	// LaunchOpen 是用户在这个分支的开放范围里有没有打开「启动」：关着时预设仍然列出（让主会话知道下一步），但不能运行。
+	LaunchOpen bool
+}
+
+// agentPick 是 agentResolve 解析出来的预设，以及它是不是调用方自己分支的启动预设（nil = 不是）。
+type agentPick struct {
+	p      *store.TerminalLauncher
+	branch *agentBranchInfo
+}
+
+// branchLaunchClosedMessage 是分支的「启动」没打开时写给主会话的一句话：点名原因与下一步。
+const branchLaunchClosedMessage = "这是你的分支的启动预设，但用户还没有在这个分支的会话页「分支」面板里打开「启动」：请告诉用户打开它（打开要再输一次终端解锁密码），打开之后再运行"
+
+// agentCandidates 把预设分成两类：actor 有资格运行的（见下），以及目标就是 actor 自己的工作流的（不能运行，单列出来是为了给出更明确的拒绝原因）。
+// 别的预设一概不返回——包括别的项目的、没有目标工作流的、不是非交互续聊的：对 actor 来说它们不存在。结果按名字排序。
+//
+// 「有资格」按目标工作流分流（#236 P4；每个目标只查一次它的分支关系）：
+//   - 目标是活动分支：只有它的主会话（actor 自己）看得到、运行得了，任何其他调用方——哪怕是同一个项目的管理 Agent——一律当「不存在」；
+//     分支所在的任务板不限（分支在别的项目、不在任何项目也行）。「启动」没打开时预设仍列在 eligible 里，由 branch 里的 LaunchOpen 标明；
+//   - 其余：目标工作流在 actor 所在项目的任务板上、且不是 actor 自己的工作流（一个字没动）。
+//
+// branch 只含「目标是 actor 自己的活动分支」的预设（预设编号 → 标记）；没有分支关系时恒为 nil。
+func (g *guardService) agentCandidates(ctx context.Context, actor AgentRunActor) (eligible, own []store.TerminalLauncher, branch map[string]*agentBranchInfo, err error) {
 	if actor.ProjectID == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	launchers, err := g.h.store.ListTerminalLaunchers(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	self := strings.TrimSpace(actor.WorkflowID)
-	project := map[string]uint{} // 工作流 → 它的板所在的项目（0 = 不在任何项目的板上）
+	project := map[string]uint{}                // 工作流 → 它的板所在的项目（0 = 不在任何项目的板上）
+	relOf := map[string]*model.WorkflowBranch{} // 工作流 → 它作为分支的活动关系（nil = 不是活动分支）
 	for _, p := range launchers {
 		if !p.IsHeadless() || p.Run == nil {
 			continue
 		}
 		wf := strings.TrimSpace(p.Run.WorkflowID)
 		if wf == "" {
+			continue
+		}
+		rel, seenRel := relOf[wf]
+		if !seenRel {
+			cur, berr := g.h.store.BranchOf(ctx, wf)
+			if berr != nil {
+				// 查不到关系就不能放行：退回「同板规则」会让别的管理 Agent 误得到分支的预设。
+				return nil, nil, nil, berr
+			}
+			if cur != nil && cur.Active() {
+				rel = cur
+			}
+			relOf[wf] = rel
+		}
+		if rel != nil {
+			if self == "" || strings.TrimSpace(rel.ParentWorkflowID) != self {
+				continue
+			}
+			if branch == nil {
+				branch = map[string]*agentBranchInfo{}
+			}
+			branch[p.ID] = &agentBranchInfo{Branch: wf, LaunchOpen: rel.Expose.Launch}
+			eligible = append(eligible, p)
 			continue
 		}
 		pid, seen := project[wf]
@@ -269,7 +329,7 @@ func (g *guardService) agentEligible(ctx context.Context, actor AgentRunActor) (
 	}
 	byName(eligible)
 	byName(own)
-	return eligible, own, nil
+	return eligible, own, branch, nil
 }
 
 // matchPreset 按编号或名字（不分大小写、空白折叠）在 list 里找预设。
@@ -294,13 +354,13 @@ func matchPreset(list []store.TerminalLauncher, ref string) *store.TerminalLaunc
 
 // agentResolve 把调用方给的预设引用解析成有资格运行的预设；找不到、或者是别的项目 / 自己的，都返回带原因的 AgentRunError。
 // 「找不到」与「不在你的项目里」用同一句话：不向调用方透露它看不见的预设是否存在。
-func (g *guardService) agentResolve(ctx context.Context, actor AgentRunActor, ref string) (*store.TerminalLauncher, error) {
-	eligible, own, err := g.agentEligible(ctx, actor)
+func (g *guardService) agentResolve(ctx context.Context, actor AgentRunActor, ref string) (*agentPick, error) {
+	eligible, own, branch, err := g.agentCandidates(ctx, actor)
 	if err != nil {
 		return nil, err
 	}
 	if p := matchPreset(eligible, ref); p != nil {
-		return p, nil
+		return &agentPick{p: p, branch: branch[p.ID]}, nil
 	}
 	if p := matchPreset(own, ref); p != nil {
 		return nil, agentErr("own_workflow", "不能运行自己所在工作流的预设（避免自己唤醒自己）；要唤醒别的子会话，请运行目标工作流是它的预设")
@@ -410,13 +470,15 @@ func roughDuration(d time.Duration) string {
 // ---------- 视图 ----------
 
 // agentViewOf 整理一条预设给项目管理 Agent 看：沿用网页「运行」按钮预览的检查（inspectLauncher）+ 频率账本，再带上最近一次运行。
-func (g *guardService) agentViewOf(ctx context.Context, p store.TerminalLauncher, led *agentLedger, now time.Time) AgentPresetView {
+// bi 非空表示目标是调用方自己的活动分支（#236 P4）：「启动」没打开时不再往下检查，直接写明原因与下一步。
+func (g *guardService) agentViewOf(ctx context.Context, p store.TerminalLauncher, led *agentLedger, now time.Time, bi *agentBranchInfo) AgentPresetView {
 	run := *p.Run
 	v := AgentPresetView{
 		Preset: p.ID, Name: p.Name, WorkflowID: strings.TrimSpace(run.WorkflowID),
 		WorkflowTitle: g.h.store.WorkflowTitleOf(ctx, run.WorkflowID),
 		Posture:       run.EffectivePosture(), Model: run.Model, MaxRunMinutes: run.EffectiveMaxRunMinutes(),
-		AutoResume: run.AutoResume, NewConversation: run.NewConversation, Origin: run.Origin,
+		AutoResume: run.AutoResume, NewConversation: run.EffectiveSource() == store.HeadlessSourceNew, Origin: run.Origin,
+		Source: run.EffectiveSource(), AfterNew: run.EffectiveAfterNew(), Branch: bi != nil,
 	}
 	if host, err := g.h.store.GetTerminalHost(ctx, p.Host); err == nil && host != nil {
 		v.Host = strings.TrimSpace(host.Remark)
@@ -424,8 +486,13 @@ func (g *guardService) agentViewOf(ctx context.Context, p store.TerminalLauncher
 			v.Host = host.Hostname
 		}
 	}
-	in := g.inspectLauncher(ctx, p, now)
+	var in *launcherInspect
+	if bi == nil || bi.LaunchOpen {
+		in = g.inspectLauncher(ctx, p, now)
+	}
 	switch {
+	case bi != nil && !bi.LaunchOpen:
+		v.WhyNot, v.WhyCode = branchLaunchClosedMessage, "branch_launch_closed"
 	case len(in.errs) > 0:
 		v.WhyNot, v.WhyCode = in.errs[0].Message, in.errs[0].Code
 	case led != nil:
@@ -439,6 +506,7 @@ func (g *guardService) agentViewOf(ctx context.Context, p store.TerminalLauncher
 		v.LastRun = &AgentPresetLastRun{
 			RunID: lv.RunID, State: lv.State, Active: lv.Active, CreatedAt: lv.CreatedAt, StartedAt: lv.StartedAt, EndedAt: lv.EndedAt,
 			DurationMS: lv.DurationMS, ExitCode: lv.ExitCode, Reply: lv.Reply, Silent: lv.Silent, Why: lv.Why, By: lv.By,
+			Conversation: lv.Conversation,
 		}
 	}
 	return v
@@ -454,7 +522,7 @@ func (h *Hub) AgentPresets(ctx context.Context, actor AgentRunActor) ([]AgentPre
 		return nil, errGuardUnavailable
 	}
 	g, now := h.guardian, h.now()
-	eligible, _, err := g.agentEligible(ctx, actor)
+	eligible, _, branch, err := g.agentCandidates(ctx, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -464,7 +532,7 @@ func (h *Hub) AgentPresets(ctx context.Context, actor AgentRunActor) ([]AgentPre
 	}
 	out := make([]AgentPresetView, 0, len(eligible))
 	for _, p := range eligible {
-		out = append(out, g.agentViewOf(ctx, p, led, now))
+		out = append(out, g.agentViewOf(ctx, p, led, now, branch[p.ID]))
 	}
 	return out, nil
 }
@@ -475,7 +543,7 @@ func (h *Hub) AgentPresetStatus(ctx context.Context, actor AgentRunActor, ref st
 		return nil, errGuardUnavailable
 	}
 	g, now := h.guardian, h.now()
-	p, err := g.agentResolve(ctx, actor, ref)
+	pick, err := g.agentResolve(ctx, actor, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +551,7 @@ func (h *Hub) AgentPresetStatus(ctx context.Context, actor AgentRunActor, ref st
 	if err != nil {
 		return nil, err
 	}
-	v := g.agentViewOf(ctx, *p, led, now)
+	v := g.agentViewOf(ctx, *pick.p, led, now, pick.branch)
 	return &v, nil
 }
 
@@ -513,13 +581,20 @@ func (h *Hub) AgentRunPreset(ctx context.Context, actor AgentRunActor, ref strin
 		})
 	}
 
-	p, err := g.agentResolve(ctx, actor, ref)
+	pick, err := g.agentResolve(ctx, actor, ref)
 	if err != nil {
 		var ae *AgentRunError
 		if errors.As(err, &ae) {
 			deny(nil, ae.Code, "")
 		}
 		return nil, err
+	}
+	p := pick.p
+	// 分支的「启动」是用户给的开关，每次现查现判：关着就是关着（已经提交的运行不受影响，要停它仍走取消 / 最长运行时间）。
+	if pick.branch != nil && !pick.branch.LaunchOpen {
+		e := agentErr("branch_launch_closed", branchLaunchClosedMessage)
+		deny(p, e.Code, "")
+		return nil, e
 	}
 	if in := g.inspectLauncher(ctx, *p, now); len(in.errs) > 0 {
 		deny(p, in.errs[0].Code, "")
@@ -551,6 +626,12 @@ func (h *Hub) AgentRunPreset(ctx context.Context, actor AgentRunActor, ref strin
 	if plan.NewConversation {
 		detail += " new=1"
 	}
+	if plan.Continue {
+		detail += " continue=1"
+	}
+	if pick.branch != nil {
+		detail += " branch=1"
+	}
 	// 成功提交的记录是账本的唯一来源，不限流：每天最多 MaxPerDay 条，本来就被上限卡住。
 	h.audit.record(ctx, auditEvent{
 		Event: EvLauncherAgentRun, Result: ResultOK, Actor: actor.ref(), ActorKind: ActorModel, MachineCode: preset.Host, RunID: plan.RunID,
@@ -563,7 +644,7 @@ func (h *Hub) AgentRunPreset(ctx context.Context, actor AgentRunActor, ref strin
 	}
 	return &AgentRunResult{
 		Preset: preset.ID, Name: preset.Name, WorkflowID: strings.TrimSpace(p.Run.WorkflowID), RunID: plan.RunID, State: plan.RunState,
-		Posture: plan.Posture, Model: plan.Model, MaxRunMinutes: plan.MaxRunSeconds / 60, NewConversation: plan.NewConversation,
-		Warnings: plan.Warnings, Message: msg,
+		Posture: plan.Posture, Model: plan.Model, MaxRunMinutes: plan.MaxRunSeconds / 60, NewConversation: plan.NewConversation, Continue: plan.Continue,
+		Branch: pick.branch != nil, Warnings: plan.Warnings, Message: msg,
 	}, nil
 }

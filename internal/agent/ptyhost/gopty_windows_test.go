@@ -56,6 +56,31 @@ func (c *collector) waitFor(t *testing.T, sub string, d time.Duration) {
 	t.Fatalf("等待输出 %q 超时，已收到: %q", sub, c.text())
 }
 
+// queryUntil 向终端写入 query，并等待 want 出现；每隔 retryEvery 仍没出现就重发一次，总共最多等 total。
+//
+// 为什么要重发：Windows PowerShell 刚启动时，写得太早的输入可能落在它初始化控制台的那一刻而被丢掉
+// （托管 runner 上冷启动还可能慢到十几秒），表现为「等不到输出」，并不是被测代码的问题。重发是安全的：
+// 这类查询只会多打印几行结果，期望的输出只要出现一次就算通过。
+func (c *collector) queryUntil(t *testing.T, term Terminal, query, want string, total, retryEvery time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(total)
+	for {
+		if _, err := term.Write([]byte(query)); err != nil {
+			t.Fatal(err)
+		}
+		retryAt := time.Now().Add(retryEvery)
+		for time.Now().Before(retryAt) {
+			if strings.Contains(c.text(), want) {
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等待输出 %q 超时（重发查询仍无结果），已收到: %q", want, c.text())
+		}
+	}
+}
+
 func mustSpawnWin(t *testing.T, spec Spec) (Terminal, *collector) {
 	t.Helper()
 	term, err := NewSpawner().Spawn(spec)
@@ -108,18 +133,19 @@ func TestWindowsInitialSizeAndResize(t *testing.T) {
 		Rows: 30, Cols: 100,
 	})
 	query := "'W=' + $Host.UI.RawUI.WindowSize.Width + ' H=' + $Host.UI.RawUI.WindowSize.Height\r\n"
-	if _, err := term.Write([]byte(query)); err != nil {
-		t.Fatal(err)
-	}
-	out.waitFor(t, "W=100 H=30", 15*time.Second)
+
+	// 先等提示符出现再发查询：冷启动慢的 runner 上 PowerShell 需要十几秒才就绪，输入写得太早还可能被它的初始化吞掉
+	// （这个用例在公开库 CI 上出现过「只收到 ConPTY 的初始化序列，一直没有提示符与回显」的间歇失败）。
+	start := time.Now()
+	out.waitFor(t, "PS ", 90*time.Second)
+	t.Logf("PowerShell 提示符出现用了 %v", time.Since(start).Round(10*time.Millisecond))
+
+	out.queryUntil(t, term, query, "W=100 H=30", 30*time.Second, 5*time.Second)
 	if err := term.Resize(40, 132); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(500 * time.Millisecond)
-	if _, err := term.Write([]byte(query)); err != nil {
-		t.Fatal(err)
-	}
-	out.waitFor(t, "W=132 H=40", 15*time.Second)
+	out.queryUntil(t, term, query, "W=132 H=40", 30*time.Second, 5*time.Second)
 }
 
 func TestWindowsKillTerminatesChildPromptly(t *testing.T) {

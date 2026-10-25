@@ -7,6 +7,7 @@
 // （否则只亮外框、不滚动：视口停在底部时点名更早轮次里的卡，卡会留在几千像素之外，滚动位置纹丝不动）。
 import { onMounted, ref, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'
 import { useConfirmStore } from '../stores/confirms'
+import { scrollParentOf, useScrollSettle } from './useScrollSettle'
 
 /** 高亮持续的时间（毫秒）。 */
 export const CONFIRM_FOCUS_MS = 2500
@@ -22,7 +23,16 @@ export function useConfirmFocus(itemRef: MaybeRefOrGetter<string>, rootEl: Ref<H
   let focusTimer: ReturnType<typeof setTimeout> | null = null
   // 点名时这张卡还没有根节点（它是点名之后才挂载的）：等挂载好再滚
   let scrollOnMount = false
-  const reveal = () => rootEl.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  const { settle } = useScrollSettle()
+  // 滚到卡并居中。浏览器的平滑滚动在起跑时就把终点算死了，而卡上方还没渲染过的块（离屏跳过渲染的占位高度）一路滚过去会变成真实高度，
+  // 总高度变了、终点就偏——跳得越远偏得越多，表现为「点了跳转，滚到半路就停了」（#253，实验室实测落在离卡数千 px 处）。
+  // 所以滚动起跑之后交给落地校准（与右侧轨 / 搜索命中 / 滚到某一轮同一套）：停稳后量卡的真实位置，偏了就补，用户自己动了就放手；对齐方式仍是居中。
+  const reveal = () => {
+    const el = rootEl.value
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    settle(scrollParentOf(el), el, { align: 'center' })
+  }
   watch(
     () => store.focusRef,
     focusRef => {

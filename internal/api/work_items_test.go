@@ -67,7 +67,7 @@ func TestWorkItemRESTAuthBoundaries(t *testing.T) {
 		t.Fatalf("未登录应 401: %d %s", res.Code, res.Raw)
 	}
 	for name, tok := range map[string]string{"环境令牌": wiredMCPToken, "凭据库令牌": dbToken} {
-		for _, call := range []struct{ method, path string }{{"GET", "/api/v1/work-items"}, {"POST", "/api/v1/work-items"}, {"PUT", "/api/v1/work-items/1"}, {"DELETE", "/api/v1/work-items/1"}} {
+		for _, call := range []struct{ method, path string }{{"GET", "/api/v1/work-items"}, {"GET", "/api/v1/work-items/by-seq?workflow_id=w&seq=1"}, {"POST", "/api/v1/work-items"}, {"PUT", "/api/v1/work-items/1"}, {"DELETE", "/api/v1/work-items/1"}} {
 			res := wiredCall(srv, call.method, call.path, map[string]any{"title": "x", "workflow_id": "w"}, "Authorization", "Bearer "+tok)
 			if res.Code != http.StatusForbidden || res.str("code") != "mcp_token_forbidden" {
 				t.Fatalf("%s 访问 %s %s 应得到 403 mcp_token_forbidden: %d %s", name, call.method, call.path, res.Code, res.Raw)

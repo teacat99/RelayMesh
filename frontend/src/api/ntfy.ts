@@ -3,6 +3,29 @@
 
 import { api } from './client'
 
+/** 消息类型的分组：需要你处理 / 模型运行的命令 / 异常提醒。 */
+export type NtfyKindGroup = 'need_you' | 'run' | 'exception'
+
+/**
+ * 服务端的消息类型目录（internal/ntfy 的 KindInfo）。设置页的「按消息类型设置」表完全按它画：
+ * 服务端新增一类时，界面不用改就能出现。
+ */
+export interface NtfyKindInfo {
+  id: string
+  group: NtfyKindGroup
+  label: string
+  /** 什么时候会推送这一类。 */
+  desc: string
+  /** false = 这一类默认不推送（异常类）。 */
+  default_on: boolean
+  /** 内置默认优先级 1~5；0 = 跟随「默认优先级」。 */
+  default_priority: number
+  /** 跟随默认优先级时最多按 3（顺利完成的长任务不是紧急事）。 */
+  cap_normal?: boolean
+  /** 默认不推送的类型被打开时，界面建议用的优先级。 */
+  suggested_priority?: number
+}
+
 /** 服务端返回的配置视图（不含任何凭据）。 */
 export interface NtfyConfig {
   enabled: boolean
@@ -19,6 +42,11 @@ export interface NtfyConfig {
   run_notify: boolean
   /** 运行结束推送的门槛：运行得比这更短的命令不推送（1~86400 秒）。 */
   run_min_seconds: number
+  /**
+   * 按消息类型的覆盖：0 = 不推送，1~5 = 用这个优先级；没出现的类型用内置默认。
+   * 旧版本的服务端没有这个字段，按空表处理。
+   */
+  priority_by_kind?: Record<string, number>
   token_set: boolean
   password_set: boolean
   /** 令牌由环境变量 RELAYMESH_NTFY_TOKEN 提供：界面里改不了，也清不掉。 */
@@ -42,6 +70,8 @@ export interface NtfyStatus {
 export interface NtfyView {
   config: NtfyConfig
   status: NtfyStatus
+  /** 消息类型目录；旧版本的服务端没有。 */
+  kinds?: NtfyKindInfo[]
 }
 
 /** 保存时提交的整张表单：非凭据字段整体替换；凭据留空 = 保持原值，要清掉就带 clear_ 标记。 */
@@ -56,6 +86,8 @@ export interface NtfyUpdate {
   delay_seconds: number
   run_notify: boolean
   run_min_seconds: number
+  /** 整张覆盖表：带 {} 表示清空（全部回到内置默认）；省略则保持服务端已存的。 */
+  priority_by_kind?: Record<string, number>
   token?: string
   clear_token?: boolean
   password?: string
@@ -69,6 +101,10 @@ export interface NtfyTestResult {
   http_status: number
   error?: string
   status: NtfyStatus
+  /** 这条测试推送实际用的 ntfy 优先级（1~5）。 */
+  priority?: number
+  /** 按类型试发时是哪一类；普通测试推送没有。 */
+  kind?: string
 }
 
 export const ntfyApi = {
@@ -82,10 +118,16 @@ export const ntfyApi = {
     return res.data
   },
 
-  /** 立刻发一条测试推送；draft 是尚未保存的表单（叠加在已保存的配置上试发），省略则测已保存的配置。 */
-  async test(draft?: NtfyUpdate): Promise<NtfyTestResult> {
+  /**
+   * 立刻发一条测试推送；draft 是尚未保存的表单（叠加在已保存的配置上试发），省略则测已保存的配置。
+   * kind 是消息类型 id：带上就按这一类的优先级、用这一类的样子试发（手机上能直接看到它会怎么响）。
+   */
+  async test(draft?: NtfyUpdate, kind?: string): Promise<NtfyTestResult> {
+    const body: { draft?: NtfyUpdate; kind?: string } = {}
+    if (draft) body.draft = draft
+    if (kind) body.kind = kind
     // 服务端只试一次，单次最长约 12 秒；超时要比默认的 15 秒宽松一点，免得界面先放弃
-    const res = await api.post<NtfyTestResult>('/notify/ntfy/test', draft ? { draft } : {}, { timeout: 30000 })
+    const res = await api.post<NtfyTestResult>('/notify/ntfy/test', body, { timeout: 30000 })
     return res.data
   },
 }

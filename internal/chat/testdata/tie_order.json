@@ -1,5 +1,5 @@
 {
-  "comment": "同一毫秒内各来源的先后。Go（internal/chat）与前端（frontend/src/lib/timeline.ts 的 KIND_RANK）共用这一份，改任何一边都要同步。",
+  "comment": "同一毫秒内各来源的先后。Go（internal/chat）与前端（frontend/src/lib/timeline.ts 的 KIND_RANK）共用这一份，改任何一边都要同步。guard 是保留的来源序（原会话守护告警，#245 下线）：游标里带着来源序，system 不能往前挪，所以它留在 order 里，前端没有对应的种类。",
   "order": ["report", "reply", "inbox", "notice", "capsule", "update", "card", "answer", "decision", "guard", "system"],
   "frontend_kind": {
     "inbox": "inbox",
@@ -7,7 +7,6 @@
     "capsule": "capsule",
     "update": "task",
     "card": "confirm",
-    "decision": "decisions",
-    "guard": "guard"
+    "decision": "decisions"
   }
 }

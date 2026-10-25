@@ -5,7 +5,7 @@
 // 1:1 场景那套（挂起倒计时 / 空回执 / 提示词等待）在这里没有意义，所以不出现。
 // 输入时倒计时暂停（服务端同步暂停）；右键 / 点击展开菜单，调整每条新消息加多久、智能体单次最长等多久。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Hourglass, Moon, Pause, Plus, TimerOff } from 'lucide-vue-next'
+import { Hourglass, Lock, Moon, Pause, Plus, TimerOff } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { useSessionStore } from '../../stores/session'
 import { useSettingsStore } from '../../stores/settings'
@@ -18,11 +18,14 @@ import {
   windowTitle,
   windowView,
 } from '../../lib/replyWindow'
+import { gateOn, gateTotal } from '../../lib/wrapupGate'
+import WrapupGatePanel from './WrapupGatePanel.vue'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu'
 
@@ -48,7 +51,14 @@ const live = computed(() => windowView({
   paused: mode.value?.reply_window_paused,
   bankSec: mode.value?.reply_window_bank_sec,
   activeTasks: mode.value?.active_tasks,
+  // 严格收尾门（#232 D2）：门开着时，暂停是由「本会话名下的未完成任务」挡的；放行后窗口照常走
+  strict: gateOn(mode.value),
+  gateTotal: gateTotal(mode.value),
+  released: mode.value?.gate_released,
 }, now.value))
+// 暂停且由收尾门挡着：图标换成锁，并在时间后面标出挡着的任务数；已放行的窗口在走，标一个「放行」记号
+const gated = computed(() => live.value.kind === 'paused' && !!live.value.gated)
+const gateBadge = computed(() => (gated.value ? String(live.value.gateTotal ?? 0) : ''))
 // 输入期间显示冻结在开始输入的那一刻，停手后接着走（服务端同步暂停）
 const frozen = ref<string | null>(null)
 watch(
@@ -60,7 +70,7 @@ watch(
 )
 const shownText = computed(() => frozen.value ?? live.value.text)
 const title = computed(() => windowTitle(live.value, addMin.value, sliceMin.value))
-const icon = computed(() => ({ none: TimerOff, running: Hourglass, paused: Pause, expired: Moon })[live.value.kind])
+const icon = computed(() => (gated.value ? Lock : { none: TimerOff, running: Hourglass, paused: Pause, expired: Moon }[live.value.kind]))
 const iconClass = computed(() => ({
   none: 'text-muted-foreground',
   running: 'text-emerald-500 motion-safe:animate-pulse',
@@ -109,6 +119,8 @@ function seg(active: boolean): string {
           type="button"
           data-testid="reply-window-chip"
           :data-kind="live.kind"
+          :data-gated="gated"
+          :data-released="!!live.released"
           :aria-label="`剩余等待回复时间 ${shownText}`"
           :title="title"
           class="text-[11px] sm:text-xs px-2 sm:px-2.5 py-1 rounded-sm border transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer shrink-0 bg-card/95 hover:bg-muted border-border/80 text-foreground backdrop-blur-xs select-none font-mono outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -116,14 +128,18 @@ function seg(active: boolean): string {
         >
           <component :is="icon" class="w-3.5 h-3.5 shrink-0" :class="iconClass" />
           <span data-testid="reply-window-time" class="font-medium tabular-nums" :class="timeClass">{{ shownText }}</span>
+          <span v-if="gateBadge" data-testid="reply-window-gate" class="rounded-xs bg-primary/10 px-1 text-[10px] tabular-nums text-primary" :title="`收尾门：${gateBadge} 个未完成任务挡着收尾`">{{ gateBadge }}</span>
+          <span v-else-if="live.released" data-testid="reply-window-released" class="rounded-xs bg-amber-500/15 px-1 text-[10px] text-amber-700 dark:text-amber-300" title="你已本次放行收尾门：窗口照常倒计时">放行</span>
         </button>
       </DropdownMenuTrigger>
 
       <DropdownMenuContent
         align="start"
         data-testid="reply-window-menu"
-        class="w-60 p-1 font-mono text-xs shadow-modal border border-border bg-popover"
+        class="w-72 p-1 font-mono text-xs shadow-modal border border-border bg-popover"
       >
+        <WrapupGatePanel v-if="mode?.workflow_id" :workflow-id="mode.workflow_id" @navigate="menuOpen = false" />
+        <DropdownMenuSeparator v-if="mode?.workflow_id" class="my-1" />
         <DropdownMenuLabel class="px-2 pt-1 pb-1 text-[11px]" title="智能体每发一条新消息，给你的回复窗口增加的时长（累加，最多 30 分钟）">
           回复窗口<span class="text-muted-foreground/70"> · 每条新消息加多久</span>
         </DropdownMenuLabel>

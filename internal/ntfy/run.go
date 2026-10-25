@@ -104,7 +104,7 @@ func BuildRunMessage(cfg Config, in RunInfo, host string, merged int) Message {
 	return Message{
 		Title:    title,
 		Body:     strings.Join(lines, "\n"),
-		Priority: runPriority(cfg, in.State),
+		Priority: cfg.msgPriority(runKind(in.State)),
 		Tags:     []string{tag},
 		Click:    cfg.ClickURL,
 	}
@@ -133,12 +133,18 @@ func runOutcome(in RunInfo) (title, tag string) {
 	return "模型命令已结束", "information_source"
 }
 
-// runPriority：出了状况的用你配置的优先级；顺利完成的最多按默认（3）提醒——长任务成功了不是紧急事。
-func runPriority(cfg Config, state string) int {
-	if state == model.RunSucceeded && cfg.Priority > 3 {
-		return 3
+// runKind 把运行的终态归到表里的消息类型：顺利完成是 KindRunOK，其余（失败 / 超时 / 丢失 / 被中断）都是 KindRunTrouble。
+func runKind(state string) string {
+	if state == model.RunSucceeded {
+		return KindRunOK
 	}
-	return cfg.Priority
+	return KindRunTrouble
+}
+
+// runPriority：出了状况的跟随默认优先级；顺利完成的最多按 3 提醒——长任务成功了不是紧急事。
+// 两者都可以在「各类消息的优先级」里单独改（见 priority.go）。
+func runPriority(cfg Config, state string) int {
+	return cfg.msgPriority(runKind(state))
 }
 
 // firstCommandLine 取命令的第一个非空行，折叠空白并截短。

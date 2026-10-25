@@ -170,6 +170,16 @@ func (h *APIHandler) ListWorkItems(c *gin.Context) {
 		return
 	}
 	resp := gin.H{"items": items, "counts": counts, "workflows": workflows}
+	// offered（#180 B3b）：每个工作流手上「指派给它、还没接取」的协作任务个数与最早派出时间，侧栏会话卡的「N 项待接取」徽标用；
+	// 全局口径（不随 workflow_id 过滤变），没有待接取的指派时不带这个字段，响应与以前一致。
+	offered, err := h.store.BoardOfferedByWorkflow(ctx)
+	if err != nil {
+		respondWorkError(c, err)
+		return
+	}
+	if len(offered) > 0 {
+		resp["offered"] = offered
+	}
 	// 清单按最近更新取前 N 条：条数顶到上限时，更早更新的可能被略去了。带上标记，页面据此如实说明；没顶到就不带这个字段。
 	if len(items) >= store.WorkItemListLimit(f.Limit) {
 		resp["truncated"] = true
@@ -278,6 +288,33 @@ func (h *APIHandler) GetWorkItem(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"item": item})
 }
 
+// GetWorkItemBySeq 按「工作流 + 板内序号 #N」返回任务详情（响应形态与 GetWorkItem 相同）。
+//
+//	GET /api/v1/work-items/by-seq?workflow_id=&seq=
+//
+// 正文、汇报与链接里写的 #N 是板内序号：它在工作流所在的任务板内唯一（同一个项目的工作流共用一套 #N），和 /work-items/:id 用的
+// 数据库编号是两回事——把 #N 当数据库编号用，打开的就是别的任务（#242）。任务页的 ?seq= 深链靠这个接口把序号解析成任务，
+// 解析与智能体按 #N 取任务走同一条路（含合并任务板时改过号的旧序号），不依赖页面已加载的清单（已结束 / 已暂缓 / 很早以前的任务一样能开）。
+// 这个板上没有这个序号 = 404。
+func (h *APIHandler) GetWorkItemBySeq(c *gin.Context) {
+	wf := strings.TrimSpace(c.Query("workflow_id"))
+	if wf == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 workflow_id"})
+		return
+	}
+	seq, err := strconv.Atoi(strings.TrimSpace(c.Query("seq")))
+	if err != nil || seq <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的 seq（应是正整数的板内序号）"})
+		return
+	}
+	item, err := h.store.GetWorkItemBySeq(c.Request.Context(), wf, seq)
+	if err != nil {
+		respondWorkError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"item": item})
+}
+
 type workItemUpdateRequest struct {
 	Title  *string   `json:"title"`
 	Kind   *string   `json:"kind"`
@@ -321,6 +358,7 @@ func (h *APIHandler) UpdateWorkItem(c *gin.Context) {
 	}
 	if res.Changed {
 		h.broadcastWorkItem(res.Item, false)
+		h.postBoardLines(c.Request.Context(), res)
 	}
 	c.JSON(http.StatusOK, gin.H{"item": res.Item, "changed": res.Changed})
 }
@@ -427,6 +465,7 @@ func (h *APIHandler) ImproveWorkItem(c *gin.Context) {
 		return
 	}
 	h.broadcastWorkItem(res.Item, false)
+	h.postBoardLines(c.Request.Context(), res) // 验证中的协作任务被退回改进，也是一次「退回」
 
 	// 2. 告诉智能体：消息自己带着编号与标题，它不必先翻任务清单就知道说的是哪件事
 	msg := fmt.Sprintf("改进需求 #%d「%s」：%s", item.Seq, item.Title, text)

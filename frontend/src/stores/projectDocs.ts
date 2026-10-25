@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { projectDocsApi, type DocDetail, type ProjectDoc, type DocWorkflowStat } from '../api/projectDocs'
 import { confirmsApi } from '../api/confirms'
+import { registerConnectHook } from '../lib/connectHooks'
 
 /** 后台刷新（服务端事件触发、没有人在等结果）失败时什么也不做：失败不该变成未处理的 Promise 拒绝。 */
 const ignoreBackgroundError = () => {}
@@ -12,6 +13,9 @@ export const useProjectDocStore = defineStore('projectDocs', () => {
   const detail = ref<DocDetail | null>(null)
   const loading = ref(false)
   let workflowId = ''
+  // 目录此刻用的筛选条件（loadList 传进来的）：后台校准要用同样的条件重取，否则筛选着的目录会在事件到来时悄悄变回「没筛选」，
+  // 而页面上的筛选条件还亮着（实时流连上之后的补取让这条路径多走一遍，#243）。
+  let listParams: Record<string, string> | undefined
   // 每打开一篇新文档（非 silent 的 loadDetail）加一：晚到的旧响应不能盖掉后打开的那篇
   // （切得快会出现地址是乙、内容是甲）；silent 的后台校准只在期间没切走时才生效。
   let navSeq = 0
@@ -22,6 +26,7 @@ export const useProjectDocStore = defineStore('projectDocs', () => {
     loading.value = true
     try {
       workflowId = wf
+      listParams = params
       const res = await projectDocsApi.list(wf, params)
       items.value = res.items
       workflows.value = res.workflows ?? []
@@ -49,6 +54,7 @@ export const useProjectDocStore = defineStore('projectDocs', () => {
    */
   function onServerEvent(payload?: { workflow_id?: string }) {
     const listWf = workflowId
+    const listFilter = listParams
     const openWf = detail.value?.doc.workflow_id || ''
     if (!listWf && !openWf) return
     const hit = (wf: string) => !!wf && (!payload?.workflow_id || payload.workflow_id === wf)
@@ -56,7 +62,7 @@ export const useProjectDocStore = defineStore('projectDocs', () => {
     if (debounce) clearTimeout(debounce)
     debounce = setTimeout(() => {
       // 后台校准：网络瞬断时失败不打扰（不留未处理的 Promise 拒绝），下一次服务端事件会再刷新
-      if (hit(listWf)) loadList(listWf).catch(ignoreBackgroundError)
+      if (hit(listWf)) loadList(listWf, listFilter).catch(ignoreBackgroundError)
       const cur = detail.value?.doc
       if (cur && hit(cur.workflow_id)) loadDetail(cur.workflow_id, cur.path, true).catch(ignoreBackgroundError)
     }, 400)
@@ -109,6 +115,11 @@ export const useProjectDocStore = defineStore('projectDocs', () => {
     loading.value = false
     detail.value = null
   }
+
+  // 实时流（首次或重新）连上：连上之前 / 断线期间的 project_doc_updated 与 confirm_updated 没人听见也不会补发——
+  // 目录与打开着的文档（决策卡的状态随详情一起来）重取一次，没打开任何东西时 onServerEvent 什么也不做（#243）。
+  // 惰性仓库：用到了才会被创建，登记即「有旧数据要校准」，没用到的页面不会为此多拉代码块（lib/connectHooks.ts）
+  registerConnectHook('projectDocs', () => onServerEvent())
 
   return {
     items,

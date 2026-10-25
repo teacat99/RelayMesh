@@ -35,15 +35,22 @@ import { formatStackParts } from '../../../lib/stackTypes'
 // 有待发图片时再加一排缩略图（约 70px）。所以轨的下沿固定让开 112px（bottom-28；有图 176px = bottom-44），
 // 否则最靠下的几道刻度（恰好是最新的条目）会躲在悬浮行或「回到底部」下面，看得见也点不到，悬停提示也会被盖住
 // （追加 #223：e2e 长会话一步的 elementFromPoint 与观感截图查出来的）。
-const props = defineProps<{
-  /** 列表的滚动容器（PreviewMessageList 的 chatScrollContainer）；挂载前是 null。 */
-  scrollEl: HTMLElement | null
-  /** 还有更早的轮次没载入：轨顶出现「更早」标记，点击载入。 */
-  hasEarlier: boolean
-  loadingEarlier: boolean
-  /** 输入区有待发图片：悬浮行变高，轨的下沿跟着让开更多（与列表的底部留白同步）。 */
-  hasDraftImages: boolean
-}>()
+// 群聊页（#241）的输入框在列表下面、不盖在列表上（dock=false）：只需要让开列表右下角浮着的「回到最新」小药丸
+// （bottom-3 + 约 30px 高 ≈ 42px），所以下沿固定让开 56px（bottom-14）。
+const props = withDefaults(
+  defineProps<{
+    /** 列表的滚动容器（PreviewMessageList 的 chatScrollContainer）；挂载前是 null。 */
+    scrollEl: HTMLElement | null
+    /** 还有更早的轮次没载入：轨顶出现「更早」标记，点击载入。 */
+    hasEarlier: boolean
+    loadingEarlier: boolean
+    /** 输入区有待发图片：悬浮行变高，轨的下沿跟着让开更多（与列表的底部留白同步）。 */
+    hasDraftImages: boolean
+    /** 输入区是否浮在列表底部、盖住列表下缘（会话页是；群聊页的输入框在列表下面，传 false）。 */
+    dock?: boolean
+  }>(),
+  { dock: true },
+)
 
 const emit = defineEmits<{
   /** 点击刻度：交给列表去滚。 */
@@ -324,7 +331,7 @@ const tipTop = computed(() => {
 <template>
   <nav
     class="pointer-events-none absolute right-1.5 top-3 z-20 hidden w-8 select-none flex-col items-end transition-[bottom] duration-150 md:flex"
-    :class="[show ? '' : 'invisible', hasDraftImages ? 'bottom-44' : 'bottom-28']"
+    :class="[show ? '' : 'invisible', !dock ? 'bottom-14' : hasDraftImages ? 'bottom-44' : 'bottom-28']"
     :aria-hidden="!show"
     aria-label="会话时间线"
     data-testid="pv-rail"

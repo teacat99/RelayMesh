@@ -9,7 +9,7 @@
 export interface NotifyPayload {
   /** 事件唯一标识：同一个 id 只呈现一次（页面里有两条路径可能先后送来同一条）。 */
   id: string
-  /** 种类（有效种类，@ 已提升为 mention）：blocking_feedback / mention / approval_waiting / guard_alert / agent_text / ask_card …。 */
+  /** 种类（有效种类，@ 已提升为 mention）：blocking_feedback / mention / approval_waiting / guard_alert / agent_text / ask_card / board_stale …。 */
   kind: string
   /** 会话键：wf:<工作流> / grp:<群>；用于前台抑制与同会话合并。 */
   conversation: string
@@ -103,13 +103,17 @@ export function presentNotice(p: NotifyPayload, count = 1): NoticeText {
     case 'blocking_feedback':
       return { title: '新反馈请求', body: preview || DEFAULT_REQUEST_BODY }
     case 'guard_alert':
-      return { title: p.title ? `终端守护 · ${p.title}` : '终端守护', body: preview || '终端会话出现异常' }
+      // 现在只有两种：自动续跑放弃（不再自动续跑）与群聊过密（已暂停互相投递）；正文由服务端写好，没有就给一句通用的。
+      return { title: p.title ? `系统告警 · ${p.title}` : '系统告警', body: preview || '出现了需要你处理的情况' }
     case 'mention':
       return { title: joinTitle(p.title, '@你'), body: preview || '有人 @ 了你' }
     case 'approval_waiting':
       return { title: joinTitle(p.title, '待批准'), body: preview || '终端在等你批准' }
     case 'ask_card':
       return { title: joinTitle(p.title, '待确认'), body: preview || '有新的待确认提问' }
+    case 'board_stale':
+      // 共享任务板上有指派久无人接（#180 B3d）：标题就是「指派久无人接」，正文是服务端写好的「谁那里有哪些指派、超过多久」
+      return { title: p.title || '指派久无人接', body: preview || '有指派很久没人接' }
     case 'agent_text': {
       const sender = p.sender && !sameFold(p.sender, p.title) ? p.sender : ''
       const title = joinTitle(p.title, sender)
@@ -131,7 +135,7 @@ export const AGGREGATE_WINDOW_MS = 60_000
 
 /**
  * 系统通知的标签：相同标签的通知在系统里互相替换。
- * 穿透类（阻塞待答、@、审批、守护）每条独立，绝不被「N 条新消息」淹没；其余按会话合并。
+ * 穿透类（阻塞待答、@、审批、系统告警）每条独立，绝不被「N 条新消息」淹没；其余按会话合并。
  */
 export function notificationTag(p: NotifyPayload): string {
   if (p.penetrate || !p.conversation) return `evt:${p.id}`

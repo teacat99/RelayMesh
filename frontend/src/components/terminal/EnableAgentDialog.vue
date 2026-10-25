@@ -13,7 +13,7 @@ import Button from '@/components/ui/button/Button.vue'
 import { toast } from '@/components/ui/sonner'
 import { UnlockCancelled, terminalApi, toApiError, type SessionEnablePreview } from '@/api/terminal'
 import { useTerminalStore } from '@/stores/terminal'
-import { RUN_LIMIT_UNITS, charCount, collapseSpaces, dirPlaceholder, launcherLimits } from '@/lib/terminal/launcher'
+import { RUN_LIMIT_UNITS, charCount, collapseSpaces, dirPlaceholder, isWindowsHost, launcherLimits } from '@/lib/terminal/launcher'
 import { hostTitle } from '@/lib/terminal/format'
 import {
   blankEnableDraft,
@@ -77,7 +77,7 @@ async function refreshPreview() {
     if (n !== seq) return // 又改了选项：这次的结果已经过期
     preview.value = r.preview
     previewFailed.value = ''
-    // 主机：没选、或选的已经不可用（被删除、Windows）时给个默认；用户自己挑的可用主机不动（pickEnableHost 在当前值可用时原样返回它）
+    // 主机：没选、或选的已经不在列表里（被删除）时给个默认；用户自己挑的主机不动（pickEnableHost 在当前值还在列表里时原样返回它）
     const pick = pickEnableHost(draft.host, memory.host, r.preview.host, r.preview.hosts)
     if (pick !== draft.host) draft.host = pick
     // 目录：会话在网页里绑定了项目目录时默认用它（智能体第一次汇报必须带这个目录，D-161）；用户亲手填的不动
@@ -141,6 +141,9 @@ watch(
 // ---- 校验与显示 ----
 const hosts = computed(() => preview.value?.hosts ?? [])
 const choices = computed(() => enableHostChoices(hosts.value))
+// 所选主机的系统：目录示例与提示跟着它走（Windows 主机写盘符路径，#178）；还没选主机时按 Linux 的写法。
+const chosenOs = computed(() => hosts.value.find(h => h.machine_code === draft.host)?.os)
+const chosenIsWindows = computed(() => isWindowsHost(chosenOs.value))
 const errors = computed(() => validateEnableDraft(props.workflowId, draft, limits.value, hosts.value))
 const hasErrors = computed(() => hasEnableErrors(errors.value))
 const shown = (f: Field) => (touched[f] || submitted.value ? errors.value[f] : undefined)
@@ -251,11 +254,11 @@ async function submit() {
             @change="touched.host = true"
           >
             <option value="" disabled>{{ preview ? '选择一台主机' : '正在读取主机…' }}</option>
-            <option v-for="c in choices" :key="c.code" :value="c.code" :disabled="c.disabled">{{ c.label }}</option>
+            <option v-for="c in choices" :key="c.code" :value="c.code">{{ c.label }}</option>
           </select>
           <span v-if="shown('host')" class="block text-[11px] text-destructive" role="alert" data-testid="enable-agent-error-host">{{ shown('host') }}</span>
           <span v-else-if="preview && !choices.length" class="block text-[11px] leading-relaxed text-amber-600 dark:text-amber-400" data-testid="enable-agent-no-hosts">
-            还没有可用的主机：先到 ExecMesh 的「主机」页启用一台装了 Agent 的 Linux / macOS 主机。
+            还没有可用的主机：先到 ExecMesh 的「主机」页启用一台装了 Agent 的主机。
           </span>
         </label>
 
@@ -268,7 +271,7 @@ async function submit() {
             type="text"
             autocomplete="off"
             spellcheck="false"
-            :placeholder="dirPlaceholder('linux')"
+            :placeholder="dirPlaceholder(chosenOs || 'linux')"
             :disabled="submitting"
             :aria-invalid="!!shown('dir')"
             :class="[fieldClass, border('dir'), 'h-8 font-mono']"
@@ -279,6 +282,10 @@ async function submit() {
           <span v-if="shown('dir')" class="block text-[11px] text-destructive" role="alert" data-testid="enable-agent-error-dir">{{ shown('dir') }}</span>
           <span v-else-if="preview?.bound_dir" class="block text-[11px] leading-relaxed text-muted-foreground" data-testid="enable-agent-bound-dir">
             这个会话在网页里绑定了项目目录 <code class="font-mono">{{ preview.bound_dir }}</code>：智能体第一次汇报必须带这个目录，所以这里默认用它；填成别的目录它会被拒绝。
+          </span>
+          <span v-else-if="chosenIsWindows" class="block text-[11px] leading-relaxed text-muted-foreground" data-testid="enable-agent-dir-help-win">
+            主机上的绝对路径（盘符开头，如 <code class="font-mono">C:\work\项目</code>，或 <code class="font-mono">\\服务器\共享\…</code>）：智能体在这个目录里工作（<code class="font-mono">--workspace</code>）。
+            这台主机是 Windows，命令经它的 PowerShell 运行；路径里不能有 <code class="font-mono">" % ^ &amp; | &lt; &gt; ! * ?</code>。
           </span>
           <span v-else class="block text-[11px] leading-relaxed text-muted-foreground">
             主机上的绝对路径（以 <code class="font-mono">/</code> 开头）：智能体在这个目录里工作（<code class="font-mono">--workspace</code>）。
@@ -424,7 +431,7 @@ async function submit() {
               />
               <span v-if="shown('prompt')" class="block text-[11px] text-destructive" role="alert" data-testid="enable-agent-error-prompt">{{ shown('prompt') }}</span>
               <span v-else class="block text-[11px] leading-relaxed text-muted-foreground">
-                单行文本，可以用 <code class="font-mono">%workflow</code>（这个会话的工作流编号）。留空用内置的默认提示词：它让新开的智能体先接入这个工作流、读第一条指示，并要求它无论如何都向 RelayMesh 发一条消息说明结果。
+                单行文本，可以用 <code class="font-mono">%workflow</code>（这个会话的工作流编号）等变量（发出那一刻现算，全部见「设置 › 会话提示词」）。留空 = 用下一层：这个会话的「唤醒词」模板 → 设置里的全局覆盖 → 内置默认；内置默认让新开的智能体先接入这个工作流、读第一条指示，并要求它无论如何都向 RelayMesh 发一条消息说明结果。
               </span>
             </div>
           </div>

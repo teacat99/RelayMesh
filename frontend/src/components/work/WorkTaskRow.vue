@@ -10,6 +10,7 @@ import {
   displayModulePath,
   isClosedState,
   isWorkKind,
+  offerWaitView,
   quickActions,
   relativeTime,
   showCreator,
@@ -22,6 +23,8 @@ import {
 } from '../../lib/workItems'
 import { TONE_CLASSES } from './tone'
 import { useCoarseNow } from '../../composables/useCoarseNow'
+import { boardStaleLabel } from '../../lib/notifyPrefs'
+import { useNotifyPrefsStore } from '../../stores/notifyPrefs'
 
 const props = defineProps<{
   row: TaskRow
@@ -57,6 +60,15 @@ const subtext = computed(() => (isClosedState(item.value.state) && item.value.co
 const primary = computed(() => quickActions(item.value.state).find(a => a.primary) || null)
 // 共享任务板（#175 B2）：承接者 + 接取状态、别的工作流创建的任务标创建者；没有指派、也不是共享板时两个都为空，行与以前一样
 const assignee = computed(() => assigneeView(item.value, props.known || []))
+// 待接取的协作任务显示「已等多久」（#180 B3b），超过「久无人接」的时长（设置里可调，默认 2 小时）标红；
+// 同样读共享慢时钟，标签没变的行不会被唤醒。阈值是一个数字：偏好里别的项变化时它不变，各行也不会被唤醒。
+const notifyPrefs = useNotifyPrefsStore()
+const offerWait = computed(() =>
+  assignee.value?.claim === 'offered' ? offerWaitView(item.value, clock.value, notifyPrefs.boardStaleMs) : null
+)
+const staleHint = computed(
+  () => `指派超过 ${boardStaleLabel(notifyPrefs.boardStaleAfterMinutes)}还没人接，可以催一下承接者，或者改派 / 撤销`
+)
 const creator = computed(() =>
   showCreator(item.value, props.viewer || '', !!props.sharedBoard) ? workflowLabel(item.value.workflow_id, props.known || []) : ''
 )
@@ -156,6 +168,14 @@ watch(
             <ArrowRight class="size-2.5 shrink-0" aria-hidden="true" />
             <span class="truncate">{{ assignee.label }}</span>
             <span v-if="assignee.claimLabel" class="shrink-0 font-medium">{{ assignee.claimLabel }}</span>
+            <span
+              v-if="offerWait"
+              class="shrink-0 tabular-nums"
+              :class="offerWait.stale ? 'font-semibold text-rose-600 dark:text-rose-400' : ''"
+              :title="offerWait.stale ? staleHint : '派出后还没有答复'"
+              :data-stale="offerWait.stale ? 'true' : 'false'"
+              data-testid="work-row-wait"
+            >· {{ offerWait.label }}</span>
           </span>
         </p>
       </div>

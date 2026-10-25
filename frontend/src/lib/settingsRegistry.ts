@@ -11,8 +11,8 @@ import { PROJECTS, otherProject, type AppMode } from './mode'
 export type SettingsOwner = 'common' | AppMode
 
 export type SettingsCategoryId =
-  | 'appearance' | 'security' | 'backup' | 'about'
-  | 'waiting' | 'prompts' | 'speech' | 'presets' | 'authProfiles' | 'sessionData'
+  | 'appearance' | 'security' | 'oauth' | 'backup' | 'about'
+  | 'waiting' | 'prompts' | 'speech' | 'presets' | 'authProfiles' | 'sessionPrompts' | 'sessionData'
   | 'termPrefs' | 'modelAccess' | 'retention'
 
 export interface SettingsCategory {
@@ -25,19 +25,21 @@ export interface SettingsCategory {
 
 export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
   // ---- RelayMesh ----
-  { id: 'waiting', label: '等待策略', owner: 'relay', hint: '智能体等待你反馈时的超时与轮询节奏，以及追加指令的提醒方式' },
+  { id: 'waiting', label: '等待策略', owner: 'relay', hint: '智能体等待你反馈时的超时与轮询节奏、追加指令的提醒方式，以及分支会话请示的定夺与转交' },
   { id: 'prompts', label: '提示词流转', owner: 'relay', hint: '发给智能体的服务指引与各场景的回执提示词' },
   { id: 'speech', label: '语音 ASR', owner: 'relay', hint: '语音输入的识别服务与语言' },
   { id: 'presets', label: '快捷标签预设', owner: 'relay', hint: '反馈输入框上方的快捷语，以及工作流阶段模板' },
   { id: 'authProfiles', label: '授权档位', owner: 'relay', hint: '异步对话模式下，智能体不必先问就能直接处理哪些事' },
+  { id: 'sessionPrompts', label: '会话提示词', owner: 'relay', hint: '常驻规则的内置模板（主线 / 分支）：会话输入区的「常驻」里一点套用，新建会话时也能选' },
   { id: 'sessionData', label: '会话数据与图片', owner: 'relay', hint: '本地草稿缓存与图片下载限速' },
   // ---- ExecMesh ----
   { id: 'termPrefs', label: '终端偏好', owner: 'exec', hint: '终端字号、多行粘贴确认与同时保持连接的会话数' },
   { id: 'modelAccess', label: '模型执行与权限', owner: 'exec', hint: '哪些模型可以使用哪些主机，以及新主机、新模型的默认授权' },
   { id: 'retention', label: '记录与保留', owner: 'exec', hint: '终端记录与模型运行记录的保留策略' },
   // ---- 通用 ----
-  { id: 'appearance', label: '外观与通知', owner: 'common', hint: '主题、声音与桌面通知、手机推送（ntfy）与界面动效' },
+  { id: 'appearance', label: '外观与通知', owner: 'common', hint: '主题、声音与桌面通知、手机推送（ntfy，可按消息类型设优先级、打开异常提醒）与界面动效' },
   { id: 'security', label: 'MCP 与安全', owner: 'common', hint: '访问认证、IP 防护与 MCP 令牌管理' },
+  { id: 'oauth', label: 'OAuth 授权', owner: 'common', hint: 'ChatGPT / Claude 连接器的授权：接入窗口、刚登记的客户端、已授权的应用与授权服务器设置' },
   { id: 'backup', label: '备份与导出', owner: 'common', hint: '导出全部配置' },
   { id: 'about', label: '关于', owner: 'common', hint: '版本与项目信息' },
 ]

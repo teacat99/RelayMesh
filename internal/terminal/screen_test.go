@@ -34,9 +34,9 @@ func (s *screenSink) all() []ScreenEvent {
 const verifiedCursor = "2026.10.12-d47ca18"
 
 // screenEnv 是一台在线主机 + 一个带守护配置的预设（工作流 wf-a），工作流里已有一次带版本号的 hook 事件。
-func newScreenEnv(t *testing.T, cursorVersion string) (*guardEnv, *screenSink) {
+func newScreenEnv(t *testing.T, cursorVersion string) (*hostEnv, *screenSink) {
 	t.Helper()
-	g := newGuardEnv(t)
+	g := newHostEnv(t)
 	sink := &screenSink{}
 	g.hub.SetScreenHook(sink.hook)
 	g.savePreset("p1", guardPresetName, map[string]any{"enabled": true, "workflow_id": "wf-a"})
@@ -53,7 +53,7 @@ func newScreenEnv(t *testing.T, cursorVersion string) (*guardEnv, *screenSink) {
 	return g, sink
 }
 
-func (g *guardEnv) report(sessions ...termproto.SessionInfo) {
+func (g *hostEnv) report(sessions ...termproto.SessionInfo) {
 	g.t.Helper()
 	g.agent.setSessions(sessions)
 }
@@ -70,7 +70,7 @@ func approving() *termproto.Screen {
 	return &termproto.Screen{Tokens: -1, CtxPct: 8, Approval: true, Quiet: 4}
 }
 
-func (g *guardEnv) sessionView(t *testing.T) store.AgentSessionView {
+func (g *hostEnv) sessionView(t *testing.T) store.AgentSessionView {
 	t.Helper()
 	v, err := g.store.ListAgentSessions(context.Background(), store.AgentSessionFilter{WorkflowID: "wf-a"}, g.clock.Now())
 	if err != nil || len(v) != 1 {
@@ -191,7 +191,7 @@ func TestScreen_OldAgentWithoutScreenFieldIsQuiet(t *testing.T) {
 }
 
 func TestScreen_UnknownVersionWithoutHookIsInert(t *testing.T) {
-	g := newGuardEnv(t)
+	g := newHostEnv(t)
 	sink := &screenSink{}
 	g.hub.SetScreenHook(sink.hook)
 	g.savePreset("p1", guardPresetName, map[string]any{"enabled": true, "workflow_id": "wf-solo"})

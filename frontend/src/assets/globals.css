@@ -155,6 +155,22 @@ body,
     font-feature-settings: 'tnum' 1, 'zero' 1;
     font-variant-east-asian: full-width;
   }
+  /* 选中文字的底色（#185）：原来是 AppLayout 根容器上的 selection:bg-primary/20，Tailwind 会为它生成针对「每个后代元素」的 ::selection 规则，
+     整页样式重算时每个元素都要试一遍（实测约占纯重算的 10%～20%）；改成一条全局规则，颜色与写法等价，弹窗里选中文字也统一成同一个颜色。 */
+  ::selection {
+    background-color: color-mix(in oklab, var(--color-primary) 20%, transparent);
+  }
+}
+
+/* 切换明暗主题的那一刻临时压住全部颜色过渡（#185）：上面 body 下「所有元素」的 0.15s 颜色过渡（悬停淡入靠它），
+   在切主题时会让每个元素各建几个过渡动画（2.5 万元素的页面同步卡 4 秒多）。stores/theme.ts 在切换时给 <html> 加 theme-switching、
+   两帧之后去掉（lib/themeSwitch.ts）；去掉时颜色已稳定，不会再起过渡。写在 @layer 之外并带 !important，
+   不会被工具类（utilities 层的 transition-colors / transition-all）盖掉。 */
+html.theme-switching,
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
 }
 
 /* Custom scrollbars - Claude minimalistic style */

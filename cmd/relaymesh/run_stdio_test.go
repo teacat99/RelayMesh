@@ -265,6 +265,67 @@ func TestStdioFollowersRaceToPromoteExactlyOneWins(t *testing.T) {
 	}
 }
 
+// assertNoStdioLeftovers：数据目录里没有接入凭证文件，端口也是空的。
+func assertNoStdioLeftovers(t *testing.T, cfg *config.Config) {
+	t.Helper()
+	if info, err := mcp.ReadLocalProxyInfo(cfg.DataDir); err == nil {
+		t.Fatalf("不该留下接入凭证文件：port=%d pid=%d", info.Port, info.PID)
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
+	if err != nil {
+		t.Fatalf("端口应是空的（没有人在听）：%v", err)
+	}
+	_ = ln.Close()
+}
+
+// 收尾之后不再接管（#248）：close 之后再调 tryPromote（退出途中还在跑的监视协程 / 通知派发协程会这么做）必须被拒绝，
+// 不能在空闲的端口上再拉起一个没人关的 Hub。
+func TestFollowerNeverPromotesAfterClose(t *testing.T) {
+	cfg := stdioTestConfig(t)
+	f := newTestFollower(cfg, "window-closed")
+	f.close()
+	if f.tryPromote() {
+		t.Fatalf("close 之后不该再接管")
+	}
+	if f.localHandler() != nil {
+		t.Fatalf("close 之后不该有本地处理器")
+	}
+	assertNoStdioLeftovers(t, cfg)
+}
+
+// 已经接管成主进程的转发进程在收尾（窗口关闭）期间，监视协程不能再次接管（#248，stdio-multi M7b 偶发红的根因）。
+//
+// 现场：收尾时 Hub 先关掉监听口、再等进行中的请求最多 3 秒（网页控制台的 SSE 长连接常年占着，所以这 3 秒是常态）；
+// 这段时间里端口是空的、f.local 也已经清掉。监视协程升级之后还要再等一个 tick 才会发现「已经接管」而退出——
+// 窗口恰好在这一个 tick 之内关闭时，它会在这个空窗里以为「主进程没了」，再拉起一个新 Hub；进程带着它退出，
+// 数据目录里就留下 stdio-hub.json。这里用 80 毫秒的 tick 与一条一直占着的连接把这个空窗摆出来。
+func TestPromotedFollowerDoesNotRepromoteWhileClosing(t *testing.T) {
+	old := watchInterval
+	watchInterval = 80 * time.Millisecond
+	t.Cleanup(func() { watchInterval = old })
+
+	cfg := stdioTestConfig(t)
+	f := newTestFollower(cfg, "window-closing")
+	t.Cleanup(f.close)
+	if !f.tryPromote() {
+		t.Fatalf("空端口上应能接管")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go f.watch(ctx) // 第一个 tick 在 80 毫秒后：下面的 close 要赶在它之前开始
+
+	// 占住一条连接，让 Hub 关闭时的优雅等待拖满 3 秒（http.Server.Shutdown 不会把刚建立的连接当成空闲连接收掉）
+	conn, err := net.Dial("tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	time.Sleep(30 * time.Millisecond) // 让服务端把这条连接登记下来
+
+	f.close() // 返回时 Hub 已关完；这 3 秒里监视协程的 tick 至少触发一次
+	assertNoStdioLeftovers(t, cfg)
+}
+
 // fakePortOwner 在 cfg.Port 上起一个只回答 /api/v1/auth/status 的假服务，模拟「占着端口的不是 stdio 主进程」。
 func fakePortOwner(t *testing.T, cfg *config.Config, handler http.HandlerFunc) {
 	t.Helper()

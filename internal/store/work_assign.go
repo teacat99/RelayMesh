@@ -134,9 +134,55 @@ func (a WorkActor) enabled() bool {
 	return a.isAgent() && a.Policy != WorkPolicyOff
 }
 
+// WorkBranchScope 是一个主会话与它的某个分支在任务派单上的关系（#236 P5），由入口层现查后放进 WorkActor.Branches。
+type WorkBranchScope struct {
+	Active bool // 关系还在（没有被结束）
+	Assign bool // 关系还在，且分支的开放范围里「任务」= 派单（model.ExposeTasksAssign）
+}
+
+// branchAssignCheck 判定「主会话把自己的任务派给自己的分支」这个带范围的例外（#236 P5）。
+// before 是写入之前的任务，after 是写入之后的任务（新承接者在 after 里；创建时带承接者用「探针」与「探针 + 承接者」）。
+// 不放行时 why 写明哪一条没满足，给拒绝文案用；操作者没有任何分支时恒为 (false, "")：调用方走原来的角色矩阵，拒绝文案与升级前一致。
+//
+// 放行要同时满足：
+//  1. 新承接者（有的话）是这个操作者自己的分支，关系还在，开放范围里「任务」= 派单；撤销指派（新承接者为空）不看目标；
+//  2. 原来没有承接者 → 任务是自己的工作流创建的；原来有承接者（改派 / 撤销）→ 那条指派是自己派的，且原承接者是自己的分支
+//     （含已结束的：收回自己派出去的东西不看关系状态，也不因为开放范围后来被改成只读而收不回）。
+//
+// 它只管「谁能指派」；承接者是不是同一张板上的工作流（checkAssignee）、状态前置条件等照常检查，与角色无关。
+func (a WorkActor) branchAssignCheck(before, after *model.WorkItem) (ok bool, why string) {
+	wf := strings.TrimSpace(a.WorkflowID)
+	if wf == "" || len(a.Branches) == 0 || before == nil || after == nil {
+		return false, ""
+	}
+	prev, next := before.AssigneeWorkflowID, after.AssigneeWorkflowID
+	if next != "" {
+		sc, mine := a.Branches[next]
+		switch {
+		case !mine:
+			return false, "「" + next + "」不是你的分支"
+		case !sc.Active:
+			return false, "分支「" + next + "」已经结束，不能再给它派任务"
+		case !sc.Assign:
+			return false, "分支「" + next + "」的开放范围里「任务」是只读的，请用户在它的分支面板里把「任务」改成「派单」"
+		}
+	}
+	if prev == "" {
+		if before.WorkflowID != wf {
+			return false, "这条任务不是你的工作流创建的，主会话只能派自己创建的任务"
+		}
+		return true, ""
+	}
+	if _, mine := a.Branches[prev]; !mine || before.AssignedByWorkflowID != wf {
+		return false, "这条任务现有的指派不是你派给你的分支的，只能改派 / 撤销自己派给自己分支的指派"
+	}
+	return true, ""
+}
+
 // guard 按策略处理一类操作：允许就放行；不允许时 enforce 返回拒绝，audit 记入 res.Violations 后放行。
-// it 必须是这次写入之前的任务（角色相对「改动前」判定，否则撤销指派之类的操作会把自己的权利改没）。
-func (a WorkActor) guard(it *model.WorkItem, op workOp, res *WorkItemResult) error {
+// it 必须是这次写入之前的任务（角色相对「改动前」判定，否则撤销指派之类的操作会把自己的权利改没）；
+// after 是写入之后的任务，只有指派类操作用它取新承接者（见 branchAssignCheck）。
+func (a WorkActor) guard(it, after *model.WorkItem, op workOp, res *WorkItemResult) error {
 	if !a.enabled() {
 		return nil
 	}
@@ -144,6 +190,15 @@ func (a WorkActor) guard(it *model.WorkItem, op workOp, res *WorkItemResult) err
 		return nil
 	}
 	msg := denyMessage(op, it)
+	if op == workOpAssign {
+		ok, why := a.branchAssignCheck(it, after)
+		if ok {
+			return nil
+		}
+		if why != "" {
+			msg += "。你是主会话，可以把自己创建的任务指派给自己的活动分支（分支的开放范围里「任务」= 派单）、收回自己派出的指派，但这次不行：" + why
+		}
+	}
 	if a.Policy == WorkPolicyEnforce {
 		return NewForbiddenError(msg)
 	}
@@ -156,11 +211,11 @@ func (a WorkActor) guard(it *model.WorkItem, op workOp, res *WorkItemResult) err
 	return nil
 }
 
-// guardAll 对一组操作逐类判定，顺序固定。
-func (a WorkActor) guardAll(it *model.WorkItem, needs map[workOp]bool, res *WorkItemResult) error {
+// guardAll 对一组操作逐类判定，顺序固定。it / after 的含义同 guard。
+func (a WorkActor) guardAll(it, after *model.WorkItem, needs map[workOp]bool, res *WorkItemResult) error {
 	for _, op := range workOpOrder {
 		if needs[op] {
-			if err := a.guard(it, op, res); err != nil {
+			if err := a.guard(it, after, op, res); err != nil {
 				return err
 			}
 		}

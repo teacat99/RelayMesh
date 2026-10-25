@@ -3,7 +3,7 @@ import { ref, watch, computed, nextTick } from 'vue'
 import { useTaskStore } from '../../stores/task'
 import { useSettingsStore } from '../../stores/settings'
 import AutopilotDashboard from './AutopilotDashboard.vue'
-import FeedbackMessageList from './FeedbackMessageList.vue'
+import PreviewMessageList from './preview-view/PreviewMessageList.vue'
 import FeedbackInputDock from './FeedbackInputDock.vue'
 import type { FeedbackSession, SessionImage } from '../../api/types'
 import Badge from '../ui/badge/Badge.vue'
@@ -44,7 +44,7 @@ const settingsStore = useSettingsStore()
 const activeTab = ref<'dashboard' | 'conversation'>('dashboard')
 const isChatScrolledUp = ref(false)
 
-const messageListRef = ref<InstanceType<typeof FeedbackMessageList> | null>(null)
+const messageListRef = ref<InstanceType<typeof PreviewMessageList> | null>(null)
 const inputDockRef = ref<InstanceType<typeof FeedbackInputDock> | null>(null)
 
 async function copyText(text: string, label: string) {
@@ -177,7 +177,7 @@ async function handleAckTask(seq: number) {
 </script>
 
 <template>
-  <div class="h-full flex flex-col bg-background overflow-hidden relative">
+  <div class="h-full flex flex-col bg-background overflow-hidden relative" data-testid="task-workspace">
     <!-- Top Workspace Header (与普通会话 Header 保持严格一致的布局与高度) -->
     <header class="h-14 px-3 sm:px-6 border-b border-border/60 flex items-center justify-between gap-2 sm:gap-3 bg-background/80 backdrop-blur-xs shrink-0 z-20">
       <div class="flex items-center gap-2 min-w-0">
@@ -243,6 +243,7 @@ async function handleAckTask(seq: number) {
             :class="activeTab === 'dashboard'
               ? 'bg-background text-foreground shadow-xs font-semibold'
               : 'text-muted-foreground hover:text-foreground'"
+            data-testid="task-tab-dashboard"
             @click="activeTab = 'dashboard'"
           >
             <LayoutDashboard class="w-3.5 h-3.5" />
@@ -254,6 +255,7 @@ async function handleAckTask(seq: number) {
             :class="activeTab === 'conversation'
               ? 'bg-background text-foreground shadow-xs font-semibold'
               : 'text-muted-foreground hover:text-foreground'"
+            data-testid="task-tab-conversation"
             @click="activeTab = 'conversation'"
           >
             <MessageSquareCode class="w-3.5 h-3.5" />
@@ -292,8 +294,9 @@ async function handleAckTask(seq: number) {
 
       <!-- TAB 2: DETAILED CONVERSATION VIEW (复用普通会话标准消息流) -->
       <div v-show="activeTab === 'conversation'" class="flex-1 flex flex-col min-h-0 relative">
-        <FeedbackMessageList
+        <PreviewMessageList
           ref="messageListRef"
+          data-testid="preview-view"
           :conversation-rounds="syntheticConversationRounds"
           :has-draft-images="false"
           @scroll-state-change="(scrolled) => isChatScrolledUp = scrolled"
@@ -306,7 +309,7 @@ async function handleAckTask(seq: number) {
       ref="inputDockRef"
       :is-scrolled-up="isChatScrolledUp"
       :is-submitting="taskStore.loading"
-      :placeholder="'向指挥端投递人工最高指令 · 自动提升最高优先级 (Ctrl+Enter 发送)...'"
+      :placeholder="'向指挥端投递人工最高指令，自动提升最高优先级...（按 Ctrl + Enter 发送）'"
       :button-text="'发送最高指令'"
       @submit="handleDockSubmit"
       @scroll-to-bottom="messageListRef?.scrollToBottom()"

@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/teacat99/RelayMesh/v2/internal/model"
+	"github.com/teacat99/RelayMesh/v2/internal/sessionprompt"
 	"github.com/teacat99/RelayMesh/v2/internal/store"
 	"github.com/teacat99/RelayMesh/v2/internal/termproto"
 )
@@ -34,7 +35,8 @@ import (
 //  3. 运行失败时撤掉刚新建的预设，不留半成品。
 //
 // 边界：只在人点了「启用并运行」时发生（需要刚刚解锁，和新建、修改预设、运行预设一样）；智能体不能经 MCP 启用别的智能体；
-// 只支持 Linux / macOS 主机（Windows 要等「开终端启动」那一期）；审计只记工作流、预设、权限姿态，不含提示词与命令。
+// Linux / macOS / Windows 主机都支持（Windows 上命令是 PowerShell 写法，见 headless_powershell.go，#178）；
+// 审计只记工作流、预设、权限姿态，不含提示词与命令。
 
 const (
 	// enablePresetPrefix 是「启用 Agent」预设编号的前缀；后面是工作流编号哈希的前 16 位十六进制，合起来不超过预设编号的 40 位上限。
@@ -234,18 +236,27 @@ func (g *guardService) inspectSessionEnable(ctx context.Context, req sessionEnab
 		e.add(http.StatusBadRequest, "bad_options", verr.Error())
 	}
 
-	// 目录与主机。
+	// 目录与主机。目录的写法要和主机系统对得上：Windows 主机要盘符 / UNC 路径，其余主机要 / 开头；还没选定主机时只查「是不是某种绝对路径」。
 	dirOK := true
+	hostOS := ""
+	for _, h := range e.hosts {
+		if h.MachineCode == req.Host {
+			hostOS = h.OS
+		}
+	}
 	switch {
 	case req.Dir == "":
 		dirOK = false
 		e.add(http.StatusConflict, "no_dir", "请填写要在主机的哪个目录运行（--workspace，主机上的绝对路径）")
-	case !strings.HasPrefix(req.Dir, "/") || strings.ContainsAny(req.Dir, "\x00\r\n"):
+	case !headlessDirShapeOK(req.Dir):
 		dirOK = false
-		e.add(http.StatusBadRequest, "bad_dir", "目录必须是主机上的绝对路径（以 / 开头）")
+		e.add(http.StatusBadRequest, "bad_dir", "目录必须是主机上的绝对路径（Linux / macOS 以 / 开头；Windows 写盘符路径，如 C:\\work）")
 	case utf8.RuneCountInString(req.Dir) > store.MaxLauncherDirRunes:
 		dirOK = false
 		e.add(http.StatusBadRequest, "bad_dir", fmt.Sprintf("目录最长 %d 个字", store.MaxLauncherDirRunes))
+	case req.Host != "" && headlessDirOK(req.Dir, isWindowsOS(hostOS)) != nil:
+		dirOK = false
+		e.add(http.StatusBadRequest, "bad_dir", headlessDirOK(req.Dir, isWindowsOS(hostOS)).Error())
 	}
 	// 与网页新建会话时绑定的项目目录不一致：智能体第一次汇报会被 D-161 拒绝。不影响命令预览（dirOK 不变），只让「能不能运行」为否。
 	if dirOK && e.boundDir != "" && filepath.Clean(req.Dir) != e.boundDir {
@@ -269,8 +280,6 @@ func (g *guardService) inspectSessionEnable(ctx context.Context, req sessionEnab
 	e.in = in
 	for _, w := range in.errs {
 		switch w.Code {
-		case "unsupported_os":
-			w = newWakeError(w.Status, w.Code, "暂不支持 Windows 主机：「启用 Agent」目前只支持 Linux / macOS 主机（Windows 要等「开终端启动」那一期）")
 		case "host_not_found":
 			w = newWakeError(w.Status, w.Code, "选中的主机不存在、没有启用或已被删除")
 		}
@@ -287,25 +296,30 @@ func (g *guardService) sessionEnablePreview(ctx context.Context, req sessionEnab
 		WorkflowID: e.req.WorkflowID, Title: e.title, Pending: e.pending, BoundDir: e.boundDir, Host: e.req.Host, Hosts: e.hosts, Dir: e.req.Dir,
 		Bin: run.EffectiveBin(), Model: run.Model, Posture: run.EffectivePosture(),
 		NewConversation: run.NewConversation, ConversationID: run.ConversationID,
-		DefaultPrompt: launcherNewConversationPrompt, MaxRunMinutes: run.EffectiveMaxRunMinutes(), AutoResume: run.AutoResume,
+		MaxRunMinutes: run.EffectiveMaxRunMinutes(), AutoResume: run.AutoResume,
 		CanRun: len(e.errs) == 0,
-	}
-	if run.ConversationID != "" {
-		pv.DefaultPrompt = launcherDefaultPrompt
 	}
 	if pv.Hosts == nil {
 		pv.Hosts = []SessionRunHost{}
 	}
-	pv.Prompt = renderLauncherNewPromptFor(run.Prompt, e.req.WorkflowID, run.EffectiveMaxRunSeconds())
+	// 提示词与「没写自己的话时会用的默认」：渲染走统一的唤醒词渲染（#232 D3），默认取分层选出的那份模板（会话模板 > 全局覆盖 > 内置）。
+	wf := strings.TrimSpace(e.req.WorkflowID)
+	render := func(kind sessionprompt.Kind) {
+		pv.Prompt = renderLauncherWake(ctx, g.h.store, launcherWake{
+			Kind: kind, Custom: run.Prompt, WorkflowID: wf, Project: e.req.Dir, MaxRunSec: run.EffectiveMaxRunSeconds(),
+		}).Text
+		pv.DefaultPrompt, _ = g.h.store.ResolveWakeTemplate(ctx, kind, wf, "", wf != "")
+	}
 	if run.ConversationID != "" {
-		pv.Prompt = renderLauncherPromptFor(run.Prompt, e.req.WorkflowID, run.EffectiveMaxRunSeconds())
+		render(sessionprompt.KindResume)
+	} else {
+		render(sessionprompt.KindNew)
 	}
 	if e.in != nil {
 		// 生效值以检查结果为准：这个工作流已经学到对话编号（上一次启用跑过）时，这次是续聊它而不是新开。
 		pv.NewConversation, pv.ConversationID = e.in.newConv, e.in.conv
 		if e.in.conv != "" {
-			pv.Prompt = renderLauncherPromptFor(run.Prompt, e.req.WorkflowID, run.EffectiveMaxRunSeconds())
-			pv.DefaultPrompt = launcherDefaultPrompt
+			render(sessionprompt.KindResume)
 		}
 		pv.Command = e.in.command
 		pv.Warnings = append(pv.Warnings, e.in.warnings...)

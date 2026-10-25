@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/teacat99/RelayMesh/v2/internal/store"
 )
 
 const amWF = "wf-async-rest"
@@ -30,6 +33,7 @@ func TestAsyncModeREST_OnlyForWebUsers(t *testing.T) {
 	}{
 		{"GET", amPath(), nil},
 		{"PUT", amPath(), map[string]any{"enabled": true}},
+		{"POST", amPath() + "/release-gate", nil},
 		{"GET", "/api/v1/auth-profiles", nil},
 		{"POST", "/api/v1/auth-profiles", map[string]any{"name": "x", "level": "L1", "rules": "r"}},
 		{"PUT", "/api/v1/auth-profiles/1", map[string]any{"rules": "r"}},
@@ -240,5 +244,94 @@ func TestAuthProfilesREST_CountCap(t *testing.T) {
 	}
 	if res := e.call("POST", "/api/v1/auth-profiles", map[string]any{"name": "多余", "level": "L1", "rules": "r"}); res.Code != http.StatusConflict {
 		t.Fatalf("超过上限应 409: %d %s", res.Code, res.Raw)
+	}
+}
+
+// 严格收尾门（#232 D2）的 REST：视图带门的状态与挡着的任务；开关可改；「本次放行」让窗口立刻接着走；
+// 没有窗口 / 门已关时放行返回 409 并说明；放行不动任务。
+func TestAsyncModeREST_StrictWrapupGate(t *testing.T) {
+	e := newCfEnv(t)
+	ctx := context.Background()
+	agent := store.WorkActor{Kind: "agent", WorkflowID: amWF}
+	for i, title := range []string{"待办甲", "进行中乙"} {
+		in := store.WorkItemInput{WorkflowID: amWF, Title: title}
+		if i == 1 {
+			in.State = "doing"
+		}
+		if _, err := e.srv.store.CreateWorkItem(ctx, in, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.srv.store.RecordHookSeen(amWF, time.Now())
+	if res := e.call("PUT", amPath(), map[string]any{"enabled": true}); res.Code != http.StatusOK {
+		t.Fatalf("开启失败: %d %s", res.Code, res.Raw)
+	}
+	v := amView(t, e.call("GET", amPath(), nil))
+	if v["strict_wrapup"] != true || v["gate_total"] != float64(2) || v["gate_released"] != nil {
+		t.Fatalf("默认应开着收尾门、挡着 2 个任务: %v", v)
+	}
+	gate, _ := v["gate_tasks"].([]any)
+	if len(gate) != 2 {
+		t.Fatalf("应列出 2 个挡着的任务: %v", v["gate_tasks"])
+	}
+	first, _ := gate[0].(map[string]any)
+	if first["seq"] != float64(1) || first["state"] != "todo" || first["title"] != "待办甲" {
+		t.Fatalf("按编号升序、带状态与标题: %v", first)
+	}
+
+	// 没有窗口在等：放行没有意义，409 并说明，什么都不留
+	res := e.call("POST", amPath()+"/release-gate", nil)
+	if res.Code != http.StatusConflict || !strings.Contains(res.str("error"), "没有回复窗口") {
+		t.Fatalf("没有窗口时放行应 409: %d %s", res.Code, res.Raw)
+	}
+
+	// 智能体发了消息，窗口攒着不走；用户放行后立刻接着走
+	if _, err := e.srv.store.ExtendReplyWindow(ctx, amWF, 5*time.Minute, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	v = amView(t, e.call("GET", amPath(), nil))
+	if v["reply_window_paused"] != true || v["active_tasks"] != float64(2) || v["reply_window_bank_sec"] != float64(300) {
+		t.Fatalf("放行前窗口应暂停: %v", v)
+	}
+	res = e.call("POST", amPath()+"/release-gate", nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("放行失败: %d %s", res.Code, res.Raw)
+	}
+	v = amView(t, res)
+	if v["gate_released"] != true || v["reply_window_until"] == nil || v["reply_window_paused"] != nil || v["active_tasks"] != nil || v["gate_total"] != float64(2) {
+		t.Fatalf("放行后窗口应在走、仍如实列出 2 个任务: %v", v)
+	}
+	open := 0
+	for _, state := range []string{"todo", "doing"} {
+		items, _ := e.srv.store.ListWorkItems(ctx, store.WorkItemFilter{WorkflowID: amWF, States: []string{state}, Limit: 10})
+		open += len(items)
+	}
+	if open != 2 {
+		t.Fatalf("放行不该动任务: %d", open)
+	}
+
+	// 关掉收尾门：视图里 strict_wrapup=false、没有 gate_*；此时放行 409
+	res = e.call("PUT", amPath(), map[string]any{"strict_wrapup": false})
+	if res.Code != http.StatusOK {
+		t.Fatalf("关门失败: %d %s", res.Code, res.Raw)
+	}
+	v = amView(t, res)
+	if v["strict_wrapup"] != false || v["gate_total"] != nil || v["gate_tasks"] != nil || v["gate_released"] != nil {
+		t.Fatalf("门关着时不该带 gate 信息: %v", v)
+	}
+	if res := e.call("POST", amPath()+"/release-gate", nil); res.Code != http.StatusConflict || !strings.Contains(res.str("error"), "已经关闭") {
+		t.Fatalf("门关着时放行应 409: %d %s", res.Code, res.Raw)
+	}
+	// 再打开：回到严格口径
+	if v := amView(t, e.call("PUT", amPath(), map[string]any{"strict_wrapup": true})); v["strict_wrapup"] != true || v["gate_total"] != float64(2) {
+		t.Fatalf("重新开门后应恢复: %v", v)
+	}
+	// 空请求：提示三个可改的字段
+	if res := e.call("PUT", amPath(), map[string]any{}); res.Code != http.StatusBadRequest || !strings.Contains(res.str("error"), "strict_wrapup") {
+		t.Fatalf("空请求应 400 并提示可改字段: %d %s", res.Code, res.Raw)
+	}
+	// 没有开过异步的工作流：放行 404，不会凭空建出模式行
+	if res := e.call("POST", "/api/v1/workflows/wf-never-async/async-mode/release-gate", nil); res.Code != http.StatusNotFound {
+		t.Fatalf("没开过异步应 404: %d %s", res.Code, res.Raw)
 	}
 }

@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import type { ConfirmItem } from '../api/confirms'
+import { senderIdentity } from './groupCard'
 import { CARD_TONE_CLASS, CARD_TYPES } from './messageCard'
 import type { TimelineBlock, TimelineEntry } from './timeline'
 import {
@@ -28,6 +29,7 @@ import {
   railMapper,
   railMetaOfBlock,
   railMetaOfEntry,
+  railMetaOfGroupMessage,
   railMetaOfReply,
   railMetaOfRound,
   railStyle,
@@ -49,10 +51,10 @@ const USER_KINDS: RailKind[] = ['reply', 'append']
 const DRAWN: [RailKind, RailState][] = RAIL_KINDS.filter(k => !USER_KINDS.includes(k)).flatMap(k => [[k, 'pending'] as [RailKind, RailState], [k, 'done'] as [RailKind, RailState]])
 
 describe('右侧轨样式表：只画非用户消息的类型（追加 #225）', () => {
-  it('画的格子恰好是「除您的回复 / 追加之外的九种 × 两个状态」', () => {
+  it('画的格子恰好是「除您的回复 / 追加之外的十种 × 两个状态」', () => {
     const drawn: string[] = []
     for (const k of RAIL_KINDS) for (const st of ['pending', 'done'] as const) if (railStyle(k, st)) drawn.push(`${k}/${st}`)
-    assert.equal(drawn.length, 18)
+    assert.equal(drawn.length, 20)
     assert.deepEqual(drawn.sort(), DRAWN.map(([k, st]) => `${k}/${st}`).sort())
   })
 
@@ -75,12 +77,14 @@ describe('右侧轨样式表：只画非用户消息的类型（追加 #225）',
       ['decisions', 'done', 14, 2, 'violet', false, true], // 已处理 短·紫·变淡
       ['round', 'pending', 24, 4, 'zinc', true, false], // AI 方案汇报轮次（等回复）长·黑灰·脉冲
       ['round', 'done', 14, 2, 'zinc', false, true], // 已处理的轮次 短·黑灰·变淡
-      ['guard', 'pending', 24, 4, 'amber', false, false], // 守护告警 长·黄
-      ['guard', 'done', 24, 2, 'amber', false, false],
       ['task', 'done', 14, 2, 'slate', false, false], // 任务进展 短·灰蓝
       ['stack', 'done', 14, 2, 'slate', false, false], // 卡片摞 短（按内含类型分段着色，由组件按 parts 画；没有 parts 时退回灰蓝）
       ['notice', 'done', 14, 2, 'sky', false, false], // 进度通知 短·蓝（追加 #265）
       ['capsule', 'done', 14, 2, 'slate', false, false], // 恢复胶囊 短·灰蓝
+      ['branch', 'pending', 14, 2, 'zinc', false, false], // 分支消息（#236）短·黑灰；不分待处理 / 已处理
+      ['branch', 'done', 14, 2, 'zinc', false, false],
+      ['member', 'pending', 14, 2, 'zinc', false, false], // 群聊里别的成员的发言（#241）短·黑灰；群里的话不分待处理 / 已处理
+      ['member', 'done', 14, 2, 'zinc', false, false],
     ]
     for (const [k, st, len, line, tone, pulse, dim] of want) {
       const s = railStyle(k, st)
@@ -92,7 +96,7 @@ describe('右侧轨样式表：只画非用户消息的类型（追加 #225）',
   it('颜色按卡片类型（追加 #265）：每种刻度的色调就是它那一类卡片的色调，待处理与已处理同色，只差长度 / 粗细 / 变淡', () => {
     // 种类 → 卡片类型（lib/messageCard 的 CARD_TYPES）
     const cardOf: Partial<Record<RailKind, keyof typeof CARD_TYPES>> = {
-      round: 'report', notice: 'notice', ask: 'ask', plan: 'plan', decisions: 'decision', task: 'task', capsule: 'capsule', guard: 'guard', stack: 'task',
+      round: 'report', notice: 'notice', ask: 'ask', plan: 'plan', decisions: 'decision', task: 'task', capsule: 'capsule', stack: 'task', branch: 'member', member: 'member',
     }
     for (const [k, st] of DRAWN) {
       const type = cardOf[k]
@@ -117,8 +121,8 @@ describe('右侧轨样式表：只画非用户消息的类型（追加 #225）',
   it('刻度长度只有两档（#160，Q24）：需要您交互的画长（24px），其余默认画短（14px）', () => {
     assert.equal(RAIL_LEN_LONG, 24)
     assert.equal(RAIL_LEN_SHORT, 14)
-    // 需要您动手的格子：待处理的计划 / 提问 / 文档决策、等回复的汇报、守护告警
-    const needsYou = new Set<string>(['plan/pending', 'ask/pending', 'decisions/pending', 'round/pending', 'guard/pending', 'guard/done'])
+    // 需要您动手的格子：待处理的计划 / 提问 / 文档决策、等回复的汇报
+    const needsYou = new Set<string>(['plan/pending', 'ask/pending', 'decisions/pending', 'round/pending'])
     const lens = new Set<number>()
     for (const [k, st] of DRAWN) {
       const s = railStyle(k, st)!
@@ -130,15 +134,15 @@ describe('右侧轨样式表：只画非用户消息的类型（追加 #225）',
     assert.ok((RAIL_LEN_SHORT - 3) / 4 >= 2)
   })
 
-  it('不分「待处理 / 已处理」的种类（任务、摞、通知、胶囊）两个状态用同一格', () => {
-    for (const k of ['task', 'stack', 'notice', 'capsule'] as const) assert.deepEqual(railStyle(k, 'pending'), railStyle(k, 'done'), k)
+  it('不分「待处理 / 已处理」的种类（任务、摞、通知、胶囊、分支消息、成员发言）两个状态用同一格', () => {
+    for (const k of ['task', 'stack', 'notice', 'capsule', 'branch', 'member'] as const) assert.deepEqual(railStyle(k, 'pending'), railStyle(k, 'done'), k)
   })
 
   it('刻度线粗细：还要您处理的 4px、其余 2px；与点击区的高同奇偶，才能上下居中、不被抗锯齿糊掉', () => {
     for (const [k, st] of DRAWN) {
       const s = railStyle(k, st)!
-      // 守护告警的 done 格没有实际条目（它永远是 pending），其余都是「待处理 4px / 已处理 2px」
-      assert.equal(s.line, st === 'pending' && !['task', 'stack', 'notice', 'capsule'].includes(k) ? 4 : 2, `${k}/${st}`)
+      // 不分「待处理 / 已处理」的种类两格同样粗（2px），其余都是「待处理 4px / 已处理 2px」
+      assert.equal(s.line, st === 'pending' && !['task', 'stack', 'notice', 'capsule', 'branch', 'member'].includes(k) ? 4 : 2, `${k}/${st}`)
       assert.equal((RAIL_PITCH_PX - s.line) % 2, 0, `${k}/${st} 粗细与点击区高度同奇偶`)
       assert.ok(s.len > 0 && s.len <= 28, `${k}/${st} 长度在轨宽（32px）之内`)
       assert.ok(CARD_TONE_CLASS[s.tone], `${k}/${st} 色调 ${s.tone} 没有对应的 --card-tone 类`)
@@ -175,7 +179,6 @@ describe('右侧轨样式表：只画非用户消息的类型（追加 #225）',
     assert.equal(railLabel('round', 'done'), 'AI 方案汇报 · 已处理')
     assert.equal(railLabel('reply', 'done'), '您的确认回复')
     assert.equal(railLabel('stack', 'done'), '卡片摞')
-    assert.equal(railLabel('guard', 'pending'), '守护告警')
   })
 
   it('摞的提示写出内含类型的张数（#160）：卡片摞 · 任务 3 · 提问 1；别的种类不受 parts 影响', () => {
@@ -186,9 +189,9 @@ describe('右侧轨样式表：只画非用户消息的类型（追加 #225）',
     assert.equal(railLabel('plan', 'pending', parts), '计划确认 · 待您处理')
   })
 
-  it('isRailKind 只认十一种', () => {
+  it('isRailKind 只认十二种', () => {
     for (const k of RAIL_KINDS) assert.ok(isRailKind(k))
-    assert.equal(RAIL_KINDS.length, 11)
+    assert.equal(RAIL_KINDS.length, 12)
     assert.ok(!isRailKind('confirm'))
     assert.ok(!isRailKind(''))
     assert.ok(!isRailKind(undefined))
@@ -207,8 +210,8 @@ const entries: Record<TimelineEntry['kind'], TimelineEntry> = {
   task: { kind: 'task', key: 'task-9', at: AT, card: { key: 'task-9', seq: 9, title: '预览视图任务', state: 'doing', verb: '进行中', text: '', at: AT } },
   confirm: { kind: 'confirm', key: 'confirm-7', at: AT, item: confirm({}) },
   decisions: { kind: 'decisions', key: 'decisions-doc-1', at: AT, group: { key: 'doc-1', docPath: 'a.md', docTitle: '设计稿', pending: 2, answered: 1, total: 3, at: AT } },
-  guard: { kind: 'guard', key: 'guard-p1', at: AT, alert: { preset_id: 'p1', name: '磁盘告警', verdict: { state: 'fail' } } },
   capsule: { kind: 'capsule', key: 'capsule-3', at: AT, capsule: { revision: 3, status: 'active', created_at: AT, objective: '做完右侧轨\n其它', basis: {} } as never },
+  branch: { kind: 'branch', key: 'branch-m5', at: AT, item: { kind: 'message', id: 5, at: AT, text: '接口已就绪', actor: { kind: 'branch', workflow: 'wf-b' }, state: 'queued' } },
 }
 
 describe('时间线条目 → 轨上条目', () => {
@@ -239,6 +242,43 @@ describe('时间线条目 → 轨上条目', () => {
     assert.equal(railMetaOfEntry({ ...entries.capsule, capsule: { revision: 5, objective: '' } as never } as TimelineEntry).title, '检查点 r5')
   })
 
+  it('分支会话（#236）：智能体之间的话与建立 / 结束事件上轨（branch，不分待处理）；您在分支里说、被抄送的话是您自己的话（归 append，不上轨）', () => {
+    const msg = railMetaOfEntry(entries.branch)
+    assert.deepEqual([msg.kind, msg.state, msg.title], ['branch', 'done', '接口已就绪'])
+    const out = railMetaOfEntry({ ...entries.branch, item: { ...(entries.branch as { item: object }).item, outgoing: true, to: 'wf-a', text: '收到' } } as TimelineEntry)
+    assert.deepEqual([out.kind, out.title], ['branch', '→ 收到'])
+    const event = railMetaOfEntry({ kind: 'branch', key: 'branch-e-closed-wf-b', at: AT, item: { kind: 'event', at: AT, event: 'closed', branch: 'wf-b', actor: { kind: 'system' } } })
+    assert.deepEqual([event.kind, event.title], ['branch', '分支已结束'])
+    const human = railMetaOfEntry({ kind: 'branch', key: 'branch-m6', at: AT, item: { kind: 'message', id: 6, at: AT, text: '## 先做登录\n其它', actor: { kind: 'human', workflow: 'wf-b' } } })
+    assert.deepEqual([human.kind, human.title], ['append', '先做登录'])
+    assert.equal(railStyle(human.kind, human.state), undefined, '您自己的话不上轨')
+    assert.ok(railStyle(msg.kind, msg.state), '智能体之间的话上轨')
+    assert.equal(railLabel('branch', 'done'), '分支消息')
+  })
+
+  it('群聊消息（#241）：只有别的成员（智能体）说的话上轨（member，不分待处理）；您自己的话不上轨；标题把「谁说的」放在前面', () => {
+    const base = { id: 'm-1', sent_at: AT }
+    const agent = railMetaOfGroupMessage({ ...base, sender: { kind: 'agent', name: 'Alice' }, text: '## 接口已就绪\n第二行' })
+    assert.deepEqual(agent && [agent.id, agent.kind, agent.state, agent.title, agent.at], ['m-1', 'member', 'done', 'Alice：接口已就绪', AT])
+    // 名字与卡片头部同一个（senderIdentity）：没有名字退到工作流编号，再没有才是「成员」；没有正文时只写名字
+    assert.equal(railMetaOfGroupMessage({ ...base, sender: { kind: 'agent', name: ' ', workflow_id: 'wf-x' }, text: '收到' })?.title, 'wf-x：收到')
+    assert.equal(railMetaOfGroupMessage({ ...base, sender: { kind: 'agent', name: ' ' }, text: '收到' })?.title, '成员：收到')
+    assert.equal(railMetaOfGroupMessage({ ...base, sender: { kind: 'agent', name: 'Bob' }, text: '' })?.title, 'Bob')
+    assert.equal(railMetaOfGroupMessage({ ...base, sender: { kind: 'agent', name: 'Alice' }, text: '收到' })?.title, `${senderIdentity({ kind: 'agent', name: 'Alice' }).name}：收到`)
+    // 标题限长：长话不撑破悬停提示
+    const long = railMetaOfGroupMessage({ ...base, sender: { kind: 'agent', name: 'Alice' }, text: '很长'.repeat(80) })!
+    assert.ok(long.title.length <= 'Alice：'.length + 49, `标题应被截短：${long.title.length}`)
+    // 您自己的话与没有发送者的行（系统行等）：不上轨
+    assert.equal(railMetaOfGroupMessage({ ...base, sender: { kind: 'human', name: '您' }, text: '先做登录' }), null)
+    assert.equal(railMetaOfGroupMessage({ ...base, sender: undefined as never, text: '系统消息' }), null)
+    // 往返：写到 DOM 属性再读回来是同一个条目（轨靠 data-rail-* 扫描）
+    const attrs = railDomAttrs(agent!)
+    const parsed = parseRailItem(a => attrs[a], 100)
+    assert.deepEqual(parsed && [parsed.id, parsed.kind, parsed.state, parsed.title, parsed.at, parsed.top], ['m-1', 'member', 'done', 'Alice：接口已就绪', AT, 100])
+    assert.ok(railStyle('member', 'done'), '成员发言上轨')
+    assert.equal(railLabel('member', 'done'), '成员发言')
+  })
+
   it('确认项：计划 / 提问各归各的；待答复 = pending，其余（已答复、已忽略、已撤回、已过期）= done', () => {
     const plan = (status: ConfirmItem['status']) => railMetaOfEntry({ kind: 'confirm', key: 'confirm-1', at: AT, item: confirm({ kind: 'plan', status }) })
     assert.deepEqual([plan('pending').kind, plan('pending').state], ['plan', 'pending'])
@@ -256,14 +296,6 @@ describe('时间线条目 → 轨上条目', () => {
     const done = railMetaOfEntry({ ...e, group: { ...e.group, pending: 0 } })
     assert.equal(done.state, 'done')
     assert.equal(done.title, '设计稿')
-  })
-
-  it('守护告警：描述的是「现在」，永远是 pending；标题取名称，没有名称用预设编号', () => {
-    const m = railMetaOfEntry(entries.guard)
-    assert.deepEqual([m.kind, m.state, m.title], ['guard', 'pending', '磁盘告警'])
-    const e = entries.guard
-    if (e.kind !== 'guard') throw new Error('夹具')
-    assert.equal(railMetaOfEntry({ ...e, alert: { ...e.alert, name: '' } }).title, 'p1')
   })
 
   it('一摞卡片按一个条目算：编号是摞的键、标题「N 张卡片」、时间取第一张', () => {
@@ -466,13 +498,13 @@ describe('layoutRail：固定间距的缩略轴', () => {
   })
 
   it('没有合并：每个可画的条目一道刻度，刻度带着它自己的条目，样式按条目的种类与状态', () => {
-    const items = [item('a', 'round', 1000, 'pending'), item('b', 'ask', 1001, 'pending'), item('c', 'guard', 1002, 'pending')]
+    const items = [item('a', 'round', 1000, 'pending'), item('b', 'ask', 1001, 'pending'), item('c', 'plan', 1002, 'pending')]
     const l = layoutRail(items, opt)
     assert.equal(l.ticks.length, 3)
     assert.deepEqual(l.ticks.map(t => [t.item.id, t.len, t.line, t.tone, t.pulse, t.dim]), [
       ['a', 24, 4, 'zinc', true, false],
       ['b', 24, 4, 'amber', false, false],
-      ['c', 24, 4, 'amber', false, false],
+      ['c', 24, 4, 'red', true, false],
     ])
   })
 
@@ -686,13 +718,11 @@ const read = (rel: string) => readFileSync(join(srcDir(), rel), 'utf8')
 
 describe('预览列表接入右侧轨（源码级防线）', () => {
   const list = read('components/feedback/preview-view/PreviewMessageList.vue')
-  const classic = read('components/feedback/FeedbackMessageList.vue')
 
-  it('预览列表用新轨，不再用经典的 TimelineScrubber；经典列表原样不变', () => {
+  it('会话列表用右侧轨（PreviewTimelineRail）；旧的 TimelineScrubber 已删除（#166）', () => {
     assert.match(list, /<PreviewTimelineRail\b/)
     assert.doesNotMatch(list, /<TimelineScrubber\b/)
-    assert.match(classic, /<TimelineScrubber\b/)
-    assert.doesNotMatch(classic, /PreviewTimelineRail|data-rail-|railDomAttrs/)
+    assert.ok(!existsSync(join(srcDir(), 'components', 'TimelineScrubber.vue')), 'TimelineScrubber.vue 应已删除')
   })
 
   it('三类条目都挂了 data-rail-*：时间线的每一块、每一轮汇报、每条确认回复', () => {
@@ -707,7 +737,7 @@ describe('预览列表接入右侧轨（源码级防线）', () => {
     assert.match(list, /scrollToSession\(item\.ref\)/)
   })
 
-  it('经典列表的叶子组件都没有 data-rail-*（轨只在预览列表里挂属性）', () => {
+  it('共享叶子组件都没有 data-rail-*（轨只在列表里挂属性）', () => {
     for (const rel of ['components/feedback/CardStack.vue', 'components/feedback/TimelineCardEntry.vue', 'components/feedback/AsyncTimelineEntry.vue', 'components/confirms/ConfirmTimelineCard.vue', 'components/confirms/ConfirmCard.vue']) {
       assert.doesNotMatch(read(rel), /data-rail-/, rel)
     }

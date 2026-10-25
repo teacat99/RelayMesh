@@ -2,11 +2,21 @@
 import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch, nextTick, h } from 'vue'
 import { useMediaQuery, useResizeObserver } from '@vueuse/core'
 import { appendDescription, appendPlaceholder } from '../../lib/inbox'
+import { pickPlaceholder, withButtonText, type SubmitButtonInfo } from '../../lib/dockText'
 import { useSessionStore } from '../../stores/session'
 import { usePresence } from '../../composables/usePresence'
+import { usePendingDeepLinkWf } from '../../composables/usePendingDeepLinkWf'
+import {
+  LEAD_SETTLE_MS,
+  leadReservation,
+  leadWidthOf,
+  patchShellHint,
+  readShellHint,
+  shellWorkflowKey,
+} from '../../lib/shellHints'
 import { useSettingsStore } from '../../stores/settings'
 import ImageUploader from '../ImageUploader.vue'
-import ViewTrialLinks from './ViewTrialLinks.vue'
+import MessageSearchLink from './MessageSearchLink.vue'
 import Button from '../ui/button/Button.vue'
 import {
   Send,
@@ -41,6 +51,7 @@ import SessionQuickRun from './SessionQuickRun.vue'
 import SessionEnableAgent from './SessionEnableAgent.vue'
 import InboxStatusChip from './InboxStatusChip.vue'
 import AuthProfileChip from './AuthProfileChip.vue'
+import ResidentPromptChip from './ResidentPromptChip.vue'
 import ConfirmPendingChip from '../confirms/ConfirmPendingChip.vue'
 import type { QuickPresetItem } from '../../stores/settings'
 import type { SessionImage } from '../../api/types'
@@ -1402,8 +1413,8 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
-// 动态提交按钮文本与状态
-const submitButtonInfo = computed(() => {
+// 动态提交按钮文本与状态：由当前选中会话的状态推出来
+const sessionSubmitButtonInfo = computed<SubmitButtonInfo>(() => {
   const sess = sessionStore.selectedSession || sessionStore.currentSession
   if (sess?.status === 'pending') {
     return {
@@ -1425,6 +1436,9 @@ const submitButtonInfo = computed(() => {
     description: appendDescription(sessionStore.inboxConfig)
   }
 })
+
+// 发送按钮实际用的文案：调用方（托管自驾页的「发送最高指令」）指定了 buttonText 就用它的，否则就是上面由会话状态推出来的那一份（#249）
+const submitButtonInfo = computed(() => withButtonText(sessionSubmitButtonInfo.value, props.buttonText))
 
 function handleSubmit() {
   // 图片正文缺失（还在载入、或确认丢失）时不能提交：否则会把一张空图当附件发出去，对方看到的是一个坏掉的图片
@@ -1712,14 +1726,20 @@ onUnmounted(() => {
   const floatingActionBarRef = ref<HTMLElement | null>(null)
   const quickActionsRowRef = ref<HTMLElement | null>(null)
   const hasInlineScrollSpace = ref(true)
+  // 状态条所在那一行的可用宽度（px，0 = 还没量到）：会话相关芯片的预留宽度不能超过它（见 leadMinWidth）
+  const quickRowWidth = ref(0)
   const isPhone = useMediaQuery(PHONE_MEDIA)
 
   // 手机宽度的提示语只留前半句：括号里的快捷键与长说明在两三行高的输入框里读不下，手机上也没有 Ctrl 键（#155）。
   // 前半句仍保留「回复指导意见 / 追加补充指令」，输入区当前是哪种模式一眼能看出。
+  // 调用方（托管自驾页）指定了 placeholder 就用它的，写法沿用上面的约定：主句 + 全角括号里的提示，手机上括号部分同样去掉（#249）。
   const inputPlaceholder = computed(() => {
-    const full = activeSession.value?.status === 'pending'
-      ? '回复指导意见或确认要求...（支持粘贴图片并自动插入【图 N】引用，按 Ctrl + Enter 发送，Ctrl + ←/→ 切换草稿）'
-      : appendPlaceholder(sessionStore.inboxConfig)
+    const full = pickPlaceholder(
+      props.placeholder,
+      activeSession.value?.status === 'pending'
+        ? '回复指导意见或确认要求...（支持粘贴图片并自动插入【图 N】引用，按 Ctrl + Enter 发送，Ctrl + ←/→ 切换草稿）'
+        : appendPlaceholder(sessionStore.inboxConfig),
+    )
     return isPhone.value ? full.replace(/（.*）$/, '') : full
   })
 
@@ -1736,6 +1756,7 @@ onUnmounted(() => {
     const entry = entries[0]
     if (entry) {
       const containerWidth = entry.contentRect.width
+      quickRowWidth.value = Math.floor(containerWidth)
       const leftPillsEl = quickActionsRowRef.value?.querySelector('.quick-presets-container') as HTMLElement | null
       if (leftPillsEl) {
         const leftWidth = leftPillsEl.offsetWidth
@@ -1748,6 +1769,75 @@ onUnmounted(() => {
       }
     }
   })
+
+  // 状态条里「会话相关芯片整体」的占位（#246 第二版）：Agent 状态、回复窗口、收件箱、阶段滑块 / 授权档位、常驻规则……这一批芯片都要等
+  // 目标会话解析出来才挂载。深链接冷打开时目标要等简略会话列表回来才知道（生产约 +0.85 秒，与第一轮内容同一帧），晚到的那一刻
+  // 后面的预设按钮被推右约 670px，有时还折成两行（状态条高 26 → 58）。所以记住上次这批芯片整体多宽（lib/shellHints.ts 的 lead），
+  // 芯片到齐之前给它们的容器留同样的最小宽度：预设按钮从第一帧起就在最终位置上，芯片挂载进预留的空位，不再推开任何东西。
+  // 到齐（LEAD_SETTLE_MS）之后放开最小宽度、让真实宽度说了算，并把这次量到的宽度记下来；第一次来的工作流没有记忆，仍会晚到一次。
+  // 占位的键在深链接处理完之前取地址上的目标 wf（此时 currentWorkflowId 还是空的 / 是占位会话的），不会为占位会话挂载或请求任何东西（#169）。
+  const pendingDeepLinkWf = usePendingDeepLinkWf()
+  const leadKey = computed(() => shellWorkflowKey(pendingDeepLinkWf.value ? '' : currentWorkflowId.value, pendingDeepLinkWf.value))
+  // 记忆只依赖键（换工作流时读一次）；安顿之后改写的记忆这一轮不再用（安顿后不预留）
+  const leadHint = computed(() => readShellHint(leadKey.value))
+  const leadEl = ref<HTMLElement | null>(null)
+  const leadSettled = ref(false)
+  const leadReserved = computed(() => leadReservation({ hint: leadHint.value, wide: !isPhone.value, settled: leadSettled.value }))
+  // 容器真正要设的最小宽度：不超过状态条所在行的宽度（窄窗口里记忆的宽度可能比这一行还宽，撑破输入区）。
+  // 不能写成 min(Npx, 100%)：状态条自己是按内容收缩的（预设按钮折行与否取决于它的宽度），百分比会对着「收缩后的宽度」解析，
+  // 目标解析之前只有预设按钮在条里，条只有约 650px 宽，预留被夹到 650px、预设按钮在占位阶段和最终折行不同（e2e shell-shift 第 4 步量到过）。
+  const leadMinWidth = computed(() => {
+    const n = leadReserved.value
+    if (n <= 0) return 0
+    return quickRowWidth.value > 0 ? Math.min(n, quickRowWidth.value) : n
+  })
+  let leadSettleTimer: ReturnType<typeof setTimeout> | null = null
+  let leadRememberTimer: ReturnType<typeof setTimeout> | null = null
+
+  function clearLeadTimers() {
+    if (leadSettleTimer !== null) {
+      clearTimeout(leadSettleTimer)
+      leadSettleTimer = null
+    }
+    if (leadRememberTimer !== null) {
+      clearTimeout(leadRememberTimer)
+      leadRememberTimer = null
+    }
+  }
+
+  // 目标会话解析出来（没有未处理的深链、有当前工作流）之后开始计时；换工作流重新计时
+  watch(
+    () => [!pendingDeepLinkWf.value && !!currentWorkflowId.value, currentWorkflowId.value] as const,
+    ([resolved]) => {
+      clearLeadTimers()
+      leadSettled.value = false
+      if (!resolved) return
+      leadSettleTimer = setTimeout(() => {
+        leadSettleTimer = null
+        leadSettled.value = true
+      }, LEAD_SETTLE_MS)
+    },
+    { immediate: true },
+  )
+
+  // 把量到的整体宽度记下来：只在芯片到齐之后、同一行时量（折成多行时整体宽度没有意义）；内容没变不写存储
+  function rememberLead() {
+    leadRememberTimer = null
+    const el = leadEl.value
+    const wf = currentWorkflowId.value
+    if (!el || !wf || pendingDeepLinkWf.value || !leadSettled.value || el.offsetHeight > 34) return
+    const w = leadWidthOf(Array.from(el.children, c => c.getBoundingClientRect()))
+    patchShellHint(wf, { lead: w > 0 ? { w, wide: !isPhone.value } : null })
+  }
+  function scheduleRememberLead() {
+    if (!leadSettled.value) return
+    if (leadRememberTimer !== null) clearTimeout(leadRememberTimer)
+    leadRememberTimer = setTimeout(rememberLead, 400)
+  }
+  // 到齐的那一刻量一次；之后芯片的宽度变了（文字更新、断点切换、放开最小宽度后收窄）再量
+  watch(leadSettled, scheduleRememberLead)
+  useResizeObserver(leadEl, scheduleRememberLead)
+  onBeforeUnmount(clearLeadTimers)
 
   function clearDraft() {
     resetForm()
@@ -1910,6 +2000,25 @@ onUnmounted(() => {
         <!-- 手机宽度（#155）：芯片与快捷标签不换行，收成一整行可横向滑动的条——原来换成三四行，盖住会话主区约三成；
              py-2.5 / -my-2.5：条上下各多出 10px 只放点按区（让每个芯片的点按区够 44px），不占版面高度；条里的子项一律不收缩，宁可滑也不挤 -->
         <div class="quick-presets-container flex flex-wrap items-center gap-1.5 max-w-full min-w-0 max-md:-my-2.5 max-md:flex-nowrap max-md:overflow-x-auto max-md:overflow-y-hidden max-md:py-2.5 max-md:[&>*]:shrink-0 no-scrollbar" data-testid="quick-strip">
+        <!-- 会话相关的一批芯片放进同一个容器（#246 第二版）：它们要等目标会话解析出来才挂载，容器在到齐之前按记忆的整体宽度留最小宽度，
+             预设按钮才不会在深链接冷打开时被推右约 670px；预留宽度不超过状态条所在行的宽度（leadMinWidth），窄窗口不会撑破输入区。
+             没有会话、也没有要预留的宽度时容器不渲染（空容器也会占一格 gap）。手机宽度沿用条的版式：不换行、子项不收缩，
+             容器自己也不能被 max-w-full 卡在条的可视宽度里（max-md:max-w-none）——条是横向滑动的，芯片总宽超出条宽是常态，
+             容器要跟着内容一样宽，否则溢出的芯片会画到后面的预设按钮上面（这一版的第一稿出过这个重叠，session-prompts / wake-prompts 的手机宽度那一步抓到的） -->
+        <div
+          v-if="currentWorkflowId || leadReserved > 0"
+          ref="leadEl"
+          class="flex flex-wrap items-center gap-1.5 max-w-full min-w-0 max-md:max-w-none max-md:flex-nowrap max-md:shrink-0 max-md:[&>*]:shrink-0"
+          :style="leadMinWidth > 0 ? { minWidth: `${leadMinWidth}px` } : undefined"
+          data-testid="quick-lead"
+        >
+        <!-- 芯片还没挂载（目标会话还在解析）：骨架占住预留的宽度；芯片一挂载它就让位。对读屏隐藏。高与芯片一样（26px），状态条这一行的高才不变 -->
+        <span
+          v-if="!currentWorkflowId && leadReserved > 0"
+          class="h-[26px] w-full rounded-sm border border-dashed border-border/50 bg-muted/20 motion-safe:animate-pulse"
+          aria-hidden="true"
+          data-testid="quick-lead-reserved"
+        ></span>
         <!-- 0. 执行状态块：22:28 · 1/6 · 5m（状态图标 + 计时 · 空回执 · 提示词等待）；右键 / 点击展开快捷设置与「我的状态」 -->
         <!-- 交互式（异步）场景只有「剩余等待回复时间」；1:1 场景才有挂起倒计时 / 空回执 / 提示词等待（#123） -->
         <!-- Agent 状态：上线点 · 状态图标 · 运行时间 · token（#81）；点开是身份卡（改名 / 唤醒）。没有 hook 汇报时不出现 -->
@@ -1932,6 +2041,10 @@ onUnmounted(() => {
 
         <!-- Phase Slider (收件箱状态块之后) -->
         <PhaseSlider v-if="currentWorkflowId && phaseSliderVisible" ref="phaseSliderRef" :workflow-id="currentWorkflowId" />
+
+        <!-- 常驻规则（#232）：这个会话里智能体每次回执都会读到的规则；同步 / 异步会话都有，点开编辑，「已读到 / 待读」一眼可见 -->
+        <ResidentPromptChip v-if="currentWorkflowId" :workflow-id="currentWorkflowId" />
+        </div>
 
         <!-- 3..N Quick Preset Pills (支持点击填充、勾选追加在文字之后、右键编辑弹窗) -->
         <div
@@ -1988,6 +2101,7 @@ onUnmounted(() => {
         <button
           type="button"
           class="text-[11px] sm:text-xs px-2 py-1 rounded-sm border border-dashed border-border/80 bg-card/90 backdrop-blur-xs text-muted-foreground hover:text-foreground hover:border-border transition-colors flex items-center gap-1 shadow-2xs shrink-0 whitespace-nowrap cursor-pointer"
+          data-prefetch="settings"
           @click="emit('open-settings')"
           title="配置快捷标签与超时设置"
         >
@@ -1995,8 +2109,8 @@ onUnmounted(() => {
           <span>设置标签</span>
         </button>
 
-        <!-- 手机宽度：「搜索消息 / 回到经典视图（或试用预览视图）」入口放在条的末尾（桌面在会话区上方一行小字，见 FeedbackView） -->
-        <ViewTrialLinks v-if="isPhone && currentWorkflowId" variant="chip" />
+        <!-- 手机宽度：「搜索消息」入口放在条的末尾（桌面在会话区上方一行小字，见 FeedbackView） -->
+        <MessageSearchLink v-if="isPhone && currentWorkflowId" variant="chip" />
       </div>
 
       <!-- Right Side: 回到底部最新（Demand 2: 空间感知自适应居右/居上跃迁） -->

@@ -6,12 +6,12 @@ import { categoriesOwnedBy, jumpLabel } from './settingsRegistry'
 const ids = (module: 'relay' | 'exec') => navCategoryIds(module) as string[]
 
 describe('navGroups：左栏 / 选择条的分组', () => {
-  test('RelayMesh：先是本模块的 6 个分类，再是通用的 4 个，组名带模块名', () => {
+  test('RelayMesh：先是本模块的 7 个分类，再是通用的 5 个，组名带模块名', () => {
     const g = navGroups('relay')
     assert.deepEqual(g.map(x => x.key), ['own', 'common'])
     assert.deepEqual(g.map(x => x.title), ['RelayMesh 设置', '通用设置'])
-    assert.deepEqual(g[0].items.map(c => c.id), ['waiting', 'prompts', 'speech', 'presets', 'authProfiles', 'sessionData'])
-    assert.deepEqual(g[1].items.map(c => c.id), ['appearance', 'security', 'backup', 'about'])
+    assert.deepEqual(g[0].items.map(c => c.id), ['waiting', 'prompts', 'speech', 'presets', 'authProfiles', 'sessionPrompts', 'sessionData'])
+    assert.deepEqual(g[1].items.map(c => c.id), ['appearance', 'security', 'oauth', 'backup', 'about'])
   })
 
   test('ExecMesh：本模块只有 3 个分类，另一个模块的分类不出现', () => {
@@ -28,8 +28,8 @@ describe('navGroups：左栏 / 选择条的分组', () => {
       assert.deepEqual(navCategoryIds(m), flat)
       assert.equal(new Set(flat).size, flat.length, m)
     }
-    assert.equal(ids('relay').length, 10)
-    assert.equal(ids('exec').length, 7)
+    assert.equal(ids('relay').length, 12)
+    assert.equal(ids('exec').length, 8)
   })
 })
 

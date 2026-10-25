@@ -1,24 +1,34 @@
 // 运行：pnpm --dir frontend run test:unit
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import type { NtfyConfig, NtfyStatus } from '../api/ntfy'
+import type { NtfyConfig, NtfyKindInfo, NtfyStatus } from '../api/ntfy'
 import {
   NTFY_DEFAULT_RUN_MIN_SECONDS,
   NTFY_MAX_RUN_MIN_SECONDS,
   NTFY_RUN_MIN_OPTIONS,
   authModeOf,
   buildUpdate,
+  builtinPriority,
   describeCounters,
+  describeKindTable,
+  describeKindTest,
   describeLast,
+  effectiveKind,
   formFromConfig,
   formatRunMinSeconds,
+  groupKinds,
   isDirty,
   isPublicNtfySh,
+  kindChoice,
+  kindOptions,
+  priorityLabel,
   privacyWarnings,
   randomTopic,
   runMinOptions,
   subscribeUrl,
   validateForm,
+  withKindChoice,
+  type KindChoice,
   type NtfyForm,
 } from './ntfy'
 
@@ -352,5 +362,266 @@ describe('describeLast / describeCounters', () => {
     assert.equal(describeCounters(null), '')
     assert.equal(describeCounters(status()), '')
     assert.equal(describeCounters(status({ sent: 3, failed: 1, dropped: 2 })), '已推送 3 条 · 失败 1 条 · 被限流合并 / 丢弃 2 条')
+  })
+})
+
+// ───────────────────── 按消息类型设置优先级 ─────────────────────
+
+const kindInfo = (over: Partial<NtfyKindInfo> & { id: string }): NtfyKindInfo => ({
+  group: 'need_you',
+  label: over.id,
+  desc: '说明',
+  default_on: true,
+  default_priority: 0,
+  ...over,
+})
+
+// 与服务端目录同构的一小撮：固定默认 / 跟随默认优先级 / 跟随且封顶 / 默认关闭的异常类
+const REQUEST = kindInfo({ id: 'request', label: '智能体在等你回复' })
+const MENTION = kindInfo({ id: 'mention', label: '群里 @ 了你', default_priority: 4 })
+const ASK_CARD = kindInfo({ id: 'ask_card', label: '新的待确认提问', default_priority: 3 })
+const RUN_OK = kindInfo({ id: 'run_ok', group: 'run', label: '模型命令顺利完成', cap_normal: true })
+const RUN_TROUBLE = kindInfo({ id: 'run_trouble', group: 'run', label: '模型命令出状况' })
+const AGENT_ERROR = kindInfo({ id: 'agent_error', group: 'exception', label: 'Agent 出错或被中断', default_on: false, suggested_priority: 4 })
+const SECURITY = kindInfo({ id: 'security_alert', group: 'exception', label: '安全告警', default_on: false, suggested_priority: 5 })
+const KINDS = [REQUEST, MENTION, ASK_CARD, RUN_OK, RUN_TROUBLE, AGENT_ERROR, SECURITY]
+
+describe('priorityLabel', () => {
+  it('中文名加数字，可带备注', () => {
+    assert.equal(priorityLabel(1), '最低（1）')
+    assert.equal(priorityLabel(3), '默认（3）')
+    assert.equal(priorityLabel(4), '较高（4）')
+    assert.equal(priorityLabel(5, '建议'), '紧急（5，建议）')
+  })
+
+  it('越界或不是数字时收敛到合法范围，不会出现「undefined（9）」', () => {
+    assert.equal(priorityLabel(9), '紧急（5）')
+    assert.equal(priorityLabel(0), '最低（1）')
+    assert.equal(priorityLabel(Number.NaN), '较高（4）', '不是数字时回到推荐值')
+  })
+})
+
+describe('按消息类型的覆盖表：表单往返', () => {
+  it('老服务端没有这个字段：按空表处理，提交体里是 {}（表示没有任何覆盖）', () => {
+    const saved = baseConfig()
+    assert.equal('priority_by_kind' in saved, false)
+    const f = formFromConfig(saved)
+    assert.deepEqual(f.priorityByKind, {})
+    assert.deepEqual(buildUpdate(f, saved).priority_by_kind, {})
+  })
+
+  it('已保存的覆盖表带进表单，提交时整张带上；表单与配置互不牵连', () => {
+    const saved = baseConfig({ priority_by_kind: { mention: 2, run_ok: 0 } })
+    const f = formFromConfig(saved)
+    assert.deepEqual({ ...f.priorityByKind }, { mention: 2, run_ok: 0 })
+    f.priorityByKind.ask_card = 5
+    assert.equal('ask_card' in (saved.priority_by_kind ?? {}), false, '改表单不能碰到已保存的配置')
+    const out = buildUpdate(f, saved)
+    assert.deepEqual(out.priority_by_kind, { mention: 2, run_ok: 0, ask_card: 5 })
+    out.priority_by_kind!.mention = 1
+    assert.equal(f.priorityByKind.mention, 2, '提交体也是副本')
+  })
+
+  it('isDirty：覆盖表变化算改动，键的顺序不同不算', () => {
+    const saved = baseConfig({ priority_by_kind: { mention: 2, run_ok: 0 } })
+    const base = formFromConfig(saved)
+    assert.equal(isDirty(base, saved), false)
+    assert.equal(isDirty({ ...base, priorityByKind: { run_ok: 0, mention: 2 } }, saved), false, '键顺序不同不算改动')
+    assert.equal(isDirty({ ...base, priorityByKind: { mention: 3, run_ok: 0 } }, saved), true)
+    assert.equal(isDirty({ ...base, priorityByKind: { mention: 2 } }, saved), true, '删掉一项算改动')
+    assert.equal(isDirty({ ...base, priorityByKind: { mention: 2, run_ok: 0, ask_card: 1 } }, saved), true, '多一项算改动')
+    assert.equal(isDirty({ ...base, priorityByKind: { mention: 2, run_ok: 1 } }, saved), true, '0 与 1 不同')
+  })
+
+  it('validateForm：覆盖表里的值必须是 0~5 的整数', () => {
+    const ok = (priorityByKind: Record<string, number>) => validateForm(formOf({ topic: 't', priorityByKind }), baseConfig(), true)
+    assert.equal(ok({}), '')
+    assert.equal(ok({ mention: 0, run_ok: 5, ask_card: 1 }), '')
+    for (const bad of [-1, 6, 2.5, Number.NaN]) {
+      assert.match(ok({ mention: bad }), /mention.*不合法/, `应拒绝 ${bad}`)
+    }
+  })
+})
+
+describe('builtinPriority / effectiveKind（与服务端 PriorityFor 同一套规则）', () => {
+  it('固定默认的类型不受默认优先级影响', () => {
+    for (const dp of [1, 3, 5]) {
+      assert.equal(builtinPriority(MENTION, dp), 4)
+      assert.equal(builtinPriority(ASK_CARD, dp), 3)
+    }
+  })
+
+  it('跟随默认优先级的类型随它走，顺利完成的命令最多按 3', () => {
+    for (const dp of [1, 2, 3, 4, 5]) {
+      assert.equal(builtinPriority(REQUEST, dp), dp)
+      assert.equal(builtinPriority(RUN_TROUBLE, dp), dp)
+      assert.equal(builtinPriority(RUN_OK, dp), Math.min(dp, 3))
+    }
+  })
+
+  it('覆盖表优先于内置默认：0 = 不推送，1~5 = 指定，越界收敛', () => {
+    assert.deepEqual(effectiveKind(MENTION, { mention: 2 }, 4), { on: true, priority: 2 })
+    assert.deepEqual(effectiveKind(MENTION, { mention: 0 }, 4), { on: false, priority: 0 })
+    assert.deepEqual(effectiveKind(MENTION, { mention: 9 }, 4), { on: true, priority: 5 })
+    assert.deepEqual(effectiveKind(RUN_OK, { run_ok: 5 }, 4), { on: true, priority: 5 }, '明确指定的值不受封顶影响')
+    assert.deepEqual(effectiveKind(MENTION, {}, 4), { on: true, priority: 4 })
+    assert.deepEqual(effectiveKind(REQUEST, undefined, 2), { on: true, priority: 2 })
+  })
+
+  it('默认关闭的异常类：不设不推送，设了 1~5 才推', () => {
+    assert.deepEqual(effectiveKind(AGENT_ERROR, {}, 4), { on: false, priority: 0 })
+    assert.deepEqual(effectiveKind(AGENT_ERROR, { agent_error: 0 }, 4), { on: false, priority: 0 })
+    assert.deepEqual(effectiveKind(AGENT_ERROR, { agent_error: 4 }, 4), { on: true, priority: 4 })
+  })
+})
+
+describe('kindChoice / withKindChoice', () => {
+  it('没设 → 默认；0 → 不推送；1~5 → 对应级别', () => {
+    assert.equal(kindChoice(MENTION, undefined), 'default')
+    assert.equal(kindChoice(MENTION, {}), 'default')
+    assert.equal(kindChoice(MENTION, { mention: 0 }), 'off')
+    assert.equal(kindChoice(MENTION, { mention: 2 }), '2')
+    assert.equal(kindChoice(MENTION, { mention: 4 }), '4', '与内置默认相同的显式设置仍显示成它自己')
+  })
+
+  it('默认关闭的类型设成 0 与「默认」等价：统一显示成默认', () => {
+    assert.equal(kindChoice(AGENT_ERROR, { agent_error: 0 }), 'default')
+    assert.equal(kindChoice(AGENT_ERROR, { agent_error: 4 }), '4')
+  })
+
+  it('脏数据不会让下拉框悬空：越界收敛、非数字当没设', () => {
+    assert.equal(kindChoice(MENTION, { mention: 9 }), '5')
+    assert.equal(kindChoice(MENTION, { mention: Number.NaN }), 'default')
+  })
+
+  it('withKindChoice 返回新对象，不改原表；选默认就是删掉这一项', () => {
+    const table = { mention: 2, run_ok: 0 }
+    const a = withKindChoice(table, MENTION, '5')
+    assert.deepEqual(a, { mention: 5, run_ok: 0 })
+    assert.deepEqual(table, { mention: 2, run_ok: 0 }, '原表不变')
+    assert.deepEqual(withKindChoice(table, MENTION, 'default'), { run_ok: 0 })
+    assert.deepEqual(withKindChoice(table, ASK_CARD, 'off'), { mention: 2, run_ok: 0, ask_card: 0 })
+    assert.deepEqual(withKindChoice(undefined, REQUEST, '1'), { request: 1 })
+    assert.deepEqual(withKindChoice({}, REQUEST, 'default'), {})
+  })
+
+  it('选项 → 覆盖表 → 选项，往返一致', () => {
+    const choices: KindChoice[] = ['default', 'off', '1', '2', '3', '4', '5']
+    for (const info of [MENTION, RUN_OK, AGENT_ERROR]) {
+      for (const c of choices) {
+        const back = kindChoice(info, withKindChoice({}, info, c))
+        // 默认关闭的类型「不推送」与「默认」等价，往返后统一成默认
+        const want = !info.default_on && c === 'off' ? 'default' : c
+        assert.equal(back, want, `${info.id} 选 ${c}`)
+      }
+    }
+  })
+})
+
+describe('kindOptions', () => {
+  const values = (o: Array<{ value: KindChoice }>) => o.map(x => x.value)
+
+  it('默认开启的类型：默认 / 不推送 / 1~5，「默认」一项写明此刻落在几级', () => {
+    const o = kindOptions(MENTION, 4)
+    assert.deepEqual(values(o), ['default', 'off', '1', '2', '3', '4', '5'])
+    assert.equal(o[0].label, '默认 → 较高（4）')
+    assert.equal(o[1].label, '不推送')
+    assert.equal(o[5].label, '较高（4）')
+  })
+
+  it('跟随默认优先级的类型：「默认」一项随默认优先级变化', () => {
+    assert.equal(kindOptions(REQUEST, 2)[0].label, '跟随默认优先级 → 较低（2）')
+    assert.equal(kindOptions(REQUEST, 5)[0].label, '跟随默认优先级 → 紧急（5）')
+  })
+
+  it('顺利完成的命令：默认优先级高于 3 时写明「最多按 3」，不高于 3 时不啰嗦', () => {
+    assert.equal(kindOptions(RUN_OK, 4)[0].label, '跟随默认优先级（最多按 3）→ 默认（3）')
+    assert.equal(kindOptions(RUN_OK, 2)[0].label, '跟随默认优先级 → 较低（2）')
+  })
+
+  it('默认关闭的异常类：「不推送（默认）」打头，没有单独的「不推送」；建议值打上标记', () => {
+    const o = kindOptions(AGENT_ERROR, 4)
+    assert.deepEqual(values(o), ['default', '1', '2', '3', '4', '5'])
+    assert.equal(o[0].label, '不推送（默认）')
+    assert.equal(o[4].label, '推送 · 较高（4，建议）')
+    assert.equal(o[1].label, '推送 · 最低（1）', '非建议值不带标记')
+    const sec = kindOptions(SECURITY, 4)
+    assert.equal(sec[5].label, '推送 · 紧急（5，建议）')
+  })
+
+  it('每个选项的 value 都能被 kindChoice 认出来（下拉框不会悬空）', () => {
+    for (const info of KINDS) {
+      for (const o of kindOptions(info, 4)) {
+        const table = withKindChoice({}, info, o.value)
+        const shown = kindChoice(info, table)
+        const ok = shown === o.value || (!info.default_on && o.value === 'off')
+        assert.ok(ok, `${info.id}: ${o.value} → ${shown}`)
+        assert.ok(kindOptions(info, 4).some(x => x.value === shown), `${info.id}: ${shown} 不在选项里`)
+      }
+    }
+  })
+})
+
+describe('groupKinds', () => {
+  it('按「需要你处理 / 模型运行的命令 / 异常提醒」排好，组内保持服务端给的顺序', () => {
+    const shuffled = [AGENT_ERROR, MENTION, RUN_OK, REQUEST, SECURITY, RUN_TROUBLE, ASK_CARD]
+    const g = groupKinds(shuffled)
+    assert.deepEqual(g.map(x => x.id), ['need_you', 'run', 'exception'])
+    assert.deepEqual(g[0].kinds.map(k => k.id), ['mention', 'request', 'ask_card'])
+    assert.deepEqual(g[1].kinds.map(k => k.id), ['run_ok', 'run_trouble'])
+    assert.deepEqual(g[2].kinds.map(k => k.id), ['agent_error', 'security_alert'])
+    assert.ok(g.every(x => x.title && x.hint), '每组都有标题与说明')
+  })
+
+  it('空组不出现；没有目录（老服务端）时返回空', () => {
+    assert.deepEqual(groupKinds(undefined), [])
+    assert.deepEqual(groupKinds([]), [])
+    assert.deepEqual(groupKinds([RUN_OK]).map(x => x.id), ['run'])
+  })
+
+  it('服务端新增了界面不认识的分组：归到「其他」，不会悄悄丢掉', () => {
+    const future = kindInfo({ id: 'future_kind', group: 'brand_new' as NtfyKindInfo['group'] })
+    const g = groupKinds([MENTION, future])
+    assert.deepEqual(g.map(x => x.id), ['need_you', 'other'])
+    assert.equal(g[1].kinds[0].id, 'future_kind')
+  })
+})
+
+describe('describeKindTable', () => {
+  it('没有目录时不显示小结', () => {
+    assert.equal(describeKindTable(undefined, {}, 4), '')
+    assert.equal(describeKindTable([], {}, 4), '')
+  })
+
+  it('全部默认：异常提醒全部关闭', () => {
+    assert.equal(describeKindTable(KINDS, {}, 4), '全部使用默认设置 · 异常提醒全部关闭')
+  })
+
+  it('改过几类、关了几类、异常开了几类', () => {
+    const t = { mention: 2, run_ok: 0, ask_card: 0, agent_error: 4 }
+    assert.equal(describeKindTable(KINDS, t, 4), '已单独设置 4 类 · 2 类已设成不推送 · 异常提醒已开 1 / 2 类')
+  })
+
+  it('异常类设成 0（等价于默认）不算改过，也不算「已设成不推送」', () => {
+    assert.equal(describeKindTable(KINDS, { agent_error: 0 }, 4), '全部使用默认设置 · 异常提醒全部关闭')
+  })
+})
+
+describe('describeKindTest', () => {
+  it('写明实际用了几级与是哪一类', () => {
+    const text = describeKindTest(MENTION, '2', { priority: 2, took_ms: 87 })
+    assert.match(text, /已按「较低（2）」试发「群里 @ 了你」/)
+    assert.match(text, /87 毫秒/)
+    assert.ok(!/预览/.test(text), '正在推送的类型不提示预览')
+  })
+
+  it('这一类目前不推送时提醒：这只是预览', () => {
+    assert.match(describeKindTest(MENTION, 'off', { priority: 4, took_ms: 10 }), /这一类目前是「不推送」，这条只是预览/)
+    assert.match(describeKindTest(SECURITY, 'default', { priority: 5, took_ms: 10 }), /这一类目前是「不推送」，这条只是预览/)
+    assert.ok(!/预览/.test(describeKindTest(SECURITY, '5', { priority: 5, took_ms: 10 })), '已经打开的异常类不提示')
+  })
+
+  it('服务端没回优先级（旧版本）时不报错', () => {
+    assert.match(describeKindTest(MENTION, 'default', { took_ms: 5 }), /默认优先级/)
   })
 })

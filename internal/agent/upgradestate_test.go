@@ -156,7 +156,9 @@ func TestUpgradeNoteRoundTrip(t *testing.T) {
 }
 
 func TestUpgradePathsLiveUnderDataDir(t *testing.T) {
-	dir := "/var/lib/relaymesh-agent"
+	// 被测代码用 filepath.Join 拼路径：Windows 上分隔符是反斜杠，所以期望的目录也要按主机的写法给
+	// （Linux / macOS 上 FromSlash 什么都不改）。否则这条在 Windows 上会因为「\var\lib\…」对不上「/var/lib/…」而误报。
+	dir := filepath.FromSlash("/var/lib/relaymesh-agent")
 	for name, got := range map[string]string{
 		"flag":   WebUpgradeFlagPath(dir),
 		"dir":    UpgradeDir(dir),

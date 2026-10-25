@@ -5,7 +5,7 @@
 // L0 / L1 且有推荐选项的可以「全部采用推荐」（提交前会列出将要提交的全部结果；L2 永远逐条确认）。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { BookCheck, BookOpen, ShieldAlert, Sparkles } from 'lucide-vue-next'
+import { BookCheck, BookOpen, Sparkles } from 'lucide-vue-next'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import Button from '../ui/button/Button.vue'
 import ConfirmBatchDialog from './ConfirmBatchDialog.vue'
@@ -35,12 +35,9 @@ const items = computed(() => [...store.board.items].sort((a, b) => a.seq - b.seq
 // 提问 / 计划确认：对话里各有一张卡，点一下定位过去；文档里的决策卡按文档汇总，去文档页作答
 const asks = computed(() => items.value.filter(i => i.kind !== 'decision'))
 const docGroups = computed(() => groupDecisions(items.value))
-const guards = computed(() => store.board.guard_alerts)
-const visible = computed(
-  () => store.loaded && store.workflowId === props.workflowId && (items.value.length > 0 || guards.value.length > 0),
-)
-const text = computed(() => pendingChipText(items.value.length, guards.value.length))
-const title = computed(() => pendingChipTitle(items.value.length, guards.value.length))
+const visible = computed(() => store.loaded && store.workflowId === props.workflowId && items.value.length > 0)
+const text = computed(() => pendingChipText(items.value.length))
+const title = computed(() => pendingChipTitle(items.value.length))
 
 const adoptable = computed(() => adoptableItems(store.board.items))
 const rows = computed(() => adoptPreview(store.board.items))
@@ -66,7 +63,7 @@ watch(visible, v => {
 })
 
 // 定位到对话里的那张卡：先清空再赋值，同一张卡连点两次也会再次触发滚动与高亮；
-// 卡在更早的轮次里时，对话列表会先把窗口撑到它所在的位置（见 FeedbackMessageList 对 focusRef 的监听）。
+// 卡在更早的轮次里时，对话列表会先把窗口撑到它所在的位置（见 PreviewMessageList 对 focusRef 的监听）。
 async function jump(ref: string) {
   open.value = false
   store.focusRef = ''
@@ -101,12 +98,6 @@ function openDoc(docPath: string) {
   void navigateToDoc(router, { workflowId: props.workflowId, path: docPath })
 }
 
-function openTerminal() {
-  open.value = false
-  void router.push({ name: 'exec' })
-}
-
-const GUARD_STATE_LABEL: Record<string, string> = { crashed: '会话意外结束', stalled: '智能体停摆' }
 </script>
 
 <template>
@@ -116,7 +107,6 @@ const GUARD_STATE_LABEL: Record<string, string> = { crashed: '会话意外结束
         type="button"
         data-testid="confirm-chip"
         :data-count="items.length"
-        :data-guards="guards.length"
         :title="title"
         :aria-label="title"
         class="text-[11px] sm:text-xs px-2 sm:px-2.5 py-1 rounded-sm border transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer shrink-0 border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 text-amber-800 dark:text-amber-200 backdrop-blur-xs select-none font-mono outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -170,20 +160,6 @@ const GUARD_STATE_LABEL: Record<string, string> = { crashed: '会话意外结束
             </button>
           </li>
         </ul>
-
-        <div v-if="guards.length" data-testid="confirm-chip-guards" class="space-y-1">
-          <div class="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-            <ShieldAlert class="size-3.5" /><span>守护告警</span>
-            <button type="button" class="cursor-pointer text-primary hover:underline" @click="openTerminal">去终端页处理</button>
-          </div>
-          <ul class="divide-y divide-border/50 rounded-sm border border-amber-500/30">
-            <li v-for="g in guards" :key="g.preset_id" class="px-2 py-1.5" :data-testid="`confirm-chip-guard-${g.preset_id}`">
-              <span class="font-medium text-foreground">{{ g.name }}</span>
-              <span v-if="g.host" class="ml-1.5 text-muted-foreground">{{ g.host }}</span>
-              <span class="ml-1.5 rounded-xs border border-amber-500/40 px-1 text-[10px] text-amber-700 dark:text-amber-300">{{ GUARD_STATE_LABEL[g.verdict.state] || g.verdict.state }}</span>
-            </li>
-          </ul>
-        </div>
 
         <Button
           v-if="adoptable.length > 0"

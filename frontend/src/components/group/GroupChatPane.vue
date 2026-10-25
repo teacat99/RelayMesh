@@ -1,23 +1,30 @@
 <script setup lang="ts">
 // 群聊窗口（#165 第二步，取代 chat/ChatView）：一个群的消息流 = 智能体的汇报、您的发言、确认卡、任务进展，按时间排序，
 // 数据来自统一消息接口（/conversations/grp:…/messages）。画法只有一种——统一消息卡（具名发送者 + 成员色、日期分隔、「以下为新消息」），
-// 不再受「预览视图」开关影响。窗口自己负责：页头（群名 / 头像堆 / 成员数 / 已归档 / 搜索 / 成员）、搜索面板、跨项目提醒、
-// 已读游标、翻历史保持位置、回到最新、成员面板与输入框。
+// 不再受「预览视图」开关影响。窗口自己负责：页头（群名 / 群级状态徽标 / 头像堆 / 成员数 / 已归档 / 搜索 / 成员）、跨项目提醒、
+// 已读游标、翻历史保持位置、回到最新、成员面板与输入框；搜索面板用预览视图的同一个（PreviewSearchPanel，#241），
+// 这里只管「点中结果后落到哪条消息」（openResult）。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowDown, Loader2, RefreshCw, Search, Users, X } from 'lucide-vue-next'
+import { ArrowDown, Loader2, RefreshCw, Search, Users } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import type { ChatMessage } from '../../api/conversations'
 import { chatErrorMessage } from '../../api/conversations'
-import { buildRows, clockTime, quoteExcerpt } from '../../lib/chatView'
+import { buildRows } from '../../lib/chatView'
 import { mentionCandidates } from '../../lib/group'
 import { assignMemberHues, avatarStack, candidateIdentities, firstUnreadId, groupRenderKind, memberIdentity } from '../../lib/groupCard'
+import { overlayLiveState } from '../../lib/groupStatus'
+import type { RailItem } from '../../lib/timelineRail'
+import { useAgentStateStore } from '../../stores/agentState'
 import { useChatStore } from '../../stores/chat'
 import PreviewDateSeparator from '../feedback/preview-view/PreviewDateSeparator.vue'
+import PreviewSearchPanel from '../feedback/preview-view/PreviewSearchPanel.vue'
+import PreviewTimelineRail from '../feedback/preview-view/PreviewTimelineRail.vue'
 import PreviewUnreadDivider from '../feedback/preview-view/PreviewUnreadDivider.vue'
 import GroupComposer from './GroupComposer.vue'
 import GroupEventRow from './GroupEventRow.vue'
 import GroupMembersPanel from './GroupMembersPanel.vue'
 import GroupMessageCard from './GroupMessageCard.vue'
+import GroupStatusBadge from './GroupStatusBadge.vue'
 import MemberAvatar from './MemberAvatar.vue'
 
 /** workflowId = 群的会话键（grp:…），与统一消息接口、草稿键、消息卡里的引用链接装饰用的是同一个键。 */
@@ -30,9 +37,8 @@ const content = ref<HTMLElement | null>(null)
 const composer = ref<InstanceType<typeof GroupComposer> | null>(null)
 const atBottom = ref(true)
 const searchOpen = ref(false)
-const searchText = ref('')
-const searchResults = ref<ChatMessage[]>([])
-const searching = ref(false)
+/** 搜索请求不带 kinds（空数组）：群消息没有汇报 / 提问这些种类，服务端搜群消息也只看文字、不看 kinds，不把工作流会话的种类词表带进来 */
+const SEARCH_ALL_KINDS: readonly string[] = []
 
 const membersOpen = ref(false)
 const rows = computed(() => buildRows(store.items))
@@ -40,6 +46,12 @@ const groupName = computed(() => store.group?.title || '群聊')
 const candidates = computed(() => mentionCandidates(store.group?.members ?? []))
 const archived = computed(() => !!store.group?.archived)
 const memberCount = computed(() => (store.group?.members ?? []).filter(m => !m.left).length)
+
+// 成员的状态以 Agent 状态仓库里的实时会话为准（lib/groupStatus.ts 的 overlayLiveState，#241 第三步）：服务端随群页带的那份只在群里有事件时
+// 才重取，成员干完活变空闲、冒出一条「等你回答」不一定伴随群消息。页头徽标与成员面板读同一份，两处不会各说各话；仓库还没取到时回落到页面带的那份。
+const agentStore = useAgentStateStore()
+const liveMembers = computed(() => overlayLiveState(store.group?.members ?? [], wf => agentStore.entryFor(wf).primary))
+const liveGroup = computed(() => (store.group ? { ...store.group, members: liveMembers.value } : null))
 
 // 成员色相表算一次，逐张消息卡传下去（同一位成员在页头、成员面板、@ 选择器、消息卡里是同一个颜色）。
 const hues = computed(() => assignMemberHues(store.group?.members ?? []))
@@ -183,6 +195,8 @@ function watchContentHeight() {
 onMounted(() => {
   watchContentHeight()
   document.addEventListener('visibilitychange', onVisibility)
+  // 页面里没有别处在拉 Agent 状态时（比如侧栏没挂载）自己拉一次；取到过就不重复（与会话页头的状态徽标同一个做法）
+  agentStore.ensureFresh()
   void openConversation()
 })
 onBeforeUnmount(() => {
@@ -219,42 +233,28 @@ function scrollToMessage(id: string) {
   setTimeout(() => el.classList.remove('chat-flash'), 1600)
 }
 
-// ---- 搜索 ----
-let searchTimer: ReturnType<typeof setTimeout> | null = null
-watch(searchText, q => {
-  if (searchTimer) clearTimeout(searchTimer)
-  if (!q.trim()) {
-    searchResults.value = []
-    return
-  }
-  searchTimer = setTimeout(async () => {
-    searching.value = true
-    try {
-      searchResults.value = (await store.search(q)).reverse()
-    } catch (e) {
-      toast.error(chatErrorMessage(e, '搜索失败'))
-    } finally {
-      searching.value = false
-    }
-  }, 300)
-})
+// ---- 右侧缩略轴（#241）：别的成员说的话各一道刻度；轨只描述已载入的消息，点刻度直接滚到那条并闪一下 ----
+function onRailJump(item: RailItem) {
+  scrollToMessage(item.id)
+}
 
+// ---- 搜索：面板是预览视图的那一个，点中结果后它自己收成一行输入条（目标露出来），这里不关它 ----
 async function openResult(m: ChatMessage) {
-  searchOpen.value = false
   const known = store.items.some(x => x.id === m.id)
   if (!known) await store.jumpTo(m.cursor)
   await nextTick()
   scrollToMessage(m.id)
 }
 
+// 回到最新：整段内容被换成最新一页，直接贴底（不用平滑滚动），并把「在底部」先记上（与打开群时同一套做法）。
+// 以前「在底部」要靠滚动事件记成真：e2e 的采样日志里有两种时序——列表清空后立刻来一个 scroll 事件（记成真，内容变高时会补贴底），
+// 或者直到最新一页的 50 条渲染完才来（记成假，不补贴底）；记成假时，翻上一页（顶部哨兵）按「保持原位」把列表留在这一页的顶上，
+// 平滑滚动被它打断，列表停在这一页的顶部、「回到最新」还亮着（group-window 套件第 3 步末尾因此出现过「回到底部」超时）。
 async function toLatest() {
   await store.backToLatest()
   await nextTick()
-  scrollToBottom(true)
-}
-
-function snippet(m: ChatMessage): string {
-  return quoteExcerpt(m, 80) || '（图片）'
+  atBottom.value = true
+  scrollToBottom()
 }
 </script>
 
@@ -264,6 +264,8 @@ function snippet(m: ChatMessage): string {
     <header class="flex items-center gap-2 border-b border-border px-3 py-1.5">
       <Users class="size-4 shrink-0 text-muted-foreground" />
       <span class="min-w-0 flex-1 truncate text-[13px] font-medium" data-testid="chat-title">{{ groupName }}</span>
+      <!-- 群级状态徽标（#241 第三步）：谁在等你 / 谁在干活；已归档的群不画（归档后没有「谁在等你」可说）；点一下开 / 关成员面板 -->
+      <GroupStatusBadge v-if="!archived" :members="liveMembers" :expanded="membersOpen" @toggle="membersOpen = !membersOpen" />
       <button
         v-if="stack.shown.length"
         type="button"
@@ -304,38 +306,6 @@ function snippet(m: ChatMessage): string {
       </button>
     </header>
 
-    <!-- 搜索面板 -->
-    <div v-if="searchOpen" class="border-b border-border bg-muted/30 px-3 py-2" data-testid="chat-search">
-      <div class="flex items-center gap-2">
-        <input
-          v-model="searchText"
-          type="search"
-          class="h-8 flex-1 rounded-md border border-input bg-background px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          placeholder="搜索这个群里的消息…"
-          data-testid="chat-search-input"
-          autofocus
-        />
-        <button type="button" class="cursor-pointer text-muted-foreground hover:text-foreground" @click="searchOpen = false">
-          <X class="size-4" />
-        </button>
-      </div>
-      <ul v-if="searchText.trim()" class="mt-2 max-h-56 space-y-0.5 overflow-y-auto" data-testid="chat-search-results">
-        <li v-if="searching" class="px-2 py-1 text-[11px] text-muted-foreground">搜索中…</li>
-        <li v-else-if="!searchResults.length" class="px-2 py-1 text-[11px] text-muted-foreground">没有匹配的消息</li>
-        <li v-for="r in searchResults" :key="r.id">
-          <button
-            type="button"
-            class="flex w-full cursor-pointer items-baseline gap-2 rounded px-2 py-1 text-left text-[12px] hover:bg-accent"
-            :data-result-id="r.id"
-            @click="openResult(r)"
-          >
-            <span class="shrink-0 text-[10px] text-muted-foreground">{{ r.sender.kind === 'human' ? '你' : r.sender.name }} · {{ clockTime(r.sent_at) }}</span>
-            <span class="min-w-0 truncate">{{ snippet(r) }}</span>
-          </button>
-        </li>
-      </ul>
-    </div>
-
     <!-- 跨项目群的提醒：成员来自不同项目时一直挂在顶部 -->
     <div v-if="store.group?.cross_project" class="border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-800 dark:text-amber-300" data-testid="group-cross-banner">
       这个群的成员来自不同项目，群里的消息会被所有成员读到。
@@ -346,7 +316,8 @@ function snippet(m: ChatMessage): string {
     <!-- 消息流 -->
     <div class="relative min-h-0 flex-1">
       <div ref="scroller" class="chat-scroll h-full overflow-y-auto overscroll-contain pb-3" data-testid="chat-scroll" :data-at-bottom="atBottom" :data-more-after="store.hasMoreAfter" @scroll.passive="onScroll">
-        <div ref="content">
+        <!-- md 以上右侧给缩略轴让出位置（轨 32px + 右边距 6px）：右对齐的卡不压在刻度下面；会话页的列同样从 sm 起留白（sm:pr-6） -->
+        <div ref="content" class="md:pr-9">
         <div ref="topSentinel" class="h-px" />
         <div v-if="store.loadingOlder" class="flex justify-center py-2 text-muted-foreground"><Loader2 class="size-4 animate-spin" /></div>
         <div v-else-if="store.loaded && !store.hasMoreBefore && store.items.length" class="py-2 text-center text-[11px] text-muted-foreground/70" data-testid="chat-start">—— 会话开始 ——</div>
@@ -375,8 +346,19 @@ function snippet(m: ChatMessage): string {
         </div>
       </div>
 
-      <!-- 出错提示 -->
-      <div v-if="store.error" class="absolute inset-x-3 top-2 flex items-center gap-2 rounded-md border border-destructive/40 bg-background/95 px-3 py-1.5 text-[12px] text-destructive shadow-sm" data-testid="chat-error">
+      <!-- 右侧缩略轴：与会话页同一条轨（别的成员说的话各一道刻度，点击落到那条消息）；输入框在列表下面、不盖列表（dock=false），下沿只让开「回到最新」 -->
+      <PreviewTimelineRail
+        :scroll-el="scroller"
+        :has-earlier="store.hasMoreBefore"
+        :loading-earlier="store.loadingOlder"
+        :has-draft-images="false"
+        :dock="false"
+        @jump="onRailJump"
+        @load-earlier="loadOlderKeepingPosition"
+      />
+
+      <!-- 出错提示（z-30：盖在缩略轴 z-20 上面，「重试」不会被轨顶的刻度挡住） -->
+      <div v-if="store.error" class="absolute inset-x-3 top-2 z-30 flex items-center gap-2 rounded-md border border-destructive/40 bg-background/95 px-3 py-1.5 text-[12px] text-destructive shadow-sm" data-testid="chat-error">
         <span class="min-w-0 flex-1 truncate">{{ store.error }}</span>
         <button type="button" class="inline-flex cursor-pointer items-center gap-1 hover:underline" @click="store.refresh()"><RefreshCw class="size-3" />重试</button>
       </div>
@@ -392,6 +374,16 @@ function snippet(m: ChatMessage): string {
         <ArrowDown class="size-3.5" />
         <span>{{ store.unread > 0 ? `${store.unread} 条新消息` : '回到最新' }}</span>
       </button>
+
+      <!-- 消息搜索：与预览视图同一个面板，浮在消息流顶部；群里没有汇报 / 提问这些种类，请求不带 kinds -->
+      <PreviewSearchPanel
+        v-if="searchOpen"
+        :workflow-id="workflowId"
+        placeholder="搜索这个群的全部消息"
+        :kinds="SEARCH_ALL_KINDS"
+        @close="searchOpen = false"
+        @pick="openResult"
+      />
     </div>
 
     <GroupComposer
@@ -407,8 +399,8 @@ function snippet(m: ChatMessage): string {
     </div>
 
     <!-- 群成员面板：窄屏盖在消息流上，宽屏并排 -->
-    <div v-if="membersOpen && store.group" class="absolute inset-y-0 right-0 z-20 shadow-lg md:static md:shadow-none">
-      <GroupMembersPanel :info="store.group" :hues="hues" @close="membersOpen = false" @changed="store.refresh()" />
+    <div v-if="membersOpen && liveGroup" class="absolute inset-y-0 right-0 z-20 shadow-lg md:static md:shadow-none">
+      <GroupMembersPanel :info="liveGroup" :hues="hues" @close="membersOpen = false" @changed="store.refresh()" />
     </div>
     </div>
   </section>

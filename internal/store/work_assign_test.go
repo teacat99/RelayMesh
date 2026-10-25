@@ -455,6 +455,7 @@ func TestMigrationAddsAssignmentColumns(t *testing.T) {
 	// 把新列删掉，还原成 B2 之前的表结构，再塞一条旧行。
 	for _, q := range []string{
 		"DROP INDEX IF EXISTS idx_work_items_assignee_workflow_id",
+		"DROP INDEX IF EXISTS idx_work_items_assigned_by_workflow_id", // #180 B3a 补的索引；带索引的列删不掉
 		"ALTER TABLE work_items DROP COLUMN assignee_workflow_id",
 		"ALTER TABLE work_items DROP COLUMN assigned_by_workflow_id",
 		"ALTER TABLE work_items DROP COLUMN claim_state",
@@ -475,6 +476,11 @@ func TestMigrationAddsAssignmentColumns(t *testing.T) {
 	st2, err := New(path) // 重新打开 = 升级
 	if err != nil {
 		t.Fatalf("升级失败: %v", err)
+	}
+	for _, idx := range []string{"idx_work_items_assignee_workflow_id", "idx_work_items_assigned_by_workflow_id"} {
+		if !st2.db.Migrator().HasIndex(&model.WorkItem{}, idx) {
+			t.Fatalf("升级后应补上索引 %s", idx)
+		}
 	}
 	ctx := context.Background()
 	got, err := st2.GetWorkItemBySeq(ctx, "legacy", 1)

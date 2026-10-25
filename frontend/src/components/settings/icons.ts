@@ -9,6 +9,8 @@ import {
   Info,
   Mic,
   MessageSquareQuote,
+  PlugZap,
+  ScrollText,
   Shield,
   ShieldCheck,
   Sparkles,
@@ -24,12 +26,14 @@ export const SETTINGS_ICONS: Record<SettingsCategoryId, Component> = {
   speech: Mic,
   presets: MessageSquareQuote,
   authProfiles: ShieldCheck,
+  sessionPrompts: ScrollText,
   sessionData: Database,
   termPrefs: Terminal,
   modelAccess: Cpu,
   retention: Archive,
   appearance: Sparkles,
   security: Shield,
+  oauth: PlugZap,
   backup: Download,
   about: Info
 }

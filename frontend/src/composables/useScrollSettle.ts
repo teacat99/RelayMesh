@@ -24,6 +24,7 @@ import {
   holdStep,
   settleTarget,
   type HoldState,
+  type SettleAlign,
 } from '../lib/scrollSettle'
 
 /** 条目顶边相对容器顶边（视口里）的位置，px。 */
@@ -31,7 +32,23 @@ export function offsetInContainer(container: HTMLElement, el: HTMLElement): numb
   return el.getBoundingClientRect().top - container.getBoundingClientRect().top
 }
 
+/**
+ * 条目所在的、真的能纵向滚动的最近祖先（overflow-y 为 auto / scroll / overlay，且内容比视口高）；找不到返回 null。
+ * 给「不持有列表、只拿到一个条目」的调用方用（如确认卡被点名时：卡自己滚过去，要找到它该校准的那个容器）。
+ */
+export function scrollParentOf(el: HTMLElement | null | undefined): HTMLElement | null {
+  let cur = el?.parentElement ?? null
+  while (cur && cur !== document.body && cur !== document.documentElement) {
+    const oy = getComputedStyle(cur).overflowY
+    if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') && cur.scrollHeight > cur.clientHeight + 1) return cur
+    cur = cur.parentElement
+  }
+  return null
+}
+
 export interface SettleOptions {
+  /** 落点对齐：顶边（默认，右侧轨 / 搜索 / 滚到某一轮）或居中（确认卡被点名）。 */
+  align?: SettleAlign
   padding?: number
   maxFixes?: number
   quietMs?: number
@@ -57,6 +74,7 @@ export function useScrollSettle() {
     cancel()
     if (!container || !el) return
     const padding = opts.padding ?? SETTLE_PADDING_PX
+    const align = opts.align ?? 'start'
     const maxFixes = opts.maxFixes ?? SETTLE_MAX_FIXES
     const quietMs = opts.quietMs ?? SETTLE_QUIET_MS
     const timeoutMs = opts.timeoutMs ?? SETTLE_TIMEOUT_MS
@@ -93,10 +111,13 @@ export function useScrollSettle() {
         stableSince = now
       }
       if (now - stableSince >= quietMs) {
-        const itemTop = el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
+        const rect = el.getBoundingClientRect()
+        const itemTop = rect.top - container.getBoundingClientRect().top + container.scrollTop
         const target = settleTarget(
-          { itemTop, scrollTop: container.scrollTop, scrollHeight: container.scrollHeight, clientHeight: container.clientHeight },
+          { itemTop, scrollTop: container.scrollTop, scrollHeight: container.scrollHeight, clientHeight: container.clientHeight, itemHeight: rect.height },
           padding,
+          undefined,
+          align,
         )
         if (target === null || fixes >= maxFixes) {
           stop()

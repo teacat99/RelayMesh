@@ -194,7 +194,7 @@ func newAgentFx(t *testing.T) *agentFx {
 	f.saveLauncher(t, "p-q", "D-别的项目", map[string]any{"workflow_id": "wf-q", "conversation_id": "chat-q"})
 	f.saveLauncher(t, "p-solo", "E-项目外", map[string]any{"workflow_id": "wf-solo", "conversation_id": "chat-solo"})
 	f.saveLauncher(t, "p-nowf", "F-无工作流", map[string]any{"conversation_id": "chat-nowf"})
-	res := f.env.call("PUT", "/api/v1/terminal/launchers/t1", map[string]any{"name": "G-终端", "host": f.a.code, "dir": "/work/app", "command": "agent"}, f.adm...)
+	res := f.env.putLauncher("/api/v1/terminal/launchers/t1", map[string]any{"name": "G-终端", "host": f.a.code, "dir": "/work/app", "command": "agent"}, f.adm...)
 	if res.Status != 200 {
 		t.Fatalf("保存终端预设: %d %s", res.Status, res.Raw)
 	}

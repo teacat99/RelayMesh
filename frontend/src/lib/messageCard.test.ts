@@ -20,8 +20,8 @@ const TONES = Object.keys(CARD_TONE_CLASS) as CardTone[]
 const SENDERS = Object.keys(CARD_SENDERS) as CardSender[]
 
 describe('消息卡：类型对照表', () => {
-  it('覆盖设计稿里的十种类型，外加群聊（阶段 E-d）的两种：member / self', () => {
-    assert.deepEqual([...TYPES].sort(), ['append', 'ask', 'capsule', 'decision', 'guard', 'member', 'notice', 'plan', 'reply', 'report', 'self', 'task'])
+  it('覆盖设计稿里的九种类型（原来的 guard 随会话守护下线，#245），外加群聊（阶段 E-d）的两种：member / self', () => {
+    assert.deepEqual([...TYPES].sort(), ['append', 'ask', 'capsule', 'decision', 'member', 'notice', 'plan', 'reply', 'report', 'self', 'task'])
   })
 
   it('群聊的两种：成员的话是智能体侧（靠左、灰），您的话是您侧（靠右、绿）', () => {
@@ -55,11 +55,10 @@ describe('消息卡：类型对照表', () => {
     assert.equal(tone('capsule'), 'slate')
   })
 
-  it('发送方：您的回复与追加是「您」，守护告警与恢复胶囊是「系统」，其余是智能体', () => {
+  it('发送方：您的回复与追加是「您」，恢复胶囊是「系统」，其余是智能体', () => {
     const sender = (t: CardType) => CARD_TYPES[t].sender
     assert.equal(sender('reply'), 'user')
     assert.equal(sender('append'), 'user')
-    assert.equal(sender('guard'), 'system')
     assert.equal(sender('capsule'), 'system')
     for (const t of ['notice', 'report', 'ask', 'plan', 'decision', 'task'] as CardType[]) assert.equal(sender(t), 'agent', t)
   })

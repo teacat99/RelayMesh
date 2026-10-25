@@ -7,12 +7,15 @@ import { useSessionStore } from '../stores/session'
 import { useWorkItemStore } from '../stores/workItems'
 import { openDoc } from '../lib/docNavClient'
 import { linkRefHref, type LinkRef, type LinkRefIndex, type LinkRefKind } from '../lib/linkRefs'
-import { replyHash } from '../lib/replyRef'
 import { ensureDocIndex, docIndexVersion, lookupDoc, noteDocMiss } from './useDocIndex'
 import { requestSessionJump } from './useSessionJump'
 import { useTaskRefs } from './useTaskRefs'
 
 const KINDS: readonly LinkRefKind[] = ['task', 'confirm', 'doc', 'session']
+
+/** 数据还没就绪时共用的空索引（只读，从不被改），每个实例不必各 new 一个。 */
+const NO_CONFIRMS: ReadonlyMap<number, ConfirmItem> = new Map()
+const NO_SESSIONS: ReadonlyMap<string, FeedbackSession> = new Map()
 
 function firstLine(text: string | undefined): string {
   return (text ?? '').split('\n').find(l => l.trim())?.trim() ?? ''
@@ -42,13 +45,14 @@ export function useLinkRefs(workflowId: () => string | undefined) {
   /** 有工作流才谈得上引用；具体每一种引用是否可解析，由下面各自的数据就绪情况决定。 */
   const active = computed(() => !!workflowId())
 
-  const confirmBySeq = computed(() => {
-    const map = new Map<number, ConfirmItem>()
+  // 性能（#186 C2a）：下面两份索引（确认项按序号、会话按短哈希）要扫整张表，而 useLinkRefs 每段 Markdown 正文都有一个实例——
+  // 长会话里几百个实例各扫一遍就是几万次计算（生产实测占打开过程忙碌时间的约一成），所以索引在 store 里建一份共用，
+  // 这里只负责「这个实例的工作流对不对、数据就绪没有」的判断，是 O(1) 的。
+  const confirmsReady = computed(() => {
     const id = workflowId()
-    if (!id || confirmStore.workflowId !== id || !confirmStore.loaded) return map
-    for (const item of confirmStore.timelineItems) map.set(item.seq, item)
-    return map
+    return !!id && confirmStore.workflowId === id && confirmStore.loaded
   })
+  const confirmBySeq = computed<ReadonlyMap<number, ConfirmItem>>(() => (confirmsReady.value ? confirmStore.timelineSeqIndex.bySeq : NO_CONFIRMS))
 
   /** 选中的会话属于这个工作流吗：会话号只在这种情形下解析（见 sessionByHash / ensureSessions）。 */
   const sessionScopeReady = computed(() => {
@@ -57,21 +61,12 @@ export function useLinkRefs(workflowId: () => string | undefined) {
     return !!id && (sel?.workflow_id || sel?.session_id || '') === id
   })
 
-  const sessionByHash = computed(() => {
-    const map = new Map<string, FeedbackSession>()
-    if (!sessionScopeReady.value) return map
-    for (const s of sessionStore.currentWorkflowSessions) {
-      const hash = replyHash(s.session_id)
-      if (hash) map.set(hash, s)
-    }
-    return map
-  })
+  const sessionByHash = computed<ReadonlyMap<string, FeedbackSession>>(() => (sessionScopeReady.value ? sessionStore.sessionByHash : NO_SESSIONS))
 
   /** 任何一种来源的「存在集合」变了它就变；装饰逻辑据此重新装饰（幂等）。没有工作流时为空串。 */
   const signature = computed(() => {
     if (!active.value) return ''
-    let maxSeq = 0
-    for (const seq of confirmBySeq.value.keys()) if (seq > maxSeq) maxSeq = seq
+    const maxSeq = confirmsReady.value ? confirmStore.timelineSeqIndex.maxSeq : 0
     // 选中会话归属本工作流这件事本身也在签名里：直接打开文档页时正文常常比「选中默认会话」先到，那一次装饰里 ensureSessions 因为
     // 还没选中而什么都没做；整表没加载时 sessionByHash 是空的、大小不变，没有这一项签名就不变，装饰不会重来，会话号引用就一直是纯文本
     return [taskRefs.signature.value, `${confirmBySeq.value.size}:${maxSeq}`, docIndexVersion.value, sessionByHash.value.size, sessionScopeReady.value ? 1 : 0].join('|')

@@ -30,9 +30,9 @@ describe('分类注册表', () => {
     }
   })
 
-  test('预期的归属：通用 4 个、RelayMesh 6 个、ExecMesh 3 个', () => {
-    assert.deepEqual(categoriesOwnedBy('common').map(c => c.id), ['appearance', 'security', 'backup', 'about'])
-    assert.deepEqual(categoriesOwnedBy('relay').map(c => c.id), ['waiting', 'prompts', 'speech', 'presets', 'authProfiles', 'sessionData'])
+  test('预期的归属：通用 5 个、RelayMesh 7 个、ExecMesh 3 个', () => {
+    assert.deepEqual(categoriesOwnedBy('common').map(c => c.id), ['appearance', 'security', 'oauth', 'backup', 'about'])
+    assert.deepEqual(categoriesOwnedBy('relay').map(c => c.id), ['waiting', 'prompts', 'speech', 'presets', 'authProfiles', 'sessionPrompts', 'sessionData'])
     assert.deepEqual(categoriesOwnedBy('exec').map(c => c.id), ['termPrefs', 'modelAccess', 'retention'])
   })
 })
@@ -58,6 +58,9 @@ describe('resolveCategory', () => {
   test('本模块的分类与通用分类原样返回', () => {
     assert.equal(resolveCategory('exec', 'modelAccess'), 'modelAccess')
     assert.equal(resolveCategory('exec', 'security'), 'security')
+    // OAuth 授权是通用分类（#239）：两个模块的设置窗口里都能直接进入。
+    assert.equal(resolveCategory('exec', 'oauth'), 'oauth')
+    assert.equal(resolveCategory('relay', 'oauth'), 'oauth')
     assert.equal(resolveCategory('relay', 'prompts'), 'prompts')
   })
 

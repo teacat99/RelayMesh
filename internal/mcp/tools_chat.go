@@ -176,6 +176,7 @@ func (s *Server) chatRead(ctx context.Context, svc *chat.Service, a chatArgs) (a
 	// 先把收件箱里排队的追加标成已读：它们的内容马上就在下面的消息里，状态要如实。
 	if res, err := s.store.InboxRead(ctx, wf, store.InboxReadOptions{}, now); err == nil && (len(res.New) > 0 || len(res.Retracted) > 0) {
 		s.notifyInbox(wf)
+		s.emitBranchRead(wf, res.New)
 	}
 	since := s.agentReadMs(ctx, wf)
 	items, more, err := svc.ListSince(ctx, wf, since, limit)

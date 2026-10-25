@@ -14,10 +14,21 @@ export interface ConvPref {
 }
 
 export interface NotifyPrefs {
-  /** 免打扰：除穿透类（阻塞待答、@ 你、终端审批、守护告警）外，浏览器与 ntfy 都不再提醒。 */
+  /** 免打扰：除穿透类（阻塞待答、@ 你、终端审批、系统告警）外，浏览器与 ntfy 都不再提醒。 */
   dnd: boolean
   /** 发往 ntfy 的消息里是否带预览：auto = 1:1 显示、跨项目群隐藏。 */
   ntfy_preview: PreviewMode
+  /**
+   * 「指派久无人接」提醒的总开关：为真表示不再提醒（网页与 ntfy 都不发）。只管提醒，不管阈值——
+   * 任务行上的「已等」标红与 MCP 回执里的 board 行仍按阈值显示。
+   */
+  board_stale_off: boolean
+  /** 用户选的阈值（分钟，30~1440）；0 = 没改过、跟着出厂默认走。 */
+  board_stale_minutes: number
+  /** 生效的阈值（分钟）：服务端算好给出，任务行变红、回执头与提醒用的都是它。第一次取到之前是出厂默认。 */
+  board_stale_after_minutes: number
+  /** 出厂默认（分钟）：由服务端给出，界面不抄这个数（这里的 BOARD_STALE_FALLBACK_MINUTES 只在第一次取到之前顶替）。 */
+  board_stale_default_minutes: number
   /** 只记录与默认策略不同的会话。键：wf:<工作流> / grp:<群>。 */
   conversations: Record<string, ConvPref>
 }
@@ -28,8 +39,67 @@ export const PREVIEW_MODES: ReadonlyArray<{ value: PreviewMode; label: string; h
   { value: 'never', label: '从不显示', hint: '推送里只写「有新消息」，正文只在网页里看' },
 ]
 
+/** 「久无人接」阈值的取值范围与第一次取到服务端偏好之前的顶替值：与 internal/notify/prefs.go 的 BoardStale* 一致。 */
+export const BOARD_STALE_MIN_MINUTES = 30
+export const BOARD_STALE_MAX_MINUTES = 1440
+export const BOARD_STALE_FALLBACK_MINUTES = 120
+
+/** 设置里「久无人接」阈值的可选项（分钟）；已经设成别的值（例如直接调接口设的 90 分钟）时，当前值会临时补进选项里。 */
+export const BOARD_STALE_CHOICES: readonly number[] = [30, 60, 120, 180, 240, 360, 480, 720, 1440]
+
 export function emptyPrefs(): NotifyPrefs {
-  return { dnd: false, ntfy_preview: 'auto', conversations: {} }
+  return {
+    dnd: false,
+    ntfy_preview: 'auto',
+    board_stale_off: false,
+    board_stale_minutes: 0,
+    board_stale_after_minutes: BOARD_STALE_FALLBACK_MINUTES,
+    board_stale_default_minutes: BOARD_STALE_FALLBACK_MINUTES,
+    conversations: {},
+  }
+}
+
+function minutesIn(v: unknown, fallback: number, allowZero: boolean): number {
+  if (typeof v !== 'number' || !Number.isInteger(v)) return fallback
+  if (allowZero && v === 0) return 0
+  return v >= BOARD_STALE_MIN_MINUTES && v <= BOARD_STALE_MAX_MINUTES ? v : fallback
+}
+
+/** 阈值的写法：整小时写「N 小时」，其余写「N 分钟」（与服务端提醒、MCP 回执头同一种写法）。 */
+export function boardStaleLabel(minutes: number): string {
+  return minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60} 小时` : `${minutes} 分钟`
+}
+
+/** 生效的「久无人接」阈值（毫秒）：任务行的「已等」标红用它。 */
+export function boardStaleMs(prefs: Pick<NotifyPrefs, 'board_stale_after_minutes'>): number {
+  return prefs.board_stale_after_minutes * 60_000
+}
+
+export interface BoardStaleChoice {
+  /** 选项的值：恰好等于出厂默认的那一项是 0（「恢复默认」，以后默认值调整时跟着走），其余是分钟数。 */
+  value: number
+  label: string
+}
+
+/**
+ * 设置页下拉框的选项：预设项 + 当前生效值（不在预设里时补进来，免得下拉框显示成空白）；出厂默认那一项标「（默认）」。
+ * 选中项的值用 boardStaleSelected 取，保持与选项的 value 同一种口径。
+ */
+export function boardStaleChoices(prefs: Pick<NotifyPrefs, 'board_stale_after_minutes' | 'board_stale_default_minutes'>): BoardStaleChoice[] {
+  const def = prefs.board_stale_default_minutes
+  const minutes = [...BOARD_STALE_CHOICES]
+  if (!minutes.includes(def)) minutes.push(def)
+  if (!minutes.includes(prefs.board_stale_after_minutes)) minutes.push(prefs.board_stale_after_minutes)
+  minutes.sort((a, b) => a - b)
+  return minutes.map(m => ({
+    value: m === def ? 0 : m,
+    label: m === def ? `${boardStaleLabel(m)}（默认）` : boardStaleLabel(m),
+  }))
+}
+
+/** 下拉框当前选中项的值：没改过（或改成了与默认相同的值）是 0，其余是生效的分钟数。 */
+export function boardStaleSelected(prefs: Pick<NotifyPrefs, 'board_stale_after_minutes' | 'board_stale_default_minutes'>): number {
+  return prefs.board_stale_after_minutes === prefs.board_stale_default_minutes ? 0 : prefs.board_stale_after_minutes
 }
 
 const POLICIES: readonly string[] = ['all', 'mentions', 'muted']
@@ -42,6 +112,15 @@ export function normalizePrefs(raw: unknown): NotifyPrefs {
   const r = raw as Record<string, unknown>
   out.dnd = r.dnd === true
   if (typeof r.ntfy_preview === 'string' && PREVIEWS.includes(r.ntfy_preview)) out.ntfy_preview = r.ntfy_preview as PreviewMode
+  out.board_stale_off = r.board_stale_off === true
+  // 默认值与生效值以服务端给的为准；缺字段（旧服务端、或回滚到旧版本）时退回顶替值，绝不让界面出现 NaN 或 0 分钟
+  out.board_stale_default_minutes = minutesIn(r.board_stale_default_minutes, BOARD_STALE_FALLBACK_MINUTES, false)
+  out.board_stale_minutes = minutesIn(r.board_stale_minutes, 0, true)
+  out.board_stale_after_minutes = minutesIn(
+    r.board_stale_after_minutes,
+    out.board_stale_minutes || out.board_stale_default_minutes,
+    false,
+  )
   const convs = r.conversations
   if (convs && typeof convs === 'object') {
     for (const [key, v] of Object.entries(convs as Record<string, unknown>)) {

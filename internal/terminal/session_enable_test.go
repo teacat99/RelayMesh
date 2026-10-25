@@ -243,7 +243,7 @@ func TestSessionEnableRefusals(t *testing.T) {
 		return m
 	}
 
-	t.Run("Windows 主机", func(t *testing.T) {
+	t.Run("Windows 主机：POSIX 目录不行，要写 Windows 路径（#178 起支持 Windows 主机；运行与命令见 headless_winhost_test.go）", func(t *testing.T) {
 		f, wf := enableFixture(t)
 		meta := testMeta("win-box")
 		meta.OS = "windows"
@@ -251,12 +251,12 @@ func TestSessionEnableRefusals(t *testing.T) {
 		login := []string{"Authorization", humanAuth(testUser)}
 		res := f.env.call("POST", url+"/preview", body(wf, map[string]any{"host": win.code}), login...)
 		pv, _ := res.Body["preview"].(map[string]any)
-		if pv["can_run"] != false || !previewHasIssue(pv, "unsupported_os") || !strings.Contains(res.Raw, "开终端启动") {
-			t.Fatalf("Windows 主机应报 unsupported_os 并指向「开终端启动」: %s", res.Raw)
+		if pv["can_run"] != false || !previewHasIssue(pv, "bad_dir") || strings.Contains(res.Raw, "unsupported_os") || !strings.Contains(res.Raw, "Windows 主机上的绝对路径") {
+			t.Fatalf("Windows 主机上填 POSIX 目录应报 bad_dir 并说明要写 Windows 路径: %s", res.Raw)
 		}
 		res = f.env.call("POST", url, body(wf, map[string]any{"host": win.code}), f.adm...)
-		if res.Status != 409 || res.Body["code"] != "unsupported_os" {
-			t.Fatalf("Windows 主机启用应 409: %d %s", res.Status, res.Raw)
+		if res.Status != 400 || res.Body["code"] != "bad_dir" {
+			t.Fatalf("Windows 主机上填 POSIX 目录启用应 400 bad_dir: %d %s", res.Status, res.Raw)
 		}
 		if len(f.enablePresets(t)) != 0 || f.sim.runCount() != 0 {
 			t.Fatal("被拒绝的请求不该建预设或到达主机")

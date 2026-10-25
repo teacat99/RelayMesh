@@ -38,5 +38,5 @@ func (p presetRunner) Run(ctx context.Context, a mcp.PresetRunActor, preset stri
 	if err != nil {
 		return nil, err
 	}
-	return &mcp.PresetRunOutcome{Result: res, Preset: res.Preset, Name: res.Name, WorkflowID: res.WorkflowID, RunID: res.RunID, State: res.State}, nil
+	return &mcp.PresetRunOutcome{Result: res, Preset: res.Preset, Name: res.Name, WorkflowID: res.WorkflowID, RunID: res.RunID, State: res.State, Branch: res.Branch}, nil
 }

@@ -26,7 +26,6 @@ import {
   tokensText,
   turnSpanText,
   validTime,
-  wakeOffer,
   type AgentIdentity,
   type AgentSession,
 } from './agentState'
@@ -589,35 +588,4 @@ describe('托管终端屏幕信号（M3.2）', () => {
     assert.equal(v.key, 'waiting_approval')
     assert.equal(v.text, '等你批准')
   })
-})
-
-describe('唤醒动作（M3.3）', () => {
-  it('可唤醒的状态：卡住 / 中断 / 出错 / 离线 / 受阻结束', () => {
-    for (const key of ['stalled', 'aborted', 'error', 'offline'] as const) {
-      const o = wakeOffer(key, undefined, 0)
-      assert.equal(o.show, true, key)
-      assert.equal(o.disabled, false, key)
-      assert.notEqual(o.note, '', key)
-    }
-    assert.equal(wakeOffer('ended', 'blocked', 0).disabled, false)
-  })
-
-  it('空闲 / 已收尾：有未处理消息才能唤醒，否则置灰并说明原因', () => {
-    assert.equal(wakeOffer('idle', undefined, 2).disabled, false)
-    assert.match(wakeOffer('idle', undefined, 2).note, /2 条/)
-    const idle = wakeOffer('idle', undefined, 0)
-    assert.deepEqual([idle.show, idle.disabled], [true, true])
-    assert.match(idle.note, /没有未处理/)
-    assert.equal(wakeOffer('ended', 'completed', 1).disabled, false)
-    const done = wakeOffer('ended', 'completed', 0)
-    assert.deepEqual([done.show, done.disabled], [true, true])
-    assert.match(done.note, /已经收尾/)
-  })
-
-  it('干活中 / 在等你 / 在等批准 / 未接入：不出现按钮', () => {
-    for (const key of ['working', 'waiting_you', 'waiting_approval', 'unknown'] as const) {
-      assert.equal(wakeOffer(key, undefined, 5).show, false, key)
-    }
-  })
-
 })

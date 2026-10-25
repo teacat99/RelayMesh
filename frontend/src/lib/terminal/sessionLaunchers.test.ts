@@ -104,6 +104,19 @@ describe('runFacts：确认窗里的几行', () => {
     assert.equal(f.target, 'RM-AAAA-…-DDDD · /work/app')
     assert.equal(f.conversation, '还不知道')
   })
+
+  it('对话来源（#191）：新会话 / 最近会话没有可接的对话编号，也不能写成「还不知道」', () => {
+    const fresh = runFacts(preset({ mode: 'new', conversation_id: undefined }))
+    assert.match(fresh.conversation, /新开一个对话/)
+    assert.doesNotMatch(fresh.conversation, /还不知道/)
+    const recent = runFacts(preset({ mode: 'continue', conversation_id: undefined }))
+    assert.match(recent.conversation, /目录里最近动过的对话/)
+    assert.match(recent.conversation, /由 Cursor CLI 决定/)
+    assert.doesNotMatch(recent.conversation, /还不知道/)
+    // 指定会话（含旧版 Hub 没有 mode 字段）照旧
+    assert.equal(runFacts(preset({ mode: 'resume' })).conversation, 'e33e27ef…')
+    assert.equal(runFacts(preset({ mode: undefined })).conversation, 'e33e27ef…')
+  })
 })
 
 describe('项目范围：启动器的「本项目 / 全部」', () => {
@@ -200,7 +213,7 @@ describe('建议：为这个会话创建续聊预设', () => {
 
   it('草稿：名字、目录、工作流与姿态预填，主机默认取建议里的', () => {
     const d = suggestDraft(suggest())
-    assert.deepEqual(subset(d, { name: 1, host: 1, dir: 1, command: 1 }), { name: '续聊 · app', host: 'RM-AAAA-BBBB-CCCC-DDDD', dir: '/work/app', command: '' })
+    assert.deepEqual(subset(d, { name: 1, host: 1, dir: 1 }), { name: '续聊 · app', host: 'RM-AAAA-BBBB-CCCC-DDDD', dir: '/work/app' })
     assert.deepEqual(subset(d.run ?? {}, { workflow: 1, posture: 1, conversation: 1, prompt: 1 }), { workflow: 'wf-1', posture: 'allowlist', conversation: '', prompt: '' })
     assert.match(d.id, /^l-[0-9a-f]{16}$/)
     // 主机待选：留空，由人选
@@ -209,10 +222,10 @@ describe('建议：为这个会话创建续聊预设', () => {
     assert.equal(suggestDraft(suggest({ host: undefined, needs_host: true }), 'RM-1111-2222-3333-4444').host, 'RM-1111-2222-3333-4444')
   })
 
-  it('一键创建的预设：非交互续聊，只带工作流与姿态，服务端用默认的可执行文件 / 模型 / 提示词 / 时限', () => {
+  it('一键创建的预设：非交互续聊，只带工作流、姿态与对话来源（指定会话），服务端用默认的可执行文件 / 模型 / 提示词 / 时限', () => {
     const l = suggestLauncher(suggest())
     assert.deepEqual(subset(l, { name: 1, host: 1, dir: 1, kind: 1 }), { name: '续聊 · app', host: 'RM-AAAA-BBBB-CCCC-DDDD', dir: '/work/app', kind: 'headless' })
-    assert.deepEqual(l.run, { posture: 'allowlist', workflow_id: 'wf-1' })
+    assert.deepEqual(l.run, { posture: 'allowlist', source: 'resume', workflow_id: 'wf-1' })
     assert.equal(l.command, undefined)
     assert.equal(suggestLauncher(suggest({ posture: 'force' })).run?.posture, 'force')
   })

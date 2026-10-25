@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/teacat99/RelayMesh/v2/internal/agentstate"
+	"github.com/teacat99/RelayMesh/v2/internal/sessionprompt"
 	"github.com/teacat99/RelayMesh/v2/internal/store"
 	"github.com/teacat99/RelayMesh/v2/internal/termproto"
 )
@@ -103,7 +104,9 @@ func TestLauncherNewConversationRunsWithoutResumeAndLearnsTheConversation(t *tes
 	eventually(t, 2*time.Second, "假主机收到运行", func() bool { return f.sim.runCount() == 1 })
 	run := f.sim.lastRun()
 	want := "agent -p --approve-mcps --trust --force --workspace '/work/app' --output-format stream-json '" +
-		renderLauncherNewPromptFor("", newConvWF, headlessTimeoutSec) + "'"
+		renderLauncherWake(context.Background(), f.env.store, launcherWake{
+			Kind: sessionprompt.KindNew, WorkflowID: newConvWF, Project: "/work/app", MaxRunSec: headlessTimeoutSec,
+		}).Text + "'"
 	if run.Cmd != want {
 		t.Fatalf("命令不对：\n got %s\nwant %s", run.Cmd, want)
 	}

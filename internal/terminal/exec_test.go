@@ -169,10 +169,23 @@ func (s *hostSim) runCount() int {
 	return len(s.runs)
 }
 
+// lastRun 取假主机收到的最后一次运行。运行经 WebSocket 异步送达：Hub 一侧提交返回时假主机未必已记下
+// （宿主机负载高时会晚几十毫秒），所以一条都还没有时最多等 2 秒，再不到才 panic（带明确原因，而不是下标越界）。
 func (s *hostSim) lastRun() termproto.Run {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.runs[len(s.runs)-1]
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.mu.Lock()
+		if n := len(s.runs); n > 0 {
+			r := s.runs[n-1]
+			s.mu.Unlock()
+			return r
+		}
+		s.mu.Unlock()
+		if time.Now().After(deadline) {
+			panic("假主机 2 秒内没有收到任何运行")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (s *hostSim) cancelCount() int {

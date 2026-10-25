@@ -7,6 +7,7 @@ import { FileText, X } from 'lucide-vue-next'
 import MarkdownRenderer from '../MarkdownRenderer.vue'
 import ReplyRefButton from '../feedback/ReplyRefButton.vue'
 import ConfirmChoice from './ConfirmChoice.vue'
+import ConfirmRouteNotice from './ConfirmRouteNotice.vue'
 import ConfirmLinks from './ConfirmLinks.vue'
 import type { ConfirmItem } from '../../api/confirms'
 import { useConfirmAnswer } from '../../composables/useConfirmAnswer'
@@ -62,6 +63,8 @@ const riskClass = computed(() => {
     <p v-if="item.kind === 'plan'" class="mt-1.5 flex items-center gap-1 text-[11px] text-muted-foreground">
       <FileText class="size-3" />批准之前，智能体只会做只读的准备工作。
     </p>
+
+    <ConfirmRouteNotice class="mt-2" :item="item" :testid="testid" />
 
     <div class="mt-2.5">
       <ConfirmChoice

@@ -220,10 +220,13 @@ func oauthTestCfg() *config.Config {
 	return cfg
 }
 
+// enableOAuthServer 打开授权服务器，并把自动注册设成「常开」：这些测试关心的是授权流程本身，
+// 不想每个都先开一次接入窗口（窗口的行为见 dcr_window_flow_test.go）。
 func enableOAuthServer(t *testing.T, st *store.Store) {
 	t.Helper()
 	p, _ := st.GetOAuthPolicy(context.Background())
 	p.Enabled = true
+	p.DCRAlways = true
 	if err := st.SaveOAuthPolicy(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}

@@ -93,8 +93,9 @@ func TestStdioTransport_EndToEnd(t *testing.T) {
 	}
 	resMap2 := resp2.Result.(map[string]any)
 	toolsList := resMap2["tools"].([]any)
-	if len(toolsList) != 15 {
-		t.Fatalf("expected 15 tools in tools/list, got %d", len(toolsList))
+	// 15 个（含 usage_guide）+ 分支会话 branch（#236）+ 会话参数 session_params（#236 P3）。
+	if len(toolsList) != 17 {
+		t.Fatalf("expected 17 tools in tools/list, got %d", len(toolsList))
 	}
 
 	// Check response 3 (tools/call get_system_info)

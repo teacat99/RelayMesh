@@ -9,6 +9,7 @@
 import type { CreateWorkflowApplied, CreateWorkflowRequest, CreateWorkflowWarning } from '../api/client'
 import type { FeedbackSession } from '../api/types'
 import { AWAITING_AGENT_ROUND } from './sessionStatus'
+import { RESIDENT_TEMPLATES, templateText, type PromptTemplateOverrides, type ResidentTemplateId } from './residentPrompt'
 
 export { AWAITING_AGENT_ROUND }
 
@@ -107,6 +108,15 @@ export const NEW_SESSION_PHASES: ReadonlyArray<{ id: PhaseChoice; label: string;
   { id: 'dev', label: '开发', hint: '按已定的方案动手实现' },
 ]
 
+/** '' = 不套用常驻规则模板。 */
+export type ResidentChoice = '' | ResidentTemplateId
+
+/** 常驻规则的选项（顺序即界面顺序）：不套用 + 内置模板。 */
+export const NEW_SESSION_RESIDENTS: ReadonlyArray<{ id: ResidentChoice; label: string; hint: string }> = [
+  { id: '', label: '不套用', hint: '建好之后想要再在会话输入区的「常驻」里写' },
+  ...RESIDENT_TEMPLATES.map(t => ({ id: t.id as ResidentChoice, label: t.label, hint: t.hint })),
+]
+
 /** 弹窗里填的全部内容（输入框里的原样文本）。 */
 export interface NewSessionDraft {
   name: string
@@ -115,10 +125,11 @@ export interface NewSessionDraft {
   phase: PhaseChoice
   projectDirectory: string
   hostName: string
+  resident: ResidentChoice
 }
 
 export function blankNewSessionDraft(): NewSessionDraft {
-  return { name: '', workflowId: '', firstMessage: '', phase: '', projectDirectory: '', hostName: '' }
+  return { name: '', workflowId: '', firstMessage: '', phase: '', projectDirectory: '', hostName: '', resident: '' }
 }
 
 export type FieldCheck = { ok: true; value: string } | { ok: false; message: string }
@@ -182,7 +193,7 @@ export type NewSessionValidation = { ok: true; request: CreateWorkflowRequest } 
  * 校验整份草稿，通过时给出要发给服务端的请求体：名字必填；高级选项只带非空的项（一项也没填 = 只有 title，与改动前的请求一致）。
  * 不通过时按字段给出原因（界面把它显示在对应输入框下面）。
  */
-export function buildCreateRequest(draft: NewSessionDraft): NewSessionValidation {
+export function buildCreateRequest(draft: NewSessionDraft, templates?: PromptTemplateOverrides | null): NewSessionValidation {
   const errors: NewSessionErrors = {}
   const name = checkSessionName(draft.name)
   if (!name.ok) errors.name = name.message
@@ -202,12 +213,14 @@ export function buildCreateRequest(draft: NewSessionDraft): NewSessionValidation
   if (draft.phase) request.phase = draft.phase
   if (dir.value) request.project_directory = dir.value
   if (host.value) request.host_name = host.value
+  // 常驻规则：按「当前生效的模板文字」（用户在设置里覆盖过的优先）复制进新会话，之后与模板再无关系
+  if (draft.resident) request.resident = templateText(draft.resident, templates)
   return { ok: true, request }
 }
 
 /** 高级选项里有没有填任何东西（决定「高级选项」折叠条上要不要提示「已填 N 项」）。 */
 export function advancedFilledCount(draft: NewSessionDraft): number {
-  return [draft.workflowId, draft.firstMessage, draft.phase, draft.projectDirectory, draft.hostName].filter(v => v.trim() !== '').length
+  return [draft.workflowId, draft.firstMessage, draft.phase, draft.projectDirectory, draft.hostName, draft.resident].filter(v => v.trim() !== '').length
 }
 
 /** 阶段编号翻成界面上的名字（认不出的原样返回）。 */
@@ -223,16 +236,19 @@ export function appliedLines(applied: CreateWorkflowApplied | undefined | null):
   if (applied.first_message) lines.push('首条指令已排进收件箱，智能体接入后会读到')
   if (applied.project_directory) lines.push(`项目目录：${applied.project_directory}（已绑定：智能体第一次汇报必须带这个目录，换目录会被拒绝）`)
   if (applied.host_name) lines.push(`主机：${applied.host_name}`)
+  if (applied.resident) lines.push(`常驻规则：已套用（${applied.resident} 字），智能体每次回执都会带上它；可在会话输入区的「常驻」里修改`)
   return lines
 }
 
 const WARNING_FIELD_TEXT: Record<string, string> = {
   phase: '起始阶段没有设上',
   first_message: '首条指令没有发出去',
+  resident: '常驻规则没有存上',
 }
 const WARNING_FIELD_FIX: Record<string, string> = {
   phase: '可以在会话页里用阶段滑块再选一次',
   first_message: '可以在会话页下方的输入框里重新写',
+  resident: '可以在会话页输入区的「常驻」里再套用一次',
 }
 
 /** 会话已经建好、但有事没做成时的提示：每条写明哪一项、为什么、怎么补。 */

@@ -18,6 +18,7 @@ import {
   runReadiness,
   runStatus,
   runSummary,
+  runsJustEnded,
   runsActive,
   autoResumeLine,
   runFailureLine,
@@ -75,6 +76,16 @@ describe('非交互续聊：运行状态', () => {
     assert.equal(runMeta(view({ state: 'running', active: true, started_at: undefined, ended_at: undefined }), NOW), '1 分钟前开始', '还没开始（提交中）退回创建时间')
   })
 
+  it('最近会话的运行（#191）：状态行写明实际接上的对话（读到之前只写来源）；指定会话 / 新会话 / 旧版 Hub 没有这一段', () => {
+    assert.equal(runMeta(view({ mode: 'continue', conversation: 'e33e27ef-0fbb-46e4-9446-5dee56ae61fa' }), NOW), '接上对话 e33e27ef… · 30 秒前 · 用时 28 秒')
+    assert.equal(runMeta(view({ mode: 'continue' }), NOW), '最近会话 · 30 秒前 · 用时 28 秒')
+    assert.equal(runMeta(view({ mode: 'continue', state: 'running', active: true, ended_at: undefined, duration_ms: undefined }), NOW), '最近会话 · 58 秒前开始')
+    assert.equal(runMeta(view({ by: 'A', mode: 'continue', conversation: 'abcdef123456' }), NOW), '项目管理 Agent「A」发起 · 接上对话 abcdef12… · 30 秒前 · 用时 28 秒')
+    for (const mode of ['resume', 'new', undefined] as const) {
+      assert.equal(runMeta(view({ mode, conversation: 'abcdef123456' }), NOW), '30 秒前 · 用时 28 秒', String(mode))
+    }
+  })
+
   it('项目管理 Agent 发起的运行（#179）：状态行写明是谁，手动运行没有这一段', () => {
     assert.equal(runMeta(view({ by: '项目管理' }), NOW), '项目管理 Agent「项目管理」发起 · 30 秒前 · 用时 28 秒')
     assert.equal(runMeta(view({ by: '' }), NOW), '30 秒前 · 用时 28 秒')
@@ -122,8 +133,9 @@ describe('非交互续聊：能不能运行', () => {
     assert.deepEqual(runReadiness(host({ kind: 'ssh' } as Partial<HostView>), undefined), { ok: false, text: '暂不支持 SSH 主机' })
   })
 
-  it('Windows 主机暂不支持；上一次还在跑不能再点', () => {
-    assert.deepEqual(runReadiness(host({ os: 'windows' }), undefined), { ok: false, text: '暂不支持 Windows 主机' })
+  it('Windows 主机和其他主机一样可以运行（#178）；上一次还在跑不能再点', () => {
+    assert.deepEqual(runReadiness(host({ os: 'windows' }), undefined), { ok: true })
+    assert.deepEqual(runReadiness(host({ os: 'Windows 11 Pro' }), view({ state: 'running', active: true })), { ok: false, text: '上一次运行还没结束' })
     assert.deepEqual(runReadiness(host(), view({ state: 'running', active: true })), { ok: false, text: '上一次运行还没结束' })
     assert.deepEqual(runReadiness(host(), view({ state: 'awaiting_approval', active: true })), { ok: false, text: '上一次运行还没结束' })
     assert.deepEqual(runReadiness(host(), view()), { ok: true }, '上一次已经结束：可以再运行')
@@ -163,6 +175,35 @@ describe('非交互续聊：清单与提示', () => {
     assert.doesNotMatch(n.description, /接着原对话/)
   })
 
+  it('对话来源（#191）：清单里写明最近会话 / 新会话运行之后的去向；没设 source 的存量预设照旧', () => {
+    assert.equal(runSummary(l({ workflow_id: 'wf-1', source: 'continue' })), '最近会话（接着目录里 Cursor CLI 认的最近对话） · 只放行白名单内的操作')
+    assert.equal(runSummary(l({ workflow_id: 'wf-1', source: 'new' })), '第一次新开对话，之后接着工作流 wf-1 里的对话 · 只放行白名单内的操作')
+    assert.equal(runSummary(l({ workflow_id: 'wf-1', source: 'new', after_new: 'remember' })), '第一次新开对话，之后接着工作流 wf-1 里的对话 · 只放行白名单内的操作')
+    assert.equal(runSummary(l({ workflow_id: 'wf-1', source: 'new', after_new: 'stay' })), '新会话（每次运行都新开对话） · 只放行白名单内的操作')
+    assert.equal(runSummary(l({ workflow_id: 'wf-1', source: 'new', after_new: 'continue' })), '新会话（第一次新开，成功后自动切成最近会话） · 只放行白名单内的操作')
+    assert.equal(runSummary(l({ workflow_id: 'wf-1', source: 'resume' })), '工作流 wf-1 里最近的对话 · 只放行白名单内的操作')
+    // 最近会话下 after_new 没有意义，不影响文字
+    assert.equal(runSummary(l({ workflow_id: 'wf-1', source: 'continue', after_new: 'stay' })), '最近会话（接着目录里 Cursor CLI 认的最近对话） · 只放行白名单内的操作')
+  })
+
+  it('对话来源（#191）：点「运行」之后的提示按来源说明接哪个对话、之后会怎样', () => {
+    const plan = (over: Partial<LauncherRunPlan>): LauncherRunPlan => ({ name: '续聊', host: 'h', run_id: 'r1', run_state: 'running', posture: 'allowlist', conversation_id: '', ...over })
+    const stay = runNotice(plan({ new_conversation: true, after_new: 'stay' }))
+    assert.match(stay.description, /新开了一个 Cursor CLI 对话/)
+    assert.match(stay.description, /每次运行都会新开对话，不会接着这一个/)
+    assert.doesNotMatch(stay.description, /不会再新开/)
+    const sw = runNotice(plan({ new_conversation: true, after_new: 'continue' }))
+    assert.match(sw.description, /运行成功之后，预设会自动切换成「最近会话」/)
+    const keep = runNotice(plan({ new_conversation: true, after_new: 'remember' }))
+    assert.match(keep.description, /之后再点「运行」都接着它，不会再新开/)
+    const cont = runNotice(plan({ continue: true }))
+    assert.match(cont.description, /接着这个目录里最近的 Cursor CLI 对话/)
+    assert.match(cont.description, /--continue/)
+    assert.match(cont.description, /接到哪个对话由 CLI 决定/)
+    assert.doesNotMatch(cont.description, /新开了一个/)
+    assert.doesNotMatch(cont.description, /接着原对话运行一次/)
+  })
+
   it('点「运行」之后的提示：已开始 / 等批准，并带上服务端的前提提醒', () => {
     const plan = (over: Partial<LauncherRunPlan> = {}): LauncherRunPlan => ({
       name: '续聊', host: 'h', run_id: 'r1', run_state: 'running', posture: 'allowlist', conversation_id: 'chat-9', ...over,
@@ -179,6 +220,28 @@ describe('非交互续聊：清单与提示', () => {
     assert.match(c.description, /这次运行最长 30 分钟，到点会被强制结束。\n白名单姿态/)
     assert.doesNotMatch(runNotice(plan({ max_run_seconds: DEFAULT_RUN_LIMIT_SEC })).description, /最长/)
     assert.doesNotMatch(runNotice(plan()).description, /最长/, '旧版 Hub 没有这个字段')
+  })
+})
+
+describe('非交互续聊：运行刚结束就把预设读新（#191）', () => {
+  const run = (run_id: string, active: boolean): LauncherRunView => ({ run_id, state: active ? 'running' : 'succeeded', active, created_at: '2026-10-22T00:00:00Z' })
+
+  it('上一次还在进行、这一次结束了（或换成了另一条）才算刚结束', () => {
+    assert.equal(runsJustEnded({ p1: run('r1', true) }, { p1: run('r1', false) }), true)
+    assert.equal(runsJustEnded({ p1: run('r1', true) }, { p1: run('r2', true) }), true, '换了一条新的运行：上一条必然结束了')
+    assert.equal(runsJustEnded({ p1: run('r1', true) }, {}), true, '运行记录没了（预设被删 / 记录被清）也要读新')
+    assert.equal(runsJustEnded({ p1: run('r1', true) }, { p1: run('r1', true) }), false, '还在跑')
+    assert.equal(runsJustEnded({ p1: run('r1', false) }, { p1: run('r1', false) }), false, '一直是结束的')
+    assert.equal(runsJustEnded({ p1: run('r1', false) }, { p1: run('r2', true) }), false, '新开了一条：上一次本来就是结束的，不是「刚结束」')
+    assert.equal(runsJustEnded({ p1: run('r1', true), p2: run('r3', false) }, { p1: run('r1', true), p2: run('r3', false) }), false)
+    assert.equal(runsJustEnded({ p1: run('r1', true), p2: run('r3', true) }, { p1: run('r1', true), p2: run('r3', false) }), true, '多个预设里有一个结束就算')
+  })
+
+  it('第一次读（没有上一次的现状）不算，免得每次打开弹窗都多读一遍', () => {
+    assert.equal(runsJustEnded(undefined, { p1: run('r1', false) }), false)
+    assert.equal(runsJustEnded(null, {}), false)
+    assert.equal(runsJustEnded({}, { p1: run('r1', true) }), false)
+    assert.equal(runsJustEnded({ p1: run('r1', false) }, undefined), false)
   })
 })
 

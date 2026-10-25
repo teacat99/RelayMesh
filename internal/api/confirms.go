@@ -2,15 +2,12 @@ package api
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/teacat99/RelayMesh/v2/internal/model"
 	"github.com/teacat99/RelayMesh/v2/internal/store"
-	"github.com/teacat99/RelayMesh/v2/internal/terminal"
 )
 
 // 确认项 REST：只给 Web 登录用户用（智能体经 MCP async_ask 提问，不能经这里替用户作答——
@@ -86,28 +83,12 @@ func (h *APIHandler) GetConfirm(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"item": view})
 }
 
-// confirmBoardGuard 是「待确认」区里一条守护告警（会话崩溃 / 停摆，需要人决定要不要唤醒）。
-type confirmBoardGuard struct {
-	PresetID string                `json:"preset_id"`
-	Name     string                `json:"name"`
-	Host     string                `json:"host,omitempty"`
-	Verdict  terminal.GuardVerdict `json:"verdict"`
-	WakeMode string                `json:"wake_mode,omitempty"`
-}
-
-func guardNeedsAttention(g terminal.GuardItem) bool {
-	if !g.Enabled || g.PermitMarked {
-		return false
-	}
-	st := g.Verdict.State
-	return st == terminal.GuardCrashed || st == terminal.GuardStalled
-}
-
 // GetConfirmsBoard GET /api/v1/workflows/:workflow_id/confirms/board
-// 交流页「待答复」区的一次性数据：待处理的确认项（旧的在前）、本工作流的守护告警，外加计数。
+// 交流页「待答复」区的一次性数据：待处理的确认项（旧的在前），外加计数。
 //
 // 任务不再需要人逐条确认（#110，状态绑定智能体的开发流程），所以这里不再带「待验收的任务」；
-// review_tasks / counts.review_tasks 两个字段保留为恒空（[] / 0），只为兼容还没刷新的旧页面，新页面不读。
+// 会话守护下线之后（#245）也不再带「守护告警」；
+// review_tasks / guard_alerts 与 counts 里对应的两个计数保留为恒空（[] / 0），只为兼容还没刷新的旧页面，新页面不读。
 func (h *APIHandler) GetConfirmsBoard(c *gin.Context) {
 	wf := c.Param("workflow_id")
 	ctx := c.Request.Context()
@@ -131,31 +112,15 @@ func (h *APIHandler) GetConfirmsBoard(c *gin.Context) {
 		byKind[it.Kind]++
 	}
 
-	guards := []confirmBoardGuard{}
-	if h.terminal != nil {
-		if view, gerr := h.terminal.GuardView(ctx); gerr != nil {
-			log.Printf("[confirm] 待确认区读取会话守护状态失败: %v", gerr)
-		} else {
-			for _, g := range view.Items {
-				if strings.TrimSpace(g.WorkflowID) != wf || !guardNeedsAttention(g) {
-					continue
-				}
-				guards = append(guards, confirmBoardGuard{
-					PresetID: g.PresetID, Name: g.Name, Host: g.Host, Verdict: g.Verdict, WakeMode: g.WakeMode,
-				})
-			}
-		}
-	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"items":        items,
 		"review_tasks": []any{}, // 兼容旧页面，恒空
-		"guard_alerts": guards,
+		"guard_alerts": []any{}, // 兼容旧页面，恒空
 		"counts": gin.H{
-			"pending":      len(items) + len(guards),
+			"pending":      len(items),
 			"items":        len(items),
 			"review_tasks": 0,
-			"guard_alerts": len(guards),
+			"guard_alerts": 0,
 			"by_risk":      byRisk,
 			"by_kind":      byKind,
 		},

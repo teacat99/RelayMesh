@@ -138,7 +138,12 @@ func (s *Server) asyncAskCreate(ctx context.Context, a asyncAskArgs) (any, error
 	windowLine := ""
 	if created {
 		s.notifyConfirmUpdated(item)
-		s.notifyAsk(item) // 通知闸：ask_card，受免打扰与会话静音约束
+		if parent := model.ConfirmAddresseeMainOf(item.Addressee); parent != "" {
+			// 分支里的请示先送主会话定夺（#236 P2）：不打扰用户，改为提醒主会话读收件箱；转交 / 超时升级时才按新请示通知用户。
+			s.notifyInbox(parent)
+		} else {
+			s.notifyAsk(item) // 通知闸：ask_card，受免打扰与会话静音约束
+		}
 		windowLine = s.extendReplyWindow(ctx, a.WorkflowID)
 	}
 	pending, _ := s.store.CountPendingConfirms(ctx, a.WorkflowID)
@@ -155,6 +160,10 @@ func (s *Server) asyncAskCreate(ctx context.Context, a asyncAskArgs) (any, error
 	}
 	if item.DefaultOption != "" {
 		out["default_option"] = item.DefaultOption
+	}
+	if item.RoutedToMain() {
+		out["routed_to"] = "main"
+		out["route_note"] = s.asyncAskRouteNote(ctx)
 	}
 	// L2：回执里把「批准前绝不执行」说死，并把默认值那一句换掉（#217）。去重命中已有 L2 项时同样带上。
 	if item.Risk == model.ConfirmRiskL2 {
@@ -181,7 +190,16 @@ func (s *Server) asyncAskGet(ctx context.Context, a asyncAskArgs) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"item": view}, nil
+	out := map[string]any{"item": view}
+	if item.Status == model.ConfirmStatusPending {
+		// 还在等谁：分支里路由给主会话的请示 = main，其余 = user（转交 / 升级后也是 user，视图里的 escalation 写着原因）。
+		if item.RoutedToMain() {
+			out["awaiting"] = "main"
+		} else {
+			out["awaiting"] = "user"
+		}
+	}
+	return out, nil
 }
 
 func (s *Server) asyncAskList(ctx context.Context, a asyncAskArgs) (any, error) {
@@ -221,6 +239,16 @@ func (s *Server) asyncAskWithdraw(ctx context.Context, a asyncAskArgs) (any, err
 		return nil, err
 	}
 	return map[string]any{"item": view}, nil
+}
+
+// asyncAskRouteNote 是路由给主会话的请示在 async_ask 返回里的说明：交给了谁、多久会升级、用户能不能直接答、答复怎么标注。
+func (s *Server) asyncAskRouteNote(ctx context.Context) string {
+	minutes := model.BranchEscalateDefaultMinutes
+	if prefs, err := s.store.GetBranchPrefs(ctx); err == nil {
+		minutes = prefs.EscalateAfterMinutes()
+	}
+	return fmt.Sprintf("这条请示先送给了你的主会话定夺（它开放了「定夺」）：它答复、转交，或超过 %d 分钟没人答复自动转交用户；用户也可以随时直接答复，先到先得。"+
+		"答复仍作为收件箱消息（确认项答复）送达；主会话代答的会标注「主会话代为定夺，不是用户本人的答复」。", minutes)
 }
 
 func (s *Server) notifyConfirmUpdated(item *model.ConfirmItem) {

@@ -51,7 +51,7 @@ test('decorateLinkRefs：链接是真正的 <a href>，地址是各自的深链�
   const root = dom('<p>#36 Q23 [[design/x.md#8-14|设计 X]] sess-9f02517c</p>')
   decorate(root)
   const byKind = (k: string) => root.querySelector(`a[data-ref-kind="${k}"]`) as HTMLAnchorElement
-  assert.equal(byKind('task').getAttribute('href'), '/work/wf-1?task=36')
+  assert.equal(byKind('task').getAttribute('href'), '/work/wf-1?seq=36')
   assert.equal(byKind('confirm').getAttribute('href'), '/?wf=wf-1&q=Q23')
   assert.equal(byKind('doc').getAttribute('href'), '/docs/wf-1/design/x.md#8-14')
   assert.equal(byKind('session').getAttribute('href'), '/?wf=wf-1&s=sess-9f02517c')

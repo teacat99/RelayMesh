@@ -24,7 +24,7 @@ export function getUnlockToken(): string {
 }
 
 api.interceptors.request.use(config => {
-  if (unlockToken && carriesUnlock(config.url)) {
+  if (unlockToken && carriesUnlock(config.url, config.method)) {
     config.headers.set(UNLOCK_HEADER, unlockToken)
   }
   return config
@@ -83,19 +83,6 @@ export interface TerminalPrefsLimits {
   launcher_max?: number
   launcher_name_max?: number
   launcher_dir_max?: number
-  launcher_command_max?: number
-  /** 会话守护（D-214）的取值范围；旧版 Hub 没有这几项，界面用内置的默认值。 */
-  guard_silence_min?: number
-  guard_silence_max?: number
-  guard_silence_default?: number
-  guard_workflow_max?: number
-  guard_prompt_max?: number
-  /** 唤醒提示词里不允许出现的字符（在 shell 里有特殊含义）。 */
-  guard_prompt_unsafe?: string
-  /** 一天内唤醒次数的参考上限。 */
-  guard_wake_max?: number
-  /** 没写自定义提示词时服务端用的默认正文（占位符原样保留）。 */
-  guard_prompt_default?: string
   /** 「非交互续聊」预设（#126）：各文本字段的上限（按字符数）与默认提示词（%workflow 原样保留）；旧版 Hub 没有这几项——界面据此判断 Hub 认不认识这种预设。 */
   launcher_run_prompt_max?: number
   launcher_run_model_max?: number
@@ -107,34 +94,13 @@ export interface TerminalPrefsLimits {
   launcher_run_max_minutes?: number
 }
 
-/**
- * 预设的「会话守护」配置（D-214）：只描述怎么判断、怎么唤醒，不会让任何东西自动运行——
- * 唤醒是人在界面里点一下之后，由浏览器把一句固定的提示词输入到会话里。
- */
-export interface LauncherGuard {
-  /** 监测开关；关闭时保留其余配置。 */
-  enabled: boolean
-  /** 会话里的智能体使用的 RelayMesh 工作流编号；留空只能监测「意外退出」，无法判断停摆。 */
-  workflow_id?: string
-  /** 多久没有任何活动才算停摆（分钟）；缺省用服务端默认值。 */
-  silence_minutes?: number
-  /** 会话结束后重新拉起用的一整行命令，{chat_id} 换成智能体最近一次汇报的对话编号。 */
-  resume_command?: string
-  /** 唤醒提示词正文；缺省用服务端默认正文。支持 %n、%max、%reason、%workflow。 */
-  wake_prompt?: string
-  /** 为 true 时启动行用 exec 包装，命令退出即会话结束。 */
-  exit_ends_session?: boolean
-  /** 非交互唤醒（默认关闭）：会话结束后由 Hub 经主机的执行通道运行一次 `agent -p --resume …`。 */
-  headless?: LauncherHeadless
-}
-
 export type HeadlessPosture = 'allowlist' | 'force'
 
-export interface LauncherHeadless {
-  enabled: boolean
-  /** allowlist（默认，不带 --force）| force（放开全部命令）。 */
-  posture?: HeadlessPosture
-}
+/** 非交互续聊预设的对话来源（#191）：指定会话 / 新会话 / 最近会话。 */
+export type LauncherSource = 'resume' | 'new' | 'continue'
+
+/** 「新会话」运行之后的去向（#559）：记下编号 / 不切换 / 成功后切到最近会话。 */
+export type LauncherAfterNew = 'remember' | 'stay' | 'continue'
 
 /**
  * 「非交互续聊」预设的运行配置（#126）：点「运行」后由 Hub 经主机的执行通道运行一次
@@ -173,8 +139,20 @@ export interface LauncherRun {
    */
   auto_resume_ok_minutes?: number
   /**
-   * 第一次运行时新开一个 Cursor CLI 对话（#176 第三期）：命令里没有 --resume，智能体按提示词带着工作流编号接入；
-   * Hub 从运行输出里学到新对话的编号并记下，之后的运行就接着它（只新开这一次）。需要填工作流编号、不能固定对话编号；旧版 Hub 不认识它。
+   * 对话来源（#191，三选一）：resume = 指定会话（命令带 --resume；填了 conversation_id 就固定接它，留空 = 取工作流里最近汇报的对话）；
+   * new = 新会话（命令不带 --resume，智能体按提示词带着工作流编号接入，Hub 从运行输出里学到新对话的编号）；
+   * continue = 最近会话（命令用 --continue，接着该目录里 Cursor CLI 认的最近对话——接到哪个由 CLI 决定，可能不是这个工作流的）。
+   * 不带 = 存量预设，按旧字段推导（有 new_conversation 是 new，其余是 resume）。旧版 Hub 不认识它。
+   */
+  source?: LauncherSource
+  /**
+   * 「新会话」运行之后的去向（#559；只在 source 是 new 时有意义）：remember = 记下对话编号，之后的运行接着它（默认，只新开一次）；
+   * stay = 不切换，每次运行都新开；continue = 运行成功后 Hub 自动把预设切成「最近会话」。旧版 Hub 不认识它。
+   */
+  after_new?: LauncherAfterNew
+  /**
+   * 旧版的「第一次运行时新开对话」勾选（#176 第三期）：存量预设仍靠它表示「新会话 · 记下编号」。设了 source 之后它只是镜像
+   * （服务端按 source / after_new 同步），界面不再直接编辑它。需要填工作流编号、不能固定对话编号。
    */
   new_conversation?: boolean
   /** 预设的来源标记：enable_agent = 由会话页「启用 Agent」创建（清单里据此标出来）；手工建的没有。保存时必须原样带回去。 */
@@ -182,21 +160,20 @@ export interface LauncherRun {
 }
 
 /**
- * 终端启动器（会话页顶栏的「终端」入口）的一条预设：在哪台主机、哪个目录、会话就绪后自动输入什么命令。
- * 保存在服务端、所有浏览器共享；name 同时是新建会话的名字，启动器靠「主机 + 名字」认出它已经在运行的会话。
+ * 终端启动器（会话页顶栏的「终端」入口）的一条预设：「非交互续聊」——在哪台主机、哪个目录、接着哪个对话运行一次。
+ * 保存在服务端、所有浏览器共享。旧版交互式「开终端」预设（kind 缺省、带命令与会话守护配置）已经停用（#245）：
+ * 服务端还会把它们原样读出来，界面只认得出「这不是续聊预设」并提供删除；它们的会话守护配置不再有类型。
  */
 export interface TerminalLauncher {
   id: string
   name: string
   /** 目标主机的机器码。 */
   host: string
-  /** 启动目录；留空 = 主机默认目录（「非交互续聊」必须写完整的 / 开头路径）。 */
+  /** 目录；「非交互续聊」必须写完整的 / 开头（或 Windows 盘符）路径。 */
   dir?: string
-  /** 自动输入并回车的命令（一整行）；留空 = 只打开终端。「非交互续聊」预设没有命令。 */
+  /** 旧版交互式预设的命令：只读展示（让人删除前看一眼它原来在运行什么），界面不再提供启动或编辑；#245 第三期随预设一起清理。 */
   command?: string
-  /** 会话守护（意外退出 / 停摆的监测与一键唤醒）；没有 = 这个预设不用守护。「非交互续聊」预设没有守护。 */
-  guard?: LauncherGuard
-  /** 预设类型：缺省 = 终端预设（打开终端、输入命令）；headless = 非交互续聊（点「运行」由 Hub 运行一次）。 */
+  /** 预设类型：headless = 非交互续聊（点「运行」由 Hub 运行一次）；缺省 = 旧版交互式预设（已停用，只能删除）。 */
   kind?: 'headless'
   /** 非交互续聊的运行配置；只有 kind 是 headless 时才有。 */
   run?: LauncherRun
@@ -214,6 +191,10 @@ export interface LauncherRunPlan {
   conversation_id: string
   /** 这次运行是新开对话的（命令里没有 --resume，#176）；旧版 Hub 没有。 */
   new_conversation?: boolean
+  /** 新会话运行之后的去向（#191）：remember 记下编号 / stay 不切换 / continue 成功后切到最近会话；只在 new_conversation 时有；旧版 Hub 没有。 */
+  after_new?: LauncherAfterNew
+  /** 这次运行是「最近会话」（命令用 --continue，#191）：conversation_id 为空，接到哪个对话由 Cursor CLI 决定；旧版 Hub 没有。 */
+  continue?: boolean
   /** 这次运行的最长运行时间（秒）：预设里设的值，没设就是平台上限 7 天。旧版 Hub 没有。 */
   max_run_seconds?: number
   /** 需要提醒你的前提（例如白名单姿态要求 Cursor 的 Mcp(...) 白名单已放行 RelayMesh）。 */
@@ -248,6 +229,13 @@ export interface LauncherRunView {
   auto?: AutoResumeView
   /** 这次运行是项目管理 Agent 经 preset_run 发起的（#179）：Agent 的名字；手动运行 / 自动续跑没有；旧版 Hub 没有。 */
   by?: string
+  /** 这次运行接对话的方式（#191，从命令判断）：resume 指定会话 / new 新会话 / continue 最近会话；旧版 Hub 没有。 */
+  mode?: LauncherSource
+  /**
+   * 这次运行实际接上的对话编号（#191）：指定会话就是命令里的编号；新会话与最近会话的命令里没有编号，从输出开头的 init 事件取
+   * （运行还没读到、或认不出时没有）。最近会话接到哪个对话是 Cursor CLI 的决定，这里能看到实际结果。旧版 Hub 没有。
+   */
+  conversation?: string
 }
 
 /**
@@ -293,7 +281,7 @@ export interface AutoResumeView {
   next_run_id?: string
 }
 
-/** 「其他非交互运行」的来源：旧的会话页运行接口 / 会话守护的非交互唤醒 / 所属预设已被删除的预设运行。 */
+/** 「其他非交互运行」的来源：旧的会话页运行接口 / 会话守护的非交互唤醒（已下线，只剩旧记录）/ 所属预设已被删除的预设运行。 */
 export type OtherRunSource = 'session_run' | 'wake' | 'deleted_preset'
 
 /**
@@ -331,8 +319,10 @@ export interface SessionLauncherView {
   host: string
   host_title?: string
   dir: string
-  /** 这次运行实际要接着的对话；还不知道是空。 */
+  /** 这次运行实际要接着的对话；还不知道是空（新会话与最近会话也没有编号，见 mode）。 */
   conversation_id?: string
+  /** 这次运行实际接对话的方式（#191）：resume 指定会话 / new 新会话 / continue 最近会话；旧版 Hub 没有。 */
+  mode?: LauncherSource
   model?: string
   posture: HeadlessPosture
   /** 这次运行的最长运行时间（秒）。 */
@@ -455,108 +445,6 @@ export interface SessionEnableResult {
   run: LauncherRunPlan
   preset: SessionEnablePreset
   prefs: TerminalPrefsView
-}
-
-// ---------- 会话守护（D-214） ----------
-
-export type GuardState = 'working' | 'waiting' | 'present' | 'idle' | 'ended' | 'crashed' | 'stalled' | 'offline' | 'unknown' | 'done'
-
-export interface GuardOpenWork {
-  /** 你已经回复了，但智能体没有读取。 */
-  unread_reply: boolean
-  /** 智能体在等待你回复的轮询中途没了动静。 */
-  poll_lost: boolean
-  /** 没被读取的追加指令条数。 */
-  inbox_unread: number
-  /** 进行中的任务个数。 */
-  doing_tasks: number
-}
-
-export interface GuardVerdict {
-  state: GuardState
-  /** 一句人话。 */
-  reason: string
-  /** 判断依据，给「为什么这么判断」展开用。 */
-  detail?: string[]
-  /** 进入这个状态的起点。 */
-  since?: string
-  /** 停摆是怎么发现的：error（一轮对话以出错结束）/ silence（长时间没有活动）。 */
-  cause?: 'error' | 'silence'
-  open_work: GuardOpenWork
-}
-
-export interface GuardWakeView {
-  at: string
-  mode: 'type' | 'relaunch' | 'headless'
-  reason: string
-  /** progress（之后有了动静）| none（观察窗口过完仍没有）| pending（还在观察）。 */
-  progress: 'progress' | 'none' | 'pending'
-}
-
-export interface GuardItem {
-  preset_id: string
-  name: string
-  host: string
-  enabled: boolean
-  workflow_id?: string
-  silence_minutes: number
-  verdict: GuardVerdict
-  /** 滚动 24 小时内已经唤醒的次数。 */
-  wakes_24h: number
-  /** 最近连续几次唤醒没有任何效果。 */
-  no_progress_streak: number
-  last_wake?: GuardWakeView
-  /** 现在点「唤醒」会怎么做：none 时 wake_note 说明原因。 */
-  wake_mode: 'none' | 'type' | 'relaunch'
-  wake_note?: string
-  /** 已经知道智能体的对话编号：重新拉起时能接着原来的对话。 */
-  chat_known: boolean
-  /** 已标记「任务全部完成」（唤醒许可为 0）。 */
-  permit_marked?: boolean
-  /** 非交互唤醒的现状；预设没有开启它时没有这一项。 */
-  headless?: GuardHeadless
-}
-
-export interface GuardHeadless {
-  enabled: boolean
-  posture: HeadlessPosture
-  /** 现在点它能行；不行时 note 说明原因。 */
-  ok: boolean
-  note?: string
-}
-
-export interface GuardView {
-  items: GuardItem[]
-  wake_max: number
-  wake_window_hours: number
-  progress_minutes: number
-  at: string
-}
-
-/** 一次唤醒要执行的内容，由浏览器照着做（服务端只登记，不会自己唤醒任何会话）。 */
-export interface GuardWakePlan {
-  mode: 'type' | 'relaunch' | 'headless'
-  name: string
-  host: string
-  /** type：要连上去输入的存活会话。 */
-  session_sid?: string
-  /** 要输入的提示词（含固定的「【系统唤醒 …】」开头），不含 shell 特殊字符。 */
-  prompt: string
-  /** relaunch：在 dir 里新开会话并运行 command；resume 表示接着原来的对话。 */
-  command?: string
-  dir?: string
-  resume?: boolean
-  /** true：可以把提示词放进引号、追加在 command 后面一起启动；否则只启动命令，提示词要另行发给它。 */
-  append_prompt?: boolean
-  /** 这次是滚动 24 小时内的第几次唤醒（含本次）、参考上限、是否已超过上限。 */
-  n: number
-  max: number
-  over_budget: boolean
-  warnings?: string[]
-  /** headless：服务端已经提交的运行（编号、当前状态）与权限姿态；浏览器不需要再做什么。 */
-  run_id?: string
-  run_state?: string
-  posture?: HeadlessPosture
 }
 
 /** 「终端限高」对在线主机的覆盖情况：旧的会话守护进程不认识这项设置（升级只换 Agent、不会重启守护进程）。 */
@@ -1200,14 +1088,12 @@ export const terminalApi = {
     call(api.put<{ prefs: TerminalPrefsView }>('/terminal/prefs/auto-upgrade', { enabled })),
 
   /**
-   * 新建或覆盖一条终端启动预设（编号由界面生成）。预设决定人点「启动」之后会运行什么，所以和启动一样需要解锁。
-   * 命令内容不进审计。
+   * 新建或覆盖一条「非交互续聊」预设（编号由界面生成）。预设决定人点「运行」之后会运行什么，所以和运行一样需要解锁。
+   * 命令内容不进审计。保存是整条覆盖：kind / run 必须带回去（服务端不再接受交互式预设：缺省 kind 一律 400 launcher_interactive_retired）。
    */
   saveLauncher: (l: TerminalLauncher) =>
-    // 保存是整条覆盖：没有 guard（或为 null）就是不用守护，所以编辑时必须把已有的 guard 原样带回去。
-    // 同理 kind / run：终端预设不带（kind 空串、run null），「非交互续聊」预设必须带回去，否则编辑一次就变回终端预设了。
     call(api.put<{ prefs: TerminalPrefsView }>(`/terminal/launchers/${enc(l.id)}`, {
-      name: l.name, host: l.host, dir: l.dir ?? '', command: l.command ?? '', guard: l.guard ?? null, kind: l.kind ?? '', run: l.run ?? null,
+      name: l.name, host: l.host, dir: l.dir ?? '', kind: l.kind ?? '', run: l.run ?? null,
     })),
   /** 删除一条预设；它已经不在了（别处删过）服务端回 404 launcher_not_found。 */
   deleteLauncher: (id: string) => call(api.delete<{ prefs: TerminalPrefsView }>(`/terminal/launchers/${enc(id)}`)),
@@ -1248,17 +1134,6 @@ export const terminalApi = {
    * 上一次还没结束 409 run_active，预设满了 409 launcher_limit，其余前置条件不满足回 409/400 + 可读原因，不会留下半成品预设。
    */
   sessionEnable: (body: SessionEnableRequest) => call(api.post<SessionEnableResult>('/terminal/session-enable', body)),
-
-  /** 配置了守护的预设现在各是什么状态（登录即可读）。旧版 Hub 没有这个接口（404）。 */
-  guard: () => call(api.get<GuardView>('/terminal/guard')),
-  /**
-   * 生成并登记一次唤醒，返回要执行的计划（要求刚刚解锁——它会把一句话输入到会话里，等于人在键盘上敲）。
-   * mode 缺省由服务端按会话是否还活着自动选；服务端不会自己执行计划。
-   */
-  wakeGuard: (id: string, mode?: 'type' | 'relaunch' | 'headless') =>
-    call(api.post<{ plan: GuardWakePlan }>(`/terminal/guard/${enc(id)}/wake`, mode ? { mode } : {})),
-  setGuardPermit: (id: string, permit: 0 | 1) =>
-    call(api.put<{ permit: unknown }>(`/terminal/launchers/${enc(id)}/guard/permit`, { permit })),
 
   unlock: (password: string) => call(api.post<UnlockResponse>('/terminal/unlock', { password })),
   lock: () => call(api.post<{ ok: boolean }>('/terminal/lock')),
@@ -1317,7 +1192,7 @@ export const terminalApi = {
   sessions: (code: string) => call(api.get<{ online: boolean; sessions: SessionInfo[] }>(`/terminal/hosts/${enc(code)}/sessions`)),
   openSession: (
     code: string,
-    body: { name?: string; rows?: number; cols?: number; incognito?: boolean; idle_seconds?: number; cwd?: string; ssh_target?: string; compact?: boolean },
+    body: { name?: string; rows?: number; cols?: number; incognito?: boolean; idle_seconds?: number; cwd?: string; ssh_target?: string },
     // 经网关打开 SSH 会话要等网关拨号 + 认证，比本机 shell 慢得多。
   ) => call(api.post<{ session: SessionInfo }>(`/terminal/hosts/${enc(code)}/sessions`, body, body.ssh_target ? { timeout: SSH_TIMEOUT_MS } : undefined)),
   /** 修改主机默认的会话生命周期（0 = 空闲不回收）；只影响没有单独设置的会话。 */

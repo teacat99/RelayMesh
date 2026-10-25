@@ -68,7 +68,7 @@ func newTerminalHub(cfg *config.Config, st *store.Store, auth *AuthHandler) (*te
 		RecordSessionMB:     cfg.TerminalRecordSessionMB,
 		RecordHostMB:        cfg.TerminalRecordHostMB,
 
-		// 仅供实验与端到端测试缩短等待（生产不设）：守护 / 自动续跑的检查间隔、自动续跑的退避与「续跑成功」的判定时长。
+		// 仅供实验与端到端测试缩短等待（生产不设）：自动续跑的检查间隔、自动续跑的退避与「续跑成功」的判定时长。
 		GuardTickEvery:    time.Duration(max(cfg.TerminalGuardTickSec, 0)) * time.Second,
 		AutoResumeBackoff: terminal.ParseAutoResumeBackoff(cfg.TerminalAutoResumeBackoffSec),
 		AutoResumeOK:      time.Duration(max(cfg.TerminalAutoResumeOKSec, 0)) * time.Second,

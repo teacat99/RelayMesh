@@ -19,6 +19,20 @@ export function replyHash(sessionId: string): string {
   return m ? m[1].toLowerCase() : ''
 }
 
+/**
+ * 一批会话按短哈希建的索引（正文里的 sess-xxxxxxxx 引用靠它解析）：同一个哈希出现多次时后面的覆盖前面的；没有哈希的行不进索引。
+ * 性能（#186 C2a）：它要扫整张会话表，所以只能在 store 里建一份共用，不能在每段 Markdown 的 useLinkRefs 实例里各建一份——
+ * 长会话里有几百段 Markdown、几百行，各建一份是几万次 replyHash + Map.set，生产实测占 5～6 秒打开过程的约一成。
+ */
+export function buildSessionHashIndex<T extends { session_id: string }>(rows: readonly T[]): Map<string, T> {
+  const map = new Map<string, T>()
+  for (const row of rows) {
+    const hash = replyHash(row.session_id)
+    if (hash) map.set(hash, row)
+  }
+  return map
+}
+
 /** 「【回复 9f02517c】」；会话编号没有可用的哈希时返回空串（界面据此不显示引用按钮）。 */
 export function replyRefToken(sessionId: string): string {
   const hash = replyHash(sessionId)
